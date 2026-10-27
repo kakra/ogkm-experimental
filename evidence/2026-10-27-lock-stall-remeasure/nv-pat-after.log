@@ -1,0 +1,206 @@
+23:31:58 free 2094 us (nv_free_queue)
+23:33:11 free 2225 us (nv_free_queue)
+23:35:59 free 2309 us (nv_free_queue)
+23:56:10 free 2831 us (nv_free_queue)
+23:56:10 free 2103 us (nv_free_queue)
+23:56:12 free 2144 us (nv_free_queue)
+23:56:12 free 2439 us (nv_free_queue)
+23:56:14 free 2139 us (nv_free_queue)
+23:56:23 free 2490 us (nv_free_queue)
+23:56:24 free 2763 us (nv_free_queue)
+23:56:25 free 2710 us (nv_free_queue)
+23:56:25 free 2030 us (nv_free_queue)
+23:56:25 free 2506 us (nv_free_queue)
+23:56:26 free 2367 us (nv_free_queue)
+23:56:31 free 2905 us (nv_free_queue)
+23:56:35 free 2631 us (nv_free_queue)
+23:56:35 free 2493 us (nv_free_queue)
+23:56:35 free 2769 us (nv_free_queue)
+23:56:38 free 2208 us (nv_free_queue)
+23:56:39 free 2380 us (nv_free_queue)
+23:56:39 free 2466 us (nv_free_queue)
+23:56:40 free 2390 us (nv_free_queue)
+23:56:40 free 2614 us (nv_free_queue)
+23:56:45 free 2982 us (nv_free_queue)
+23:56:47 free 2266 us (nv_free_queue)
+23:56:53 free 2619 us (nv_free_queue)
+23:56:53 free 2559 us (nv_free_queue)
+23:56:54 free 2283 us (nv_free_queue)
+23:56:54 free 2224 us (nv_free_queue)
+23:56:55 free 2226 us (nv_free_queue)
+23:56:55 free 2083 us (nv_free_queue)
+23:56:55 free 2101 us (nv_free_queue)
+23:56:55 free 2146 us (nv_free_queue)
+23:56:56 free 2273 us (nv_free_queue)
+23:56:57 free 2847 us (nv_free_queue)
+23:57:01 free 2268 us (nv_free_queue)
+23:57:06 free 2379 us (nv_free_queue)
+23:57:07 free 2086 us (nv_free_queue)
+23:57:09 free 2278 us (nv_free_queue)
+23:57:09 free 2100 us (nv_free_queue)
+23:57:17 free 2183 us (nv_free_queue)
+23:57:18 free 2425 us (nv_free_queue)
+23:57:18 free 2141 us (nv_free_queue)
+23:57:24 free 2002 us (nv_free_queue)
+23:57:25 free 3108 us (nv_free_queue)
+23:57:27 free 2408 us (nv_free_queue)
+23:57:27 free 2237 us (nv_free_queue)
+23:57:31 free 2088 us (nv_free_queue)
+23:57:42 free 5091 us (nv_free_queue)
+23:57:44 free 2316 us (nv_free_queue)
+23:57:49 free 2315 us (nv_free_queue)
+23:57:49 free 2305 us (nv_free_queue)
+23:58:39 free 2169 us (nv_free_queue)
+00:01:05 free 3422 us (nv_free_queue)
+00:01:21 free 3425 us (nv_free_queue)
+00:01:33 free 2345 us (nv_free_queue)
+00:01:35 free 4355 us (nv_free_queue)
+00:02:05 free 4176 us (nv_free_queue)
+00:02:21 free 3097 us (nv_free_queue)
+00:12:55 free 2301 us (nv_free_queue)
+00:21:12 free 2050 us (nv_free_queue)
+00:25:45 free 2035 us (nv_free_queue)
+00:27:16 free 2090 us (nv_free_queue)
+01:07:47 free 2971 us (nv_free_queue)
+01:42:21 free 2169 us (nv_free_queue)
+01:43:21 free 3293 us (nv_free_queue)
+01:43:21 free 3513 us (nv_free_queue)
+01:44:21 free 3037 us (nv_free_queue)
+01:44:21 free 2793 us (nv_free_queue)
+01:45:21 free 3571 us (nv_free_queue)
+01:45:21 free 3327 us (nv_free_queue)
+01:45:23 free 3113 us (nv_free_queue)
+01:46:21 free 4076 us (nv_free_queue)
+01:47:21 free 3330 us (nv_free_queue)
+01:47:21 free 3826 us (nv_free_queue)
+01:48:21 free 2765 us (nv_free_queue)
+01:48:21 free 2584 us (nv_free_queue)
+01:48:23 free 2722 us (nv_free_queue)
+01:49:21 free 3153 us (nv_free_queue)
+01:50:21 free 2803 us (nv_free_queue)
+01:50:21 free 2806 us (nv_free_queue)
+01:51:21 free 3512 us (nv_free_queue)
+01:51:21 free 3162 us (nv_free_queue)
+01:52:21 free 2751 us (nv_free_queue)
+01:52:21 free 2450 us (nv_free_queue)
+01:52:23 free 2138 us (nv_free_queue)
+01:53:21 free 2374 us (nv_free_queue)
+01:54:21 free 2743 us (nv_free_queue)
+01:54:21 free 3720 us (nv_free_queue)
+01:55:21 free 2918 us (nv_free_queue)
+01:55:21 free 3710 us (nv_free_queue)
+01:56:21 free 2630 us (nv_free_queue)
+01:56:21 free 2253 us (nv_free_queue)
+01:56:23 free 3193 us (nv_free_queue)
+01:57:21 free 2878 us (nv_free_queue)
+01:58:21 free 2507 us (nv_free_queue)
+01:58:21 free 2331 us (nv_free_queue)
+01:59:21 free 3719 us (nv_free_queue)
+01:59:21 free 3742 us (nv_free_queue)
+02:00:21 free 2609 us (nv_free_queue)
+02:00:21 free 2318 us (nv_free_queue)
+02:00:23 free 2853 us (nv_free_queue)
+02:01:21 free 3277 us (nv_free_queue)
+02:02:21 free 2428 us (nv_free_queue)
+02:02:21 free 2763 us (nv_free_queue)
+02:02:25 free 3017 us (nv_free_queue)
+02:02:25 free 2931 us (nv_free_queue)
+02:03:21 free 3835 us (nv_free_queue)
+02:03:21 free 3174 us (nv_free_queue)
+02:03:23 free 3251 us (nv_free_queue)
+02:04:21 free 4762 us (nv_free_queue)
+02:05:21 free 4945 us (nv_free_queue)
+02:05:21 free 3577 us (nv_free_queue)
+02:06:21 free 6271 us (nv_free_queue)
+02:06:21 free 3610 us (nv_free_queue)
+02:06:30 free 2277 us (nv_free_queue)
+02:07:21 free 3424 us (nv_free_queue)
+02:07:21 free 2755 us (nv_free_queue)
+02:08:21 free 3898 us (nv_free_queue)
+02:08:21 free 3062 us (nv_free_queue)
+02:09:21 free 3744 us (nv_free_queue)
+02:09:21 free 4072 us (nv_free_queue)
+02:10:21 free 3787 us (nv_free_queue)
+02:10:21 free 4291 us (nv_free_queue)
+02:11:21 free 4477 us (nv_free_queue)
+02:11:21 free 2964 us (nv_free_queue)
+02:11:23 free 3134 us (nv_free_queue)
+02:12:21 free 3461 us (nv_free_queue)
+02:13:21 free 3642 us (nv_free_queue)
+02:13:21 free 3205 us (nv_free_queue)
+02:14:21 free 4715 us (nv_free_queue)
+02:14:21 free 3326 us (nv_free_queue)
+02:14:52 free 4719 us (nv_free_queue)
+02:14:52 free 3225 us (nv_free_queue)
+02:14:52 free 3322 us (nv_free_queue)
+02:14:53 free 3177 us (nv_free_queue)
+
+
+@alloc_us:
+[0]                  212 |@@@@@@@                                             |
+[1]                  175 |@@@@@@                                              |
+[2, 4)               169 |@@@@@                                               |
+[4, 8)                45 |@                                                   |
+[8, 16)               29 |@                                                   |
+[16, 32)             107 |@@@                                                 |
+[32, 64)             180 |@@@@@@                                              |
+[64, 128)            229 |@@@@@@@@                                            |
+[128, 256)          1209 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@          |
+[256, 512)          1276 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@        |
+[512, 1K)           1479 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1K, 2K)             504 |@@@@@@@@@@@@@@@@@                                   |
+[2K, 4K)             361 |@@@@@@@@@@@@                                        |
+[4K, 8K)             239 |@@@@@@@@                                            |
+[8K, 16K)            152 |@@@@@                                               |
+[16K, 32K)             3 |                                                    |
+[32K, 64K)            17 |                                                    |
+[64K, 128K)            0 |                                                    |
+[128K, 256K)           0 |                                                    |
+[256K, 512K)           1 |                                                    |
+
+@free_us:
+[0]                  239 |@@@@@@@                                             |
+[1]                  121 |@@@                                                 |
+[2, 4)                95 |@@@                                                 |
+[4, 8)                97 |@@@                                                 |
+[8, 16)              226 |@@@@@@@                                             |
+[16, 32)             259 |@@@@@@@@                                            |
+[32, 64)              70 |@@                                                  |
+[64, 128)            417 |@@@@@@@@@@@@@                                       |
+[128, 256)          1584 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@  |
+[256, 512)          1638 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)            881 |@@@@@@@@@@@@@@@@@@@@@@@@@@@                         |
+[1K, 2K)             160 |@@@@@                                               |
+[2K, 4K)             123 |@@@                                                 |
+[4K, 8K)              10 |                                                    |
+
+@uc_us:
+[4, 8)                11 |                                                    |
+[8, 16)               15 |                                                    |
+[16, 32)              80 |@@                                                  |
+[32, 64)             146 |@@@@                                                |
+[64, 128)            223 |@@@@@@@                                             |
+[128, 256)          1588 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[256, 512)          1178 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@              |
+[512, 1K)           1448 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     |
+[1K, 2K)             261 |@@@@@@@@                                            |
+[2K, 4K)             263 |@@@@@@@@                                            |
+[4K, 8K)             197 |@@@@@@                                              |
+[8K, 16K)            128 |@@@@                                                |
+[16K, 32K)             2 |                                                    |
+[32K, 64K)            17 |                                                    |
+
+@wb_comm[nv_free_queue]: 5153
+@wb_us:
+[4, 8)                24 |                                                    |
+[8, 16)              143 |@@@@                                                |
+[16, 32)             123 |@@@                                                 |
+[32, 64)              89 |@@                                                  |
+[64, 128)            568 |@@@@@@@@@@@@@@@@                                    |
+[128, 256)          1613 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     |
+[256, 512)          1750 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)            605 |@@@@@@@@@@@@@@@@@                                   |
+[1K, 2K)             140 |@@@@                                                |
+[2K, 4K)              92 |@@                                                  |
+[4K, 8K)               6 |                                                    |
+
