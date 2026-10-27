@@ -1,0 +1,78 @@
+name: Bug report
+description: Something goes wrong with a series from this repository applied.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. Please check first whether the problem also happens
+        with the unpatched modules of the same driver release; if it does, it
+        belongs upstream.
+
+        This is not a support channel. Reports help improve the patches, but
+        there is no help with installing them or with recovering a system
+        (see the disclaimer in the README).
+  - type: input
+    id: release
+    attributes:
+      label: Driver release and series
+      description: Output of `cat /sys/module/nvidia/version`, and the series you applied (fork branch commit, or `patches/<release>/` at a commit of this repository).
+      placeholder: 615.78.08, ogkm/615.78.08 at 706df0ca
+    validations:
+      required: true
+  - type: dropdown
+    id: stock
+    attributes:
+      label: Does it also happen with the unpatched modules?
+      options:
+        - "No, only with the series"
+        - "Not tested"
+        - "Yes, also unpatched (then please report upstream as well)"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: GPU, kernel, distribution
+      placeholder: RTX 3080 Ti (GA102), 6.18.58, Gentoo
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: Display server or compositor, displays
+      placeholder: KWin Wayland 6.8, 2x 4K DP + HDMI TV with VRR
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: Symptom and when it started. Include times, they help matching the logs.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Application or game, launch options and environment variables (e.g. DXVK_CONFIG, VKD3D_CONFIG), uptime when it happened, what else was running.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Kernel log
+      description: |
+        `journalctl -k -b` around the event, or at least all `NVRM`, `nvidia`, `Xid` and `x86/PAT` lines.
+        Remove host names, serial numbers and other private data first (`tools/sanitize-log.sh` helps).
+      render: text
+  - type: textarea
+    id: memory
+    attributes:
+      label: Memory state (for allocation failures and stutter)
+      description: "`/proc/buddyinfo`, and as root `/proc/pagetypeinfo`, taken right after the event."
+      render: text
+  - type: textarea
+    id: kernel-cmdline
+    attributes:
+      label: Module options and kernel command line
+      description: "`cat /proc/cmdline`, `grep -r . /etc/modprobe.d/ | grep -i nv`"
+      render: text
