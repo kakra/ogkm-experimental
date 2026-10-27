@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Problem with the unpatched NVIDIA driver
+    url: https://github.com/NVIDIA/open-gpu-kernel-modules/issues
+    about: If the problem also happens with the stock open kernel modules of the same release, report it upstream.
