@@ -1,0 +1,38 @@
+name: Evidence or measurement
+description: Traces, logs or measurements for a known problem or analysis.
+labels: [evidence]
+body:
+  - type: input
+    id: topic
+    attributes:
+      label: Related analysis or issue
+      placeholder: analysis/2026-10-26-lock-stalls.md
+    validations:
+      required: true
+  - type: input
+    id: release
+    attributes:
+      label: Driver release and series
+      placeholder: 615.78.08 stock / ogkm/615.78.08 at 706df0ca
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: GPU, kernel, distribution, uptime at capture
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps and capture commands
+      description: Exact steps, so the measurement can be repeated (e.g. `sudo bpftrace -o out.txt tools/trace/nv-pat-latency.bt`).
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Result
+      description: Attach larger files (compressed). Remove private data first (`tools/sanitize-log.sh`).
+    validations:
+      required: true
