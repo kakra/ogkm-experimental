@@ -1,0 +1,616 @@
+== date
+2026-10-23T04:02:22+02:00
+== uname
+Linux host 6.18.57-gentoo #1 SMP PREEMPT Fri Oct 16 01:14:14 CEST 2026 x86_64 12th Gen Intel(R) Core(TM) i7-12700K GenuineIntel GNU/Linux
+== uptime
+ 04:02:22 up 7 days,  1:23,  1 user,  load average: 31,80, 14,59, 8,51
+609788.12 11411224.59
+== cmdline
+rd.md.uuid=REDACTED root=LABEL=system ro rootfstype=btrfs rootflags=noatime,compress=zstd,nossd mitigations=off quiet splash nvidia-drm.modeset=1 nvidia-drm.fbdev=1 intel_iommu=on iommu=pt btrfs.read_policy=queue-adaptive cgroup.memory=nokmem systemd.machine_id=REDACTED
+== nvidia
+615.78.08
+4200B1C66D4D12038311105
+4200B1C66D4D12038311105
+== sched_ext
+enabled
+lavd_1.1.3_x86_64_unknown_linux_gnu
+3589 /usr/bin/scx_loader
+3945 scx_lavd --autopilot --pinned-slice-us 500
+4270 [scx_enable_helper]
+== config
+CONFIG_ZEN_INTERACTIVE=y
+CONFIG_PREEMPT_BUILD=y
+CONFIG_PREEMPT_LAZY=y
+CONFIG_PREEMPT_COUNT=y
+CONFIG_PREEMPTION=y
+CONFIG_HZ=300
+CONFIG_PREEMPT_NOTIFIERS=y
+CONFIG_ZSWAP=y
+CONFIG_ZSWAP_DEFAULT_ON=y
+CONFIG_ZSWAP_SHRINKER_DEFAULT_ON=y
+CONFIG_ZSWAP_COMPRESSOR_DEFAULT_LZ4=y
+CONFIG_ZSWAP_COMPRESSOR_DEFAULT="lz4"
+CONFIG_TRANSPARENT_HUGEPAGE=y
+CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y
+CONFIG_LRU_GEN=y
+CONFIG_LRU_GEN_ENABLED=y
+CONFIG_LRU_GEN_WALKS_MMU=y
+== meminfo
+MemTotal:       32623912 kB
+MemFree:         1520324 kB
+MemAvailable:   13307020 kB
+Buffers:             268 kB
+Cached:         14363428 kB
+SwapCached:      1246536 kB
+Active:          8468020 kB
+Inactive:       15640284 kB
+Active(anon):    6380844 kB
+Inactive(anon):  3818648 kB
+Active(file):    2087176 kB
+Inactive(file): 11821636 kB
+Unevictable:     1059936 kB
+Mlocked:         1049400 kB
+SwapTotal:      33554424 kB
+SwapFree:       23280664 kB
+Zswap:           1377784 kB
+Zswapped:        2405272 kB
+Dirty:            140604 kB
+Writeback:          3292 kB
+AnonPages:      10678212 kB
+Mapped:          2074776 kB
+Shmem:            451524 kB
+KReclaimable:     991540 kB
+Slab:            1889080 kB
+SReclaimable:     991540 kB
+SUnreclaim:       897540 kB
+KernelStack:       70672 kB
+PageTables:       256296 kB
+SecPageTables:      2080 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:    49866380 kB
+Committed_AS:   77556196 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:      245400 kB
+VmallocChunk:          0 kB
+Percpu:            37056 kB
+AnonHugePages:   1048576 kB
+ShmemHugePages:    57344 kB
+ShmemPmdMapped:    30720 kB
+FileHugePages:      6144 kB
+FilePmdMapped:      6144 kB
+Balloon:               0 kB
+DirectMap4k:    31312352 kB
+DirectMap2M:     1998848 kB
+DirectMap1G:     1048576 kB
+== buddyinfo
+Node 0, zone      DMA      1      0      0      0      0      0      0      0      1      1      3 
+Node 0, zone    DMA32   2381   1642   1642   1295    711    241     31      0      0      0      0 
+Node 0, zone   Normal  14076  37339  22233   8440   3852    662     63      0      0      0      0 
+== pagetypeinfo
+cat: /proc/pagetypeinfo: Keine Berechtigung
+== vmstat
+nr_free_pages 378898
+nr_free_pages_blocks 3584
+nr_zone_inactive_anon 954662
+nr_zone_active_anon 1596594
+nr_zone_inactive_file 2955409
+nr_zone_active_file 521794
+nr_zone_unevictable 264984
+nr_zone_write_pending 35974
+nr_mlock 262350
+nr_zspages 344453
+nr_free_cma 0
+nr_inactive_anon 954662
+nr_active_anon 1596576
+nr_inactive_file 2955409
+nr_active_file 521794
+nr_unevictable 264984
+nr_slab_reclaimable 247885
+nr_slab_unreclaimable 224385
+nr_isolated_anon 0
+nr_isolated_file 0
+workingset_nodes 268968
+workingset_refault_anon 89429892
+workingset_refault_file 207229462
+workingset_activate_anon 24409739
+workingset_activate_file 9758137
+workingset_restore_anon 7520440
+workingset_restore_file 6300995
+workingset_nodereclaim 13622629
+nr_anon_pages 2670645
+nr_mapped 518694
+nr_file_pages 3902558
+nr_dirty 35151
+nr_writeback 823
+nr_shmem 112881
+nr_shmem_hugepages 28
+nr_shmem_pmdmapped 15
+nr_file_hugepages 3
+nr_file_pmdmapped 3
+nr_anon_transparent_hugepages 512
+nr_vmscan_write 102990615
+nr_vmscan_immediate_reclaim 4234556
+nr_dirtied 452121855
+nr_written 446508569
+nr_throttled_written 0
+nr_kernel_misc_reclaimable 0
+nr_foll_pin_acquired 59976795
+nr_foll_pin_released 59927972
+nr_kernel_stack 70672
+nr_page_table_pages 64165
+nr_sec_page_table_pages 520
+nr_iommu_pages 520
+nr_swapcached 311634
+pgdemote_kswapd 0
+pgdemote_direct 0
+pgdemote_khugepaged 0
+pgdemote_proactive 0
+nr_balloon_pages 0
+nr_kernel_file_pages 1630777
+nr_dirty_threshold 262144
+nr_dirty_background_threshold 65536
+nr_memmap_pages 0
+nr_memmap_boot_pages 130560
+pgpgin 2010356534
+pgpgout 2569518191
+pswpin 1883622
+pswpout 3779472
+pgalloc_dma 0
+pgalloc_dma32 415420077
+pgalloc_normal 9843215228
+pgalloc_movable 0
+allocstall_dma 0
+allocstall_dma32 0
+allocstall_normal 97488
+allocstall_movable 560380
+pgskip_dma 0
+pgskip_dma32 2786692
+pgskip_normal 3716254
+pgskip_movable 0
+pgfree 10505123601
+pgactivate 68763962
+pgdeactivate 1210
+pglazyfree 0
+pgfault 6832343639
+pgmajfault 89290249
+pglazyfreed 0
+pgrefill 473169506
+pgreuse 148639843
+pgsteal_kswapd 806993811
+pgsteal_direct 15539748
+pgsteal_khugepaged 255252
+pgsteal_proactive 0
+pgscan_kswapd 839851069
+pgscan_direct 22474333
+pgscan_khugepaged 263655
+pgscan_proactive 0
+pgscan_direct_throttle 9
+pgscan_anon 153226062
+pgscan_file 802746498
+pgsteal_anon 105433542
+pgsteal_file 784643934
+pginodesteal 240365
+slabs_scanned 1093845350
+kswapd_inodesteal 17294009
+kswapd_low_wmark_hit_quickly 972574
+kswapd_high_wmark_hit_quickly 6366667
+pageoutrun 7449674
+pgrotated 6840320
+drop_pagecache 0
+drop_slab 0
+oom_kill 5
+pgmigrate_success 236477051
+pgmigrate_fail 51811244
+thp_migration_success 0
+thp_migration_fail 0
+thp_migration_split 0
+compact_migrate_scanned 17748651893
+compact_free_scanned 11951661272
+compact_isolated 538256045
+compact_stall 784514
+compact_fail 761308
+compact_success 23206
+compact_daemon_wake 1030354
+compact_daemon_migrate_scanned 2722417862
+compact_daemon_free_scanned 10442571156
+unevictable_pgs_culled 483166
+unevictable_pgs_scanned 70346
+unevictable_pgs_rescued 152791
+unevictable_pgs_mlocked 344797
+unevictable_pgs_munlocked 81135
+unevictable_pgs_cleared 0
+unevictable_pgs_stranded 1312
+thp_fault_alloc 514
+thp_fault_fallback 0
+thp_fault_fallback_charge 0
+thp_collapse_alloc 227
+thp_collapse_alloc_failed 2244
+thp_file_alloc 36756
+thp_file_fallback 354444
+thp_file_fallback_charge 0
+thp_file_mapped 74237
+thp_split_page 15
+thp_split_page_failed 0
+thp_deferred_split_page 0
+thp_underused_split_page 0
+thp_split_pmd 405
+thp_scan_exceed_none_pte 10159
+thp_scan_exceed_swap_pte 25449
+thp_scan_exceed_share_pte 0
+thp_split_pud 0
+thp_zero_page_alloc 1
+thp_zero_page_alloc_failed 0
+thp_swpout 4
+thp_swpout_fallback 0
+swap_ra 0
+swap_ra_hit 70
+swpin_zero 480905
+swpout_zero 2581135
+ksm_swpin_copy 436464
+cow_ksm 18281736
+zswpin 85116933
+zswpout 98519866
+zswpwb 1977205
+direct_map_level2_splits 15277
+direct_map_level3_splits 28
+direct_map_level2_collapses 0
+direct_map_level3_collapses 0
+nr_unstable 0
+== psi
+/proc/pressure/cpu
+some avg10=29.42 avg60=20.13 avg300=7.06 total=10138859848
+full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+/proc/pressure/io
+some avg10=15.96 avg60=24.21 avg300=31.97 total=29307424892
+full avg10=0.07 avg60=9.13 avg300=22.75 total=26138666547
+/proc/pressure/memory
+some avg10=0.23 avg60=0.23 avg300=0.40 total=581096245
+full avg10=0.03 avg60=0.10 avg300=0.35 total=565501744
+== vm sysctls
+admin_reserve_kbytes=8192 
+anon_min_ratio=15 
+clean_low_ratio=0 
+clean_min_ratio=15 
+compaction_proactiveness=40 
+compact_unevictable_allowed=1 
+defrag_mode=0 
+dirty_background_bytes=268435456 
+dirty_background_ratio=0 
+dirty_bytes=1073741824 
+dirty_expire_centisecs=3000 
+dirty_ratio=0 
+dirtytime_expire_seconds=43200 
+dirty_writeback_centisecs=500 
+extfrag_threshold=500 
+laptop_mode=0 
+legacy_va_layout=0 
+lowmem_reserve_ratio=256 256 32 0 
+max_map_count=2147483642 
+memfd_noexec=0 
+min_free_kbytes=262144 
+mmap_min_addr=65536 
+oom_dump_tasks=1 
+oom_kill_allocating_task=0 
+overcommit_kbytes=0 
+overcommit_memory=0 
+overcommit_ratio=50 
+page-cluster=0 
+page_lock_unfairness=5 
+panic_on_oom=0 
+percpu_pagelist_high_fraction=0 
+stat_interval=1 
+swappiness=60 
+unprivileged_userfaultfd=0 
+user_reserve_kbytes=131072 
+vfs_cache_pressure=120 
+vfs_cache_pressure_denom=100 
+watermark_boost_factor=15000 
+watermark_scale_factor=200 
+workingset_protection=1 
+== thp
+/sys/kernel/mm/transparent_hugepage/enabled: always [madvise] never
+/sys/kernel/mm/transparent_hugepage/defrag: always defer [defer+madvise] madvise never
+/sys/kernel/mm/transparent_hugepage/shmem_enabled: always within_size [advise] never deny force
+/sys/kernel/mm/transparent_hugepage/hugepages-1024kB/enabled: always inherit madvise [never]
+/sys/kernel/mm/transparent_hugepage/hugepages-128kB/enabled: always inherit madvise [never]
+/sys/kernel/mm/transparent_hugepage/hugepages-16kB/enabled: always inherit madvise [never]
+/sys/kernel/mm/transparent_hugepage/hugepages-2048kB/enabled: always [inherit] madvise never
+/sys/kernel/mm/transparent_hugepage/hugepages-256kB/enabled: always inherit madvise [never]
+/sys/kernel/mm/transparent_hugepage/hugepages-32kB/enabled: always inherit madvise [never]
+/sys/kernel/mm/transparent_hugepage/hugepages-512kB/enabled: always inherit madvise [never]
+/sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled: always inherit madvise [never]
+== thp stats
+/sys/kernel/mm/transparent_hugepage/hugepages-1024kB/stats
+anon_fault_alloc:0
+anon_fault_fallback:0
+anon_fault_fallback_charge:0
+nr_anon:0
+nr_anon_partially_mapped:0
+shmem_alloc:1989
+shmem_fallback:7400
+shmem_fallback_charge:0
+split:1873
+split_deferred:0
+split_failed:2062
+swpin:0
+swpin_fallback:0
+swpin_fallback_charge:0
+swpout:0
+swpout_fallback:0
+zswpout:3
+/sys/kernel/mm/transparent_hugepage/hugepages-128kB/stats
+anon_fault_alloc:0
+anon_fault_fallback:0
+anon_fault_fallback_charge:0
+nr_anon:0
+nr_anon_partially_mapped:0
+shmem_alloc:17115
+shmem_fallback:2780
+shmem_fallback_charge:0
+split:301525
+split_deferred:0
+split_failed:19965
+swpin:0
+swpin_fallback:0
+swpin_fallback_charge:0
+swpout:0
+swpout_fallback:0
+zswpout:7
+/sys/kernel/mm/transparent_hugepage/hugepages-16kB/stats
+anon_fault_alloc:0
+anon_fault_fallback:0
+anon_fault_fallback_charge:0
+nr_anon:0
+nr_anon_partially_mapped:0
+shmem_alloc:42267
+shmem_fallback:884
+shmem_fallback_charge:0
+split:39217
+split_deferred:0
+split_failed:14075
+swpin:0
+swpin_fallback:0
+swpin_fallback_charge:0
+swpout:0
+swpout_fallback:0
+zswpout:24
+/sys/kernel/mm/transparent_hugepage/hugepages-2048kB/stats
+anon_fault_alloc:514
+anon_fault_fallback:0
+anon_fault_fallback_charge:0
+nr_anon:512
+nr_anon_partially_mapped:0
+shmem_alloc:36756
+shmem_fallback:354444
+shmem_fallback_charge:0
+split:15
+split_deferred:0
+split_failed:0
+swpin:0
+swpin_fallback:0
+swpin_fallback_charge:0
+swpout:4
+swpout_fallback:0
+zswpout:54
+/sys/kernel/mm/transparent_hugepage/hugepages-256kB/stats
+anon_fault_alloc:0
+anon_fault_fallback:0
+anon_fault_fallback_charge:0
+nr_anon:0
+nr_anon_partially_mapped:0
+shmem_alloc:9762
+shmem_fallback:5586
+shmem_fallback_charge:0
+split:54436
+split_deferred:0
+split_failed:25799
+swpin:0
+swpin_fallback:0
+swpin_fallback_charge:0
+swpout:0
+swpout_fallback:0
+zswpout:5
+/sys/kernel/mm/transparent_hugepage/hugepages-32kB/stats
+anon_fault_alloc:0
+anon_fault_fallback:0
+anon_fault_fallback_charge:0
+nr_anon:0
+nr_anon_partially_mapped:0
+shmem_alloc:34906
+shmem_fallback:458
+shmem_fallback_charge:0
+split:33041
+split_deferred:0
+split_failed:22285
+swpin:0
+swpin_fallback:0
+swpin_fallback_charge:0
+swpout:0
+swpout_fallback:0
+zswpout:35
+/sys/kernel/mm/transparent_hugepage/hugepages-512kB/stats
+anon_fault_alloc:0
+anon_fault_fallback:0
+anon_fault_fallback_charge:0
+nr_anon:0
+nr_anon_partially_mapped:0
+shmem_alloc:5625
+shmem_fallback:7565
+shmem_fallback_charge:0
+split:11220
+split_deferred:0
+split_failed:40337
+swpin:0
+swpin_fallback:0
+swpin_fallback_charge:0
+swpout:0
+swpout_fallback:0
+zswpout:10
+/sys/kernel/mm/transparent_hugepage/hugepages-64kB/stats
+anon_fault_alloc:0
+anon_fault_fallback:0
+anon_fault_fallback_charge:0
+nr_anon:0
+nr_anon_partially_mapped:0
+shmem_alloc:23590
+shmem_fallback:250
+shmem_fallback_charge:0
+split:56702
+split_deferred:0
+split_failed:5099
+swpin:0
+swpin_fallback:0
+swpin_fallback_charge:0
+swpout:0
+swpout_fallback:0
+zswpout:13
+/sys/kernel/mm/transparent_hugepage/hugepages-8kB/stats
+shmem_alloc:59402
+shmem_fallback:1792
+shmem_fallback_charge:0
+split:10384
+split_failed:49943
+swpin:0
+swpin_fallback:0
+swpin_fallback_charge:0
+swpout:0
+swpout_fallback:0
+zswpout:56
+== zswap
+/sys/module/zswap/parameters/enabled:Y
+/sys/module/zswap/parameters/shrinker_enabled:Y
+/sys/module/zswap/parameters/max_pool_percent:20
+/sys/module/zswap/parameters/compressor:lz4
+/sys/module/zswap/parameters/accept_threshold_percent:90
+== bdi
+0:160 max_bytes=1073741824 strict=0
+0:234 max_bytes=1073741824 strict=0
+0:656 max_bytes=1073741824 strict=0
+0:658 max_bytes=1073741824 strict=0
+0:85 max_bytes=10737418 strict=1
+253:0 max_bytes=268435456 strict=0
+253:128 max_bytes=268435456 strict=0
+253:256 max_bytes=268435456 strict=0
+253:384 max_bytes=268435456 strict=0
+259:0 max_bytes=268435456 strict=0
+259:4 max_bytes=268435456 strict=0
+8:0 max_bytes=268435456 strict=1
+8:16 max_bytes=268435456 strict=0
+8:32 max_bytes=268435456 strict=0
+8:48 max_bytes=268435456 strict=0
+8:64 max_bytes=268435456 strict=0
+8:80 max_bytes=268435456 strict=1
+9:127 max_bytes=268435456 strict=0
+btrfs-1 max_bytes=268435456 strict=1
+== swap
+NAME           TYPE      SIZE USED PRIO
+/dev/nvme0n1p1 partition  16G 4,9G    5
+/dev/nvme1n1p1 partition  16G 4,9G    5
+              gesamt       benutzt     frei      gemns.  Puffer/Cache verfügbar
+Speicher:      31859       18565        1812         441       14964       13294
+Swap:          32767       10032       22735
+== chrome cgroup
+/user.slice/user-1000.slice/user@1000.service/app.slice/app-com.google.Chrome-1175596.scope
+ 3-04:08:29
+cpu: some avg10=0.00 avg60=0.00 avg300=0.00 total=149745263 full avg10=0.00 avg60=0.00 avg300=0.00 total=127550881 
+memory: some avg10=0.00 avg60=0.00 avg300=0.00 total=2930221 full avg10=0.00 avg60=0.00 avg300=0.00 total=2898454 
+io: some avg10=0.70 avg60=1.26 avg300=4.54 total=3193765651 full avg10=0.64 avg60=1.23 avg300=4.52 total=3183869887 
+anon 179052544
+file 281317376
+kernel 0
+kernel_stack 0
+pagetables 0
+sec_pagetables 0
+percpu 0
+sock 8192
+vmalloc 0
+shmem 8179712
+zswap 0
+zswapped 0
+file_mapped 108441600
+file_dirty 0
+file_writeback 0
+swapcached 12873728
+anon_thp 0
+file_thp 0
+shmem_thp 0
+inactive_anon 37089280
+active_anon 150167552
+inactive_file 221839360
+active_file 51302400
+unevictable 0
+slab_reclaimable 0
+slab_unreclaimable 0
+slab 0
+workingset_refault_anon 357447
+workingset_refault_file 1749496
+workingset_activate_anon 59709
+workingset_activate_file 496027
+workingset_restore_anon 29207
+workingset_restore_file 73793
+workingset_nodereclaim 0
+pgdemote_kswapd 0
+pgdemote_direct 0
+pgdemote_khugepaged 0
+pgdemote_proactive 0
+pgscan 3929213
+pgsteal 3617502
+pswpin 13287
+pswpout 46452
+pgscan_kswapd 3883017
+pgscan_direct 46193
+pgscan_khugepaged 3
+pgscan_proactive 0
+pgsteal_kswapd 3573744
+pgsteal_direct 43758
+pgsteal_khugepaged 0
+pgsteal_proactive 0
+pgfault 30255705
+pgmajfault 364654
+pgrefill 3701819
+pgactivate 204816
+pgdeactivate 0
+pglazyfree 0
+pglazyfreed 0
+swpin_zero 0
+swpout_zero 0
+zswpin 0
+zswpout 0
+zswpwb 0
+thp_fault_alloc 0
+thp_collapse_alloc 0
+thp_swpout 0
+thp_swpout_fallback 0
+swap=219209728 zswap=0
+== kwin cgroup
+cpu: some avg10=4.53 avg60=4.25 avg300=1.41 total=1513637552 full avg10=3.46 avg60=3.22 avg300=1.06 total=1488327875 
+memory: some avg10=0.00 avg60=0.00 avg300=0.00 total=129217 full avg10=0.00 avg60=0.00 avg300=0.00 total=129095 
+io: some avg10=0.00 avg60=0.00 avg300=0.00 total=13449102 full avg10=0.00 avg60=0.00 avg300=0.00 total=13402741 
+== irq threads
+    151  FF     50 irq/9-acpi
+    179  FF     50 irq/145-mei_me
+    227  FF     50 irq/16-processor_thermal_device_pci
+    470  FF     75 irq/174-nvidia
+== NVRM counts 7d
+    188 NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (X) returned from _memdescAllocInternal(pMemDesc) @ mem_desc
+    146 NVRM: GPU0 nvAssertFailedNoLog: Assertion failed: NV_OK == status @ gpu_vaspace.c:2080
+    120 NVRM: GPU0 nvAssertFailedNoLog: Assertion failed: NV_OK == status @ gpu_vaspace.c:4586
+    108 NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (X) returned from rmStatus @ system_mem.c:448
+    100 NVRM: nvAssertOkFailedNoLog: Assertion failed: Out of memory [NV_ERR_NO_MEMORY] (X) returned from pRmApi->Alloc(pRmApi, device->session->han
+     99 NVRM: nvCheckOkFailedNoLog: Check failed: Invalid argument to call [NV_ERR_INVALID_ARGUMENT] (XF) returned from _gvaspaceMappingInsert(pGVAS
+     99 NVRM: nvCheckFailedNoLog: Check failed: NV_OK == status @ virt_mem_allocator_gm107.c:2563
+     99 NVRM: nvCheckFailedNoLog: Check failed: 0 == (pMapNode->gpuMask & gpuMask) @ gpu_vaspace.c:4502
+     99 NVRM: dmaAllocMapping_GM107: can't update VA space for mapping @vaddr=X
+     80 NVRM: GPU0 _kgmmuClientShadowFaultBufferPagesAllocate: Allocation failed with big page size, retrying with default page size
+     26 NVRM: GPU0 nvAssertFailedNoLog: Assertion failed: pMapNode->node.keyStart <= vaLo && pMapNode->node.keyEnd >= vaHi @ gpu_vaspace.c:4594
+     11 NVRM: intermapRegisterDmaMapping: Failed to insert new mapping node for range 0xDEC5FC0000-0xDEC5FCFFFF!
+      9 NVRM: intermapRegisterDmaMapping: Failed to insert new mapping node for range 0xDEC5FA0000-0xDEC5FAFFFF!
+      8 NVRM: intermapRegisterDmaMapping: Failed to insert new mapping node for range 0xDEC5FB0000-0xDEC5FCFFFF!
+      7 NVRM: intermapRegisterDmaMapping: Failed to insert new mapping node for range 0xDEC5FB0000-0xDEC5FBFFFF!
+      6 NVRM: intermapRegisterDmaMapping: Failed to insert new mapping node for range 0xDE918A0000-0xDE918FFFFF!
+      5 NVRM: intermapRegisterDmaMapping: Failed to insert new mapping node for range 0xDE918D0000-0xDE918FFFFF!
+      4 NVRM: intermapRegisterDmaMapping: Failed to insert new mapping node for range 0xDE91880000-0xDE9189FFFF!
+      4 NVRM: intermapRegisterDmaMapping: Failed to insert new mapping node for range 0xDE91760000-0xDE9178FFFF!
+      3 NVRM: intermapRegisterDmaMapping: Failed to insert new mapping node for range 0xDE91870000-0xDE9189FFFF!
