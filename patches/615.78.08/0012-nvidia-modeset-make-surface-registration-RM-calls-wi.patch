@@ -1,0 +1,928 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sun, 18 Oct 2026 19:26:17 +0200
+Subject: [PATCH] nvidia-modeset: make surface registration RM calls without
+ nvkms_lock
+
+Registering a DRM framebuffer (NVKMS surface registration) dups the memory
+into the NVKMS RM client, queries it, allocates a context DMA and binds it
+to the core channel; unregistering frees the context DMA and the dup. All
+of it ran under the global nvkms_lock. These RM calls wait for the RM API
+lock whenever another RM client holds it (e.g. a CUDA context being created
+or destroyed for VA-API decode), measured up to ~4 ms per registration, and
+meanwhile the NVKMS kthread (vblank callbacks, flip completion events) and
+the compositor's commit thread wait for nvkms_lock even though they don't
+call into RM.
+
+For ioctls from kernel-space clients (nvidia-drm through KAPI), which hold
+the NVKMS PM lock across the ioctl and keep the device alive across their
+calls, drop nvkms_lock around those RM calls:
+
+- Registration reserves the RM handles under the lock, drops it for the
+  dup, GET_SURFACE_INFO, context DMA allocation and core channel bind, and
+  publishes the surface handle only after retaking the lock, so nothing can
+  see the surface half-initialised. If the core channel or all surface
+  descriptors were freed in the meantime (new surfaceDescGeneration), the
+  descriptors are allocated and bound again with the lock held.
+- Unregistration does everything else as before with the lock held and
+  hands the context DMA and memory handles to FreeSurfaceRmObjectsUnlocked(),
+  which frees them without the lock and releases the handles after
+  retaking it.
+
+Only used for the EVO 3 HALs (descriptors are plain context DMAs), without
+syncpts or SOC display, with lazy_ctxdma_bind, and for surfaces not imported
+by fd; everything else takes the old path.
+
+nvidia_modeset.unlocked_surface_rm=0 (module parameter, writable at
+runtime) restores the old behaviour.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../nvidia-modeset/nvidia-modeset-linux.c     |  22 ++
+ .../nvidia-modeset-os-interface.h             |   9 +
+ src/nvidia-modeset/include/nvkms-hal.h        |   1 +
+ src/nvidia-modeset/include/nvkms-rm.h         |  11 +
+ src/nvidia-modeset/include/nvkms-surface.h    |   9 +
+ src/nvidia-modeset/include/nvkms-types.h      |   8 +
+ .../include/nvidia-modeset-os-interface.h     |   9 +
+ src/nvidia-modeset/src/nvkms-evo.c            |   3 +
+ src/nvidia-modeset/src/nvkms-hal.c            |  11 +
+ src/nvidia-modeset/src/nvkms-rm.c             |  95 ++++-
+ src/nvidia-modeset/src/nvkms-surface.c        | 359 +++++++++++++++++-
+ src/nvidia-modeset/src/nvkms.c                |  34 +-
+ 12 files changed, 536 insertions(+), 35 deletions(-)
+
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+index 0bf0ae73..64869960 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+@@ -136,6 +136,13 @@ MODULE_PARM_DESC(lazy_gpu_map,
+ static bool lazy_gpu_map = true;
+ module_param_named(lazy_gpu_map, lazy_gpu_map, bool, 0644);
+ 
++MODULE_PARM_DESC(unlocked_surface_rm,
++                 "Make the RM calls of DRM framebuffer creation/destruction (NVKMS surface registration) "
++                 "without holding the global NVKMS lock, so they don't stall vblank and flip handling while "
++                 "they wait for RM.");
++static bool unlocked_surface_rm = true;
++module_param_named(unlocked_surface_rm, unlocked_surface_rm, bool, 0644);
++
+ MODULE_PARM_DESC(enhanced_pcon_support,
+                  "Enable enhanced display protocol converter features (e.g. VRR over active DP-HDMI converters)");
+ static bool enhanced_pcon_support = false;
+@@ -252,6 +259,11 @@ NvBool nvkms_lazy_gpu_map(void)
+     return READ_ONCE(lazy_gpu_map);
+ }
+ 
++NvBool nvkms_unlocked_surface_rm(void)
++{
++    return READ_ONCE(unlocked_surface_rm);
++}
++
+ NvBool nvkms_output_rounding_fix(void)
+ {
+     return output_rounding_fix;
+@@ -1679,6 +1691,16 @@ NvBool nvkms_ioctl_from_kapi
+  * APIs for locking.
+  *************************************************************************/
+ 
++void nvkms_drop_global_lock(void)
++{
++    up(&nvkms_lock);
++}
++
++void nvkms_retake_global_lock(void)
++{
++    down(&nvkms_lock);
++}
++
+ struct nvkms_sema_t {
+     struct semaphore os_sema;
+ };
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+index 4a20e4c2..09f465fd 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+@@ -122,6 +122,7 @@ NvBool nvkms_conceal_vrr_caps(void);
+ NvBool nvkms_enhanced_pcon_support(void);
+ NvBool nvkms_lazy_ctxdma_bind(void);
+ NvBool nvkms_lazy_gpu_map(void);
++NvBool nvkms_unlocked_surface_rm(void);
+ NvBool nvkms_output_rounding_fix(void);
+ NvBool nvkms_disable_hdmi_frl(void);
+ NvBool nvkms_disable_vrr_memclk_switch(void);
+@@ -375,6 +376,14 @@ NvBool nvkms_ioctl_from_kapi_try_pmlock
+  * APIs for locking.
+  */
+ 
++/*
++ * Temporarily release the global NVKMS lock around RM calls that don't touch
++ * NVKMS state. Only valid in an ioctl from a kernel-space (KAPI) client, which
++ * also holds the NVKMS PM lock, so suspend can't run in between.
++ */
++void nvkms_drop_global_lock(void);
++void nvkms_retake_global_lock(void);
++
+ typedef struct nvkms_sema_t nvkms_sema_handle_t;
+ 
+ nvkms_sema_handle_t*
+diff --git a/src/nvidia-modeset/include/nvkms-hal.h b/src/nvidia-modeset/include/nvkms-hal.h
+index 6675a0b8..d008cb70 100644
+--- a/src/nvidia-modeset/include/nvkms-hal.h
++++ b/src/nvidia-modeset/include/nvkms-hal.h
+@@ -27,5 +27,6 @@
+ #include "nvkms-types.h"
+ 
+ enum NvKmsAllocDeviceStatus nvAssignEvoCaps(NVDevEvoPtr pDevEvo);
++NvBool nvEvoHalUsesCtxDmaSurfaceDescriptors(const NVDevEvoRec *pDevEvo);
+ 
+ #endif /* __NVKMS_HAL_H__ */
+diff --git a/src/nvidia-modeset/include/nvkms-rm.h b/src/nvidia-modeset/include/nvkms-rm.h
+index 0385bf3f..fe630e9b 100644
+--- a/src/nvidia-modeset/include/nvkms-rm.h
++++ b/src/nvidia-modeset/include/nvkms-rm.h
+@@ -157,6 +157,17 @@ NvU32 nvRmAllocAndBindSurfaceDescriptor(
+     NVSurfaceDescriptor *pSurfaceDesc,
+     NvBool mapToDisplayRm);
+ 
++NvBool nvRmCanAllocSurfaceDescriptorUnlocked(const NVDevEvoRec *pDevEvo);
++
++NvU32 nvRmAllocAndBindSurfaceDescriptorUnlocked(
++    NvU32 hDevice,
++    NvU32 hCoreChannel,
++    NvU32 hCtxDma,
++    NvU32 hMemory,
++    const enum NvKmsSurfaceMemoryLayout layout,
++    NvU64 limit,
++    NVSurfaceDescriptor *pSurfaceDesc);
++
+ #ifdef __cplusplus
+ };
+ #endif
+diff --git a/src/nvidia-modeset/include/nvkms-surface.h b/src/nvidia-modeset/include/nvkms-surface.h
+index 57be8527..21f5cb82 100644
+--- a/src/nvidia-modeset/include/nvkms-surface.h
++++ b/src/nvidia-modeset/include/nvkms-surface.h
+@@ -30,12 +30,21 @@ void nvEvoRegisterSurface(NVDevEvoPtr pDevEvo,
+                           struct NvKmsPerOpenDev *pOpenDev,
+                           struct NvKmsRegisterSurfaceParams *pParams,
+                           enum NvHsMapPermissions hsMapPermissions);
++void nvEvoRegisterSurfaceUnlockedRm(NVDevEvoPtr pDevEvo,
++                                    struct NvKmsPerOpenDev *pOpenDev,
++                                    struct NvKmsRegisterSurfaceParams *pParams,
++                                    enum NvHsMapPermissions hsMapPermissions);
+ 
+ void nvEvoUnregisterSurface(NVDevEvoPtr pDevEvo,
+                             struct NvKmsPerOpenDev *pOpenDev,
+                             NvKmsSurfaceHandle surfaceHandle,
+                             NvBool skipUpdate,
+                             NvBool skipSync);
++void nvEvoUnregisterSurfaceUnlockedRm(NVDevEvoPtr pDevEvo,
++                                      struct NvKmsPerOpenDev *pOpenDev,
++                                      NvKmsSurfaceHandle surfaceHandle,
++                                      NvBool skipUpdate,
++                                      NvBool skipSync);
+ void nvEvoReleaseSurface(NVDevEvoPtr pDevEvo,
+                          struct NvKmsPerOpenDev *pOpenDev,
+                          NvKmsSurfaceHandle surfaceHandle);
+diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
+index 638f491f..10ceb3e9 100644
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -1014,6 +1014,14 @@ typedef struct _NVEvoDevRec {
+ 
+     NVUnixRmHandleAllocatorRec handleAllocator;
+ 
++    /*
++     * Incremented whenever the surface descriptors of all registered surfaces
++     * are freed or the core channel is freed. Surface registration that binds
++     * a descriptor without the global NVKMS lock (see nvEvoRegisterSurface())
++     * redoes the bind if this changed in the meantime.
++     */
++    NvU32 surfaceDescGeneration;
++
+     struct NvKmsDeviceId deviceId;
+ 
+     /* MIG subscription state for SMG support */
+diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+index 4a20e4c2..09f465fd 100644
+--- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
++++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+@@ -122,6 +122,7 @@ NvBool nvkms_conceal_vrr_caps(void);
+ NvBool nvkms_enhanced_pcon_support(void);
+ NvBool nvkms_lazy_ctxdma_bind(void);
+ NvBool nvkms_lazy_gpu_map(void);
++NvBool nvkms_unlocked_surface_rm(void);
+ NvBool nvkms_output_rounding_fix(void);
+ NvBool nvkms_disable_hdmi_frl(void);
+ NvBool nvkms_disable_vrr_memclk_switch(void);
+@@ -375,6 +376,14 @@ NvBool nvkms_ioctl_from_kapi_try_pmlock
+  * APIs for locking.
+  */
+ 
++/*
++ * Temporarily release the global NVKMS lock around RM calls that don't touch
++ * NVKMS state. Only valid in an ioctl from a kernel-space (KAPI) client, which
++ * also holds the NVKMS PM lock, so suspend can't run in between.
++ */
++void nvkms_drop_global_lock(void);
++void nvkms_retake_global_lock(void);
++
+ typedef struct nvkms_sema_t nvkms_sema_handle_t;
+ 
+ nvkms_sema_handle_t*
+diff --git a/src/nvidia-modeset/src/nvkms-evo.c b/src/nvidia-modeset/src/nvkms-evo.c
+index 600003f0..25891110 100644
+--- a/src/nvidia-modeset/src/nvkms-evo.c
++++ b/src/nvidia-modeset/src/nvkms-evo.c
+@@ -5567,6 +5567,9 @@ void nvFreeCoreChannelEvo(NVDevEvoPtr pDevEvo)
+     NvU32 dispIndex;
+     NvU32 head;
+ 
++    /* Descriptors bound to this core channel need a new bind. */
++    pDevEvo->surfaceDescGeneration++;
++
+     ClearApiHeadState(pDevEvo);
+ 
+     nvEvoCancelPostFlipIMPTimer(pDevEvo);
+diff --git a/src/nvidia-modeset/src/nvkms-hal.c b/src/nvidia-modeset/src/nvkms-hal.c
+index 82643cdf..9b95fd64 100644
+--- a/src/nvidia-modeset/src/nvkms-hal.c
++++ b/src/nvidia-modeset/src/nvkms-hal.c
+@@ -61,6 +61,17 @@ extern NVEvoHAL nvEvoC9;
+ extern NVEvoHAL nvEvoCA;
+ extern NVEvoHAL nvDisplayless;
+ 
++/*!
++ * Whether the device's surface descriptors are plain context DMAs, allocated
++ * with nvCtxDmaAlloc() and bound with nvCtxDmaBind() (the EVO 3 HALs).
++ */
++NvBool nvEvoHalUsesCtxDmaSurfaceDescriptors(const NVDevEvoRec *pDevEvo)
++{
++    return (pDevEvo->hal == &nvEvoC5) ||
++           (pDevEvo->hal == &nvEvoC6) ||
++           (pDevEvo->hal == &nvEvoC8);
++}
++
+ enum NvKmsAllocDeviceStatus nvAssignEvoCaps(NVDevEvoPtr pDevEvo)
+ {
+ #define ENTRY(_classPrefix,                                               \
+diff --git a/src/nvidia-modeset/src/nvkms-rm.c b/src/nvidia-modeset/src/nvkms-rm.c
+index b69f7956..7ccc2161 100644
+--- a/src/nvidia-modeset/src/nvkms-rm.c
++++ b/src/nvidia-modeset/src/nvkms-rm.c
+@@ -42,6 +42,7 @@
+ 
+ #include "nvkms-push.h"
+ #include "nvkms-difr.h"
++#include "nvkms-hal.h"
+ 
+ #include "nv_smg.h"
+ 
+@@ -50,6 +51,7 @@
+ #include <class/cla083.h> /* NVA083_GRID_DISPLAYLESS */
+ 
+ #include "class/cl00c3.h" /* NV01_MEMORY_SYNCPOINT */
++#include "class/cl0002.h" /* NV01_CONTEXT_DMA */
+ #include "class/cl0005.h" /* NV01_EVENT */
+ 
+ #include <class/cl0070.h> // NV01_MEMORY_VIRTUAL
+@@ -5951,18 +5953,10 @@ void nvRmUnregisterBacklight(NVDispEvoRec *pDispEvo)
+     pDispEvo->backlightDevice = NULL;
+ }
+ 
+-NvU32 nvRmAllocAndBindSurfaceDescriptor(
+-    NVDevEvoPtr pDevEvo,
+-    NvU32 hMemory,
+-    const enum NvKmsSurfaceMemoryLayout layout,
+-    NvU64 limit,
+-    NVSurfaceDescriptor *pSurfaceDesc,
+-    NvBool mapToDisplayRm)
++static NvU32 SurfaceDescriptorCtxDmaFlags(
++    const enum NvKmsSurfaceMemoryLayout layout)
+ {
+-    NVSurfaceDescriptor surfaceDesc = { };
+     NvU32 flags = DRF_DEF(OS03, _FLAGS, _HASH_TABLE, _DISABLE);
+-    NvU32 head, layer;
+-    NvU32 ret;
+ 
+     switch (layout) {
+         case NvKmsSurfaceMemoryLayoutBlockLinear:
+@@ -5973,6 +5967,22 @@ NvU32 nvRmAllocAndBindSurfaceDescriptor(
+             break;
+     }
+ 
++    return flags;
++}
++
++NvU32 nvRmAllocAndBindSurfaceDescriptor(
++    NVDevEvoPtr pDevEvo,
++    NvU32 hMemory,
++    const enum NvKmsSurfaceMemoryLayout layout,
++    NvU64 limit,
++    NVSurfaceDescriptor *pSurfaceDesc,
++    NvBool mapToDisplayRm)
++{
++    NVSurfaceDescriptor surfaceDesc = { };
++    const NvU32 flags = SurfaceDescriptorCtxDmaFlags(layout);
++    NvU32 head, layer;
++    NvU32 ret;
++
+      /* Each surface to be displayed needs its own surface descriptor */
+     nvAssert(pDevEvo->displayHandle != 0);
+     if (pDevEvo->core)
+@@ -6037,3 +6047,68 @@ free_this_handle_and_fail:
+                                         &surfaceDesc);
+     return ret;
+ }
++
++/*!
++ * Whether nvRmAllocAndBindSurfaceDescriptorUnlocked() can stand in for
++ * nvRmAllocAndBindSurfaceDescriptor() on this device: the descriptor is a
++ * plain context DMA that only gets bound to the core channel at allocation
++ * (lazy_ctxdma_bind), and a failed bind can't be fixed by garbage collecting
++ * syncpts (which needs the NVKMS lock).
++ */
++NvBool nvRmCanAllocSurfaceDescriptorUnlocked(const NVDevEvoRec *pDevEvo)
++{
++    return nvEvoHalUsesCtxDmaSurfaceDescriptors(pDevEvo) &&
++           !pDevEvo->isSOCDisplay &&
++           !pDevEvo->supportsSyncpts &&
++           (pDevEvo->core != NULL) &&
++           nvkms_lazy_ctxdma_bind();
++}
++
++/*!
++ * The RM calls of nvRmAllocAndBindSurfaceDescriptor(), for a device where
++ * nvRmCanAllocSurfaceDescriptorUnlocked() is TRUE, made without the global
++ * NVKMS lock: allocate the context DMA with the already reserved handle
++ * hCtxDma and bind it to the core channel hCoreChannel. Doesn't touch any
++ * NVKMS state; on failure the caller frees hCtxDma (if it was allocated) and
++ * releases the handle.
++ */
++NvU32 nvRmAllocAndBindSurfaceDescriptorUnlocked(
++    NvU32 hDevice,
++    NvU32 hCoreChannel,
++    NvU32 hCtxDma,
++    NvU32 hMemory,
++    const enum NvKmsSurfaceMemoryLayout layout,
++    NvU64 limit,
++    NVSurfaceDescriptor *pSurfaceDesc)
++{
++    NV_CONTEXT_DMA_ALLOCATION_PARAMS ctxdmaParams = { };
++    NV0002_CTRL_BIND_CONTEXTDMA_PARAMS bindParams = { };
++    NVSurfaceDescriptor surfaceDesc = { };
++    NvU32 ret;
++
++    ctxdmaParams.hMemory = hMemory;
++    ctxdmaParams.flags = SurfaceDescriptorCtxDmaFlags(layout);
++    ctxdmaParams.offset = 0;
++    ctxdmaParams.limit = limit;
++
++    ret = nvRmApiAlloc(nvEvoGlobal.clientHandle,
++                       hDevice,
++                       hCtxDma,
++                       NV01_CONTEXT_DMA,
++                       &ctxdmaParams);
++    if (ret != NVOS_STATUS_SUCCESS) {
++        return ret;
++    }
++
++    surfaceDesc.ctxDmaHandle = hCtxDma;
++    surfaceDesc.lazyBind = TRUE;
++    surfaceDesc.lazyBoundChannelMask = 0;
++    *pSurfaceDesc = surfaceDesc;
++
++    bindParams.hChannel = hCoreChannel;
++
++    return nvRmApiControl(nvEvoGlobal.clientHandle,
++                          hCtxDma,
++                          NV0002_CTRL_CMD_BIND_CONTEXTDMA,
++                          &bindParams, sizeof(bindParams));
++}
+diff --git a/src/nvidia-modeset/src/nvkms-surface.c b/src/nvidia-modeset/src/nvkms-surface.c
+index 99e9d3a0..c37cea3c 100644
+--- a/src/nvidia-modeset/src/nvkms-surface.c
++++ b/src/nvidia-modeset/src/nvkms-surface.c
+@@ -29,6 +29,7 @@
+ #include "nvkms-private.h"
+ #include "nvkms-headsurface.h"
+ #include "nvkms-headsurface-swapgroup.h"
++#include "nvkms-hal.h"
+ #include "nvos.h"
+ 
+ // NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECT_FROM_FD
+@@ -112,7 +113,77 @@ static void FreeSurfaceEvoStruct(NVSurfaceEvoPtr pSurfaceEvo)
+     nvFree(pSurfaceEvo);
+ }
+ 
+-static void FreeSurfaceEvoRm(NVDevEvoPtr pDevEvo, NVSurfaceEvoPtr pSurfaceEvo)
++/*
++ * RM objects of a surface that FreeSurfaceEvoRm() left for
++ * FreeSurfaceRmObjectsUnlocked() to free.
++ */
++typedef struct {
++    NvU32 ctxDmaHandle[NVKMS_MAX_PLANES_PER_SURFACE];
++    NvU32 rmHandle[NVKMS_MAX_PLANES_PER_SURFACE];
++} NVSurfaceRmObjects;
++
++/*!
++ * Free the context DMAs and memory objects collected in pRmObjects with RM
++ * calls made without the global NVKMS lock, then release their handles.
++ *
++ * Must be called with the global NVKMS lock held, from an ioctl of a
++ * kernel-space client (see nvkms_drop_global_lock()). Nothing in NVKMS
++ * references the objects anymore.
++ */
++static void FreeSurfaceRmObjectsUnlocked(NVDevEvoPtr pDevEvo,
++                                         const NVSurfaceRmObjects *pRmObjects)
++{
++    const NvU32 hDevice = pDevEvo->deviceHandle;
++    NvBool haveObjects = FALSE;
++    NvU8 planeIndex;
++
++    for (planeIndex = 0; planeIndex < NVKMS_MAX_PLANES_PER_SURFACE; planeIndex++) {
++        if ((pRmObjects->ctxDmaHandle[planeIndex] != 0) ||
++            (pRmObjects->rmHandle[planeIndex] != 0)) {
++            haveObjects = TRUE;
++        }
++    }
++
++    if (!haveObjects) {
++        return;
++    }
++
++    nvkms_drop_global_lock();
++
++    for (planeIndex = 0; planeIndex < NVKMS_MAX_PLANES_PER_SURFACE; planeIndex++) {
++        if (pRmObjects->ctxDmaHandle[planeIndex] != 0) {
++            nvRmApiFree(nvEvoGlobal.clientHandle, hDevice,
++                        pRmObjects->ctxDmaHandle[planeIndex]);
++        }
++    }
++    for (planeIndex = 0; planeIndex < NVKMS_MAX_PLANES_PER_SURFACE; planeIndex++) {
++        if (pRmObjects->rmHandle[planeIndex] != 0) {
++            nvRmApiFree(nvEvoGlobal.clientHandle, hDevice,
++                        pRmObjects->rmHandle[planeIndex]);
++        }
++    }
++
++    nvkms_retake_global_lock();
++
++    for (planeIndex = 0; planeIndex < NVKMS_MAX_PLANES_PER_SURFACE; planeIndex++) {
++        if (pRmObjects->ctxDmaHandle[planeIndex] != 0) {
++            nvFreeUnixRmHandle(&pDevEvo->handleAllocator,
++                               pRmObjects->ctxDmaHandle[planeIndex]);
++        }
++        if (pRmObjects->rmHandle[planeIndex] != 0) {
++            nvFreeUnixRmHandle(&pDevEvo->handleAllocator,
++                               pRmObjects->rmHandle[planeIndex]);
++        }
++    }
++}
++
++/*!
++ * Free the RM objects of a surface. If pDeferred isn't NULL and the surface
++ * descriptors are plain context DMAs, the context DMAs and memory objects
++ * aren't freed but moved to *pDeferred, for FreeSurfaceRmObjectsUnlocked().
++ */
++static void FreeSurfaceEvoRm(NVDevEvoPtr pDevEvo, NVSurfaceEvoPtr pSurfaceEvo,
++                             NVSurfaceRmObjects *pDeferred)
+ {
+     NvU64 structRefCnt;
+     NvU8 planeIndex;
+@@ -123,7 +194,20 @@ static void FreeSurfaceEvoRm(NVDevEvoPtr pDevEvo, NVSurfaceEvoPtr pSurfaceEvo)
+ 
+     nvAssert(pSurfaceEvo->rmRefCnt == 0);
+ 
++    if ((pDeferred != NULL) &&
++        (!nvEvoHalUsesCtxDmaSurfaceDescriptors(pDevEvo) ||
++         pSurfaceEvo->mapToDisplayRm)) {
++        pDeferred = NULL;
++    }
++
+     FOR_ALL_VALID_PLANES(planeIndex, pSurfaceEvo) {
++        if (pDeferred != NULL) {
++            pDeferred->ctxDmaHandle[planeIndex] =
++                pSurfaceEvo->planes[planeIndex].surfaceDesc.ctxDmaHandle;
++            pSurfaceEvo->planes[planeIndex].surfaceDesc.ctxDmaHandle = 0;
++            continue;
++        }
++
+         pDevEvo->hal->FreeSurfaceDescriptor(pDevEvo,
+                                             nvEvoGlobal.clientHandle,
+                                             &pSurfaceEvo->planes[planeIndex].surfaceDesc);
+@@ -143,6 +227,13 @@ static void FreeSurfaceEvoRm(NVDevEvoPtr pDevEvo, NVSurfaceEvoPtr pSurfaceEvo)
+             break;
+         }
+ 
++        if (pDeferred != NULL) {
++            pDeferred->rmHandle[planeIndex] =
++                pSurfaceEvo->planes[planeIndex].rmHandle;
++            pSurfaceEvo->planes[planeIndex].rmHandle = 0;
++            continue;
++        }
++
+         nvRmApiFree(nvEvoGlobal.clientHandle,
+                     pDevEvo->deviceHandle,
+                     pSurfaceEvo->planes[planeIndex].rmHandle);
+@@ -452,10 +543,152 @@ static NvBool ValidateSurfaceAllocation(
+     return TRUE;
+ }
+ 
+-void nvEvoRegisterSurface(NVDevEvoPtr pDevEvo,
+-                          struct NvKmsPerOpenDev *pOpenDev,
+-                          struct NvKmsRegisterSurfaceParams *pParams,
+-                          enum NvHsMapPermissions hsMapPermissions)
++/*!
++ * The per-plane RM work of surface registration (dup the memory object,
++ * check it, allocate the surface descriptor and bind it to the core channel)
++ * with RM calls made without the global NVKMS lock, for
++ * nvEvoRegisterSurfaceUnlockedRm().
++ *
++ * Called and returns with the lock held. The handles are reserved before
++ * dropping the lock; pSurfaceEvo isn't reachable by anyone else until the
++ * caller publishes it. If the core channel or all surface descriptors were
++ * freed while the lock was dropped (surfaceDescGeneration changed), the
++ * descriptors are allocated and bound again with the lock held.
++ *
++ * On failure, the caller frees the RM objects stored in pSurfaceEvo.
++ */
++static NvBool RegisterSurfacePlanesUnlockedRm(
++    NVDevEvoPtr pDevEvo,
++    const struct NvKmsRegisterSurfaceRequest *pRequest,
++    NVSurfaceEvoPtr pSurfaceEvo)
++{
++    NvU32 ctxDmaHandle[NVKMS_MAX_PLANES_PER_SURFACE] = { };
++    const NvBool needDescriptor = !pRequest->noDisplayHardwareAccess;
++    const NvU32 hDevice = pDevEvo->deviceHandle;
++    const NvU32 hCoreChannel = pDevEvo->core->pb.channel_handle;
++    const NvU32 generation = pDevEvo->surfaceDescGeneration;
++    NvBool ok = TRUE;
++    NvU8 planeIndex;
++
++    FOR_ALL_VALID_PLANES(planeIndex, pSurfaceEvo) {
++        pSurfaceEvo->planes[planeIndex].rmHandle =
++            nvGenerateUnixRmHandle(&pDevEvo->handleAllocator);
++        if (pSurfaceEvo->planes[planeIndex].rmHandle == 0) {
++            ok = FALSE;
++            break;
++        }
++
++        if (needDescriptor) {
++            ctxDmaHandle[planeIndex] =
++                nvGenerateUnixRmHandle(&pDevEvo->handleAllocator);
++            if (ctxDmaHandle[planeIndex] == 0) {
++                ok = FALSE;
++                break;
++            }
++        }
++    }
++
++    if (ok) {
++        nvkms_drop_global_lock();
++
++        FOR_ALL_VALID_PLANES(planeIndex, pSurfaceEvo) {
++            const NvU32 hMemory = pSurfaceEvo->planes[planeIndex].rmHandle;
++            const NvU64 sizeInBytes =
++                pRequest->planes[planeIndex].rmObjectSizeInBytes;
++
++            if (nvRmApiDupObject(nvEvoGlobal.clientHandle,
++                                 hDevice,
++                                 hMemory,
++                                 pRequest->rmClient,
++                                 pRequest->planes[planeIndex].u.rmObject,
++                                 0) != NVOS_STATUS_SUCCESS) {
++                ok = FALSE;
++                break;
++            }
++
++            if (!ValidateSurfaceAllocation(pDevEvo, sizeInBytes, pRequest,
++                                           hMemory)) {
++                ok = FALSE;
++                break;
++            }
++
++            if (needDescriptor &&
++                (nvRmAllocAndBindSurfaceDescriptorUnlocked(
++                    hDevice,
++                    hCoreChannel,
++                    ctxDmaHandle[planeIndex],
++                    hMemory,
++                    pRequest->layout,
++                    sizeInBytes - 1,
++                    &pSurfaceEvo->planes[planeIndex].surfaceDesc) !=
++                 NVOS_STATUS_SUCCESS)) {
++                ok = FALSE;
++                break;
++            }
++        }
++
++        nvkms_retake_global_lock();
++    }
++
++    /*
++     * Release the reserved context DMA handles that didn't end up in a
++     * descriptor (if the context DMA was allocated, the descriptor owns it).
++     */
++    FOR_ALL_VALID_PLANES(planeIndex, pSurfaceEvo) {
++        if ((ctxDmaHandle[planeIndex] != 0) &&
++            (pSurfaceEvo->planes[planeIndex].surfaceDesc.ctxDmaHandle !=
++             ctxDmaHandle[planeIndex])) {
++            nvFreeUnixRmHandle(&pDevEvo->handleAllocator,
++                               ctxDmaHandle[planeIndex]);
++        }
++    }
++
++    if (!ok) {
++        return FALSE;
++    }
++
++    if (needDescriptor &&
++        (pDevEvo->surfaceDescGeneration != generation)) {
++        FOR_ALL_VALID_PLANES(planeIndex, pSurfaceEvo) {
++            pDevEvo->hal->FreeSurfaceDescriptor(pDevEvo,
++                                                nvEvoGlobal.clientHandle,
++                                                &pSurfaceEvo->planes[planeIndex].surfaceDesc);
++        }
++
++        if (pDevEvo->core == NULL) {
++            return FALSE;
++        }
++
++        FOR_ALL_VALID_PLANES(planeIndex, pSurfaceEvo) {
++            if (nvRmAllocAndBindSurfaceDescriptor(
++                    pDevEvo,
++                    pSurfaceEvo->planes[planeIndex].rmHandle,
++                    pRequest->layout,
++                    pRequest->planes[planeIndex].rmObjectSizeInBytes - 1,
++                    &pSurfaceEvo->planes[planeIndex].surfaceDesc,
++                    FALSE /* mapToDisplayRm */) != NVOS_STATUS_SUCCESS) {
++                return FALSE;
++            }
++        }
++    }
++
++    FOR_ALL_VALID_PLANES(planeIndex, pSurfaceEvo) {
++        pSurfaceEvo->planes[planeIndex].pitch =
++                            pRequest->planes[planeIndex].pitch;
++        pSurfaceEvo->planes[planeIndex].offset =
++                            pRequest->planes[planeIndex].offset;
++        pSurfaceEvo->planes[planeIndex].rmObjectSizeInBytes =
++                            pRequest->planes[planeIndex].rmObjectSizeInBytes;
++    }
++
++    return TRUE;
++}
++
++static void RegisterSurface(NVDevEvoPtr pDevEvo,
++                            struct NvKmsPerOpenDev *pOpenDev,
++                            struct NvKmsRegisterSurfaceParams *pParams,
++                            enum NvHsMapPermissions hsMapPermissions,
++                            NvBool unlockedRm)
+ {
+     NVEvoApiHandlesRec *pOpenDevSurfaceHandles =
+         nvGetSurfaceHandlesFromOpenDev(pOpenDev);
+@@ -486,10 +719,15 @@ void nvEvoRegisterSurface(NVDevEvoPtr pDevEvo,
+ 
+     pSurfaceEvo->format = pRequest->format;
+ 
+-    surfaceHandle = nvEvoCreateApiHandle(pOpenDevSurfaceHandles, pSurfaceEvo);
++    if (unlockedRm &&
++        !pRequest->useFd &&
++        nvRmCanAllocSurfaceDescriptorUnlocked(pDevEvo)) {
+ 
+-    if (surfaceHandle == 0) {
+-        goto fail;
++        if (!RegisterSurfacePlanesUnlockedRm(pDevEvo, pRequest, pSurfaceEvo)) {
++            goto fail;
++        }
++
++        goto planes_done;
+     }
+ 
+     FOR_ALL_VALID_PLANES(planeIndex, pSurfaceEvo) {
+@@ -656,6 +894,7 @@ void nvEvoRegisterSurface(NVDevEvoPtr pDevEvo,
+                             pRequest->planes[planeIndex].rmObjectSizeInBytes;
+     }
+ 
++planes_done:
+     pSurfaceEvo->requireDisplayHardwareAccess = !pRequest->noDisplayHardwareAccess;
+     pSurfaceEvo->noDisplayCaching = pRequest->noDisplayCaching;
+ 
+@@ -714,6 +953,16 @@ void nvEvoRegisterSurface(NVDevEvoPtr pDevEvo,
+     pSurfaceEvo->log2GobsPerBlockY    = pRequest->log2GobsPerBlockY;
+     pSurfaceEvo->isoType              = pRequest->isoType;
+ 
++    /*
++     * Publish the surface only now: with unlockedRm, the global NVKMS lock was
++     * dropped while it was incomplete.
++     */
++    surfaceHandle = nvEvoCreateApiHandle(pOpenDevSurfaceHandles, pSurfaceEvo);
++
++    if (surfaceHandle == 0) {
++        goto fail;
++    }
++
+     pSurfaceEvo->rmRefCnt = 1;
+     pSurfaceEvo->structRefCnt = 1;
+ 
+@@ -727,10 +976,40 @@ void nvEvoRegisterSurface(NVDevEvoPtr pDevEvo,
+ fail:
+     nvEvoDestroyApiHandle(pOpenDevSurfaceHandles, surfaceHandle);
+ 
+-    FreeSurfaceEvoRm(pDevEvo, pSurfaceEvo);
++    FreeSurfaceEvoRm(pDevEvo, pSurfaceEvo, NULL /* pDeferred */);
+     FreeSurfaceEvoStruct(pSurfaceEvo);
+ }
+ 
++void nvEvoRegisterSurface(NVDevEvoPtr pDevEvo,
++                          struct NvKmsPerOpenDev *pOpenDev,
++                          struct NvKmsRegisterSurfaceParams *pParams,
++                          enum NvHsMapPermissions hsMapPermissions)
++{
++    RegisterSurface(pDevEvo, pOpenDev, pParams, hsMapPermissions,
++                    FALSE /* unlockedRm */);
++}
++
++/*!
++ * nvEvoRegisterSurface() for an ioctl from a kernel-space client: where
++ * possible, make the RM calls that dup and check the memory and allocate and
++ * bind the surface descriptors without the global NVKMS lock (they can wait
++ * milliseconds for RM locks held by other RM clients, which would stall vblank
++ * and flip handling).
++ */
++void nvEvoRegisterSurfaceUnlockedRm(NVDevEvoPtr pDevEvo,
++                                    struct NvKmsPerOpenDev *pOpenDev,
++                                    struct NvKmsRegisterSurfaceParams *pParams,
++                                    enum NvHsMapPermissions hsMapPermissions)
++{
++    RegisterSurface(pDevEvo, pOpenDev, pParams, hsMapPermissions,
++                    TRUE /* unlockedRm */);
++}
++
++static void DecrementSurfaceRefCnts(NVDevEvoPtr pDevEvo,
++                                    NVSurfaceEvoPtr pSurfaceEvo,
++                                    NvBool skipSync,
++                                    NVSurfaceRmObjects *pDeferred);
++
+ /* Temporary storage used by ClearSurfaceUsage{Collect,Apply}. */
+ struct ClearSurfaceUsageCache {
+     struct {
+@@ -1096,14 +1375,16 @@ void nvEvoFreeClientSurfaces(NVDevEvoPtr pDevEvo,
+ 
+ }
+ 
+-void nvEvoUnregisterSurface(NVDevEvoPtr pDevEvo,
+-                            struct NvKmsPerOpenDev *pOpenDev,
+-                            NvKmsSurfaceHandle surfaceHandle,
+-                            NvBool skipUpdate,
+-                            NvBool skipSync)
++static void UnregisterSurface(NVDevEvoPtr pDevEvo,
++                              struct NvKmsPerOpenDev *pOpenDev,
++                              NvKmsSurfaceHandle surfaceHandle,
++                              NvBool skipUpdate,
++                              NvBool skipSync,
++                              NvBool unlockedRm)
+ {
+     NVEvoApiHandlesRec *pOpenDevSurfaceHandles =
+         nvGetSurfaceHandlesFromOpenDev(pOpenDev);
++    NVSurfaceRmObjects rmObjects = { };
+     NVSurfaceEvoPtr pSurfaceEvo;
+ 
+     pSurfaceEvo = nvEvoGetPointerFromApiHandle(pOpenDevSurfaceHandles,
+@@ -1134,7 +1415,38 @@ void nvEvoUnregisterSurface(NVDevEvoPtr pDevEvo,
+     /* Remove the handle from the calling client's namespace. */
+     nvEvoDestroyApiHandle(pOpenDevSurfaceHandles, surfaceHandle);
+ 
+-    nvEvoDecrementSurfaceRefCntsWithSync(pDevEvo, pSurfaceEvo, skipSync);
++    DecrementSurfaceRefCnts(pDevEvo, pSurfaceEvo, skipSync,
++                            unlockedRm ? &rmObjects : NULL);
++
++    if (unlockedRm) {
++        FreeSurfaceRmObjectsUnlocked(pDevEvo, &rmObjects);
++    }
++}
++
++void nvEvoUnregisterSurface(NVDevEvoPtr pDevEvo,
++                            struct NvKmsPerOpenDev *pOpenDev,
++                            NvKmsSurfaceHandle surfaceHandle,
++                            NvBool skipUpdate,
++                            NvBool skipSync)
++{
++    UnregisterSurface(pDevEvo, pOpenDev, surfaceHandle, skipUpdate, skipSync,
++                      FALSE /* unlockedRm */);
++}
++
++/*!
++ * nvEvoUnregisterSurface() for an ioctl from a kernel-space client: if the
++ * surface's RM objects get freed, free them without the global NVKMS lock
++ * (the RM calls can wait milliseconds for RM locks held by other RM clients,
++ * which would stall vblank and flip handling).
++ */
++void nvEvoUnregisterSurfaceUnlockedRm(NVDevEvoPtr pDevEvo,
++                                      struct NvKmsPerOpenDev *pOpenDev,
++                                      NvKmsSurfaceHandle surfaceHandle,
++                                      NvBool skipUpdate,
++                                      NvBool skipSync)
++{
++    UnregisterSurface(pDevEvo, pOpenDev, surfaceHandle, skipUpdate, skipSync,
++                      TRUE /* unlockedRm */);
+ }
+ 
+ void nvEvoReleaseSurface(NVDevEvoPtr pDevEvo,
+@@ -1178,9 +1490,10 @@ void nvEvoDecrementSurfaceRefCnts(NVDevEvoPtr pDevEvo,
+     nvEvoDecrementSurfaceRefCntsWithSync(pDevEvo, pSurfaceEvo, NV_FALSE);
+ }
+ 
+-void nvEvoDecrementSurfaceRefCntsWithSync(NVDevEvoPtr pDevEvo,
+-                                          NVSurfaceEvoPtr pSurfaceEvo,
+-                                          NvBool skipSync)
++static void DecrementSurfaceRefCnts(NVDevEvoPtr pDevEvo,
++                                    NVSurfaceEvoPtr pSurfaceEvo,
++                                    NvBool skipSync,
++                                    NVSurfaceRmObjects *pDeferred)
+ {
+     nvAssert(pSurfaceEvo->rmRefCnt >= 1);
+     pSurfaceEvo->rmRefCnt--;
+@@ -1197,12 +1510,20 @@ void nvEvoDecrementSurfaceRefCntsWithSync(NVDevEvoPtr pDevEvo,
+             nvEvoClearSurfaceUsage(pDevEvo, pSurfaceEvo, skipSync);
+         }
+ 
+-        FreeSurfaceEvoRm(pDevEvo, pSurfaceEvo);
++        FreeSurfaceEvoRm(pDevEvo, pSurfaceEvo, pDeferred);
+     }
+ 
+     nvEvoDecrementSurfaceStructRefCnt(pSurfaceEvo);
+ }
+ 
++void nvEvoDecrementSurfaceRefCntsWithSync(NVDevEvoPtr pDevEvo,
++                                          NVSurfaceEvoPtr pSurfaceEvo,
++                                          NvBool skipSync)
++{
++    DecrementSurfaceRefCnts(pDevEvo, pSurfaceEvo, skipSync,
++                            NULL /* pDeferred */);
++}
++
+ NvBool nvEvoSurfaceRefCntsTooLarge(const NVSurfaceEvoRec *pSurfaceEvo)
+ {
+     return ((pSurfaceEvo->rmRefCnt == NV_U64_MAX) ||
+diff --git a/src/nvidia-modeset/src/nvkms.c b/src/nvidia-modeset/src/nvkms.c
+index 4f9b65b7..0dd064b9 100644
+--- a/src/nvidia-modeset/src/nvkms.c
++++ b/src/nvidia-modeset/src/nvkms.c
+@@ -2730,8 +2730,19 @@ static NvBool RegisterSurface(struct NvKmsPerOpen *pOpen,
+         return FALSE;
+     }
+ 
+-    nvEvoRegisterSurface(pOpenDev->pDevEvo, pOpenDev, pParams,
+-                         NvHsMapPermissionsReadOnly);
++    /*
++     * Kernel-space clients (nvidia-drm, through KAPI) hold the NVKMS PM lock
++     * across the ioctl, and they keep the device alive across their calls,
++     * so the RM calls can be made without the global NVKMS lock.
++     */
++    if ((pOpen->clientType == NVKMS_CLIENT_KERNEL_SPACE) &&
++        nvkms_unlocked_surface_rm()) {
++        nvEvoRegisterSurfaceUnlockedRm(pOpenDev->pDevEvo, pOpenDev, pParams,
++                                       NvHsMapPermissionsReadOnly);
++    } else {
++        nvEvoRegisterSurface(pOpenDev->pDevEvo, pOpenDev, pParams,
++                             NvHsMapPermissionsReadOnly);
++    }
+     return pParams->reply.surfaceHandle != 0;
+ }
+ 
+@@ -2757,10 +2768,19 @@ static NvBool UnregisterSurface(struct NvKmsPerOpen *pOpen,
+         return FALSE;
+     }
+ 
+-    nvEvoUnregisterSurface(pOpenDev->pDevEvo, pOpenDev,
+-                           pParams->request.surfaceHandle,
+-                           FALSE /* skipUpdate */,
+-                           pParams->request.skipSync);
++    /* See RegisterSurface(). */
++    if ((pOpen->clientType == NVKMS_CLIENT_KERNEL_SPACE) &&
++        nvkms_unlocked_surface_rm()) {
++        nvEvoUnregisterSurfaceUnlockedRm(pOpenDev->pDevEvo, pOpenDev,
++                                         pParams->request.surfaceHandle,
++                                         FALSE /* skipUpdate */,
++                                         pParams->request.skipSync);
++    } else {
++        nvEvoUnregisterSurface(pOpenDev->pDevEvo, pOpenDev,
++                               pParams->request.surfaceHandle,
++                               FALSE /* skipUpdate */,
++                               pParams->request.skipSync);
++    }
+     return TRUE;
+ }
+ 
+@@ -6845,6 +6865,8 @@ static void FreeSurfaceCtxDmasForAllOpens(NVDevEvoRec *pDevEvo)
+ {
+     struct NvKmsPerOpen *pOpen;
+ 
++    pDevEvo->surfaceDescGeneration++;
++
+     nvListForEachEntry(pOpen, &perOpenIoctlList, perOpenIoctlListEntry) {
+         struct NvKmsPerOpenDev *pOpenDev = DevEvoToOpenDev(pOpen, pDevEvo);
+ 

@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 22 Oct 2026 10:11:35 +0200
+Subject: [PATCH] nvidia-drm: serialize claiming in-fence display semaphores
+
+For every plane with an in-fence, __nv_drm_convert_in_fences() takes the
+next index from display_semaphores.next_index and claims that semaphore
+with nvKms->tryInitDisplaySemaphore(), which reads the payload and, if it
+is DONE, writes NOT_READY. Neither step is atomic and nothing serializes
+them: the DRM core only holds the modeset locks of the CRTCs and planes in
+the commit, so commits on different CRTCs (e.g. a compositor with one
+commit thread per output) can run this concurrently. Two commits can then
+get the same index, both see DONE and both use the same semaphore, so the
+first in-fence to signal releases both flips before the second one's
+buffer is ready. The next_index update can also be lost or go past the
+end of the pool for a moment.
+
+Add a mutex to display_semaphores and hold it while picking and claiming
+a semaphore. This runs in the atomic commit ioctl, which already sleeps.
+Signalling and cancelling only touch a semaphore the commit already owns
+(NOT_READY or READY, which the claim loop skips), so they stay lockless;
+the signal side runs from the dma-fence callback, possibly in IRQ context.
+
+With the semaphore pool in system memory the claim is a cached read and
+write, so the lock is held for well under a microsecond.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-drv.c     |  1 +
+ kernel-open/nvidia-drm/nvidia-drm-modeset.c |  8 ++++++++
+ kernel-open/nvidia-drm/nvidia-drm-priv.h    | 12 +++++++++++-
+ 3 files changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index b39e77a7..c3a984b5 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -831,6 +831,7 @@ static int nv_drm_dev_load(struct drm_device *dev)
+     nv_dev->display_semaphores.count =
+         resInfo.caps.numDisplaySemaphores;
+     nv_dev->display_semaphores.next_index = 0;
++    mutex_init(&nv_dev->display_semaphores.lock);
+ 
+     nv_dev->vtFbBaseAddress = resInfo.vtFbBaseAddress;
+     nv_dev->vtFbSize = resInfo.vtFbSize;
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-modeset.c b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+index b359da4d..06f39b32 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-modeset.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+@@ -253,12 +253,20 @@ static int __nv_drm_convert_in_fences(
+             return -EINVAL;
+         }
+ 
++        /*
++         * Picking an index and moving its semaphore from DONE to NOT_READY
++         * must not interleave with another commit doing the same, or both
++         * could claim the same semaphore and the first fence to signal would
++         * release both flips.
++         */
++        mutex_lock(&nv_dev->display_semaphores.lock);
+         for (idx_count = 0; idx_count < nv_dev->display_semaphores.count; idx_count++) {
+             semaphore_index = nv_drm_next_display_semaphore(nv_dev);
+             if (nvKms->tryInitDisplaySemaphore(nv_dev->pDevice, semaphore_index)) {
+                 break;
+             }
+         }
++        mutex_unlock(&nv_dev->display_semaphores.lock);
+ 
+         if (idx_count == nv_dev->display_semaphores.count) {
+             NV_DRM_DEV_LOG_ERR(
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-priv.h b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+index 3d581c3f..21bf6bd1 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-priv.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+@@ -230,6 +230,12 @@ struct nv_drm_device {
+     struct {
+         NvU32 count;
+         NvU32 next_index;
++        /*
++         * Serializes picking and initializing a display semaphore. Commits on
++         * different CRTCs don't share DRM modeset locks and can run
++         * concurrently.
++         */
++        struct mutex lock;
+     } display_semaphores;
+ 
+ #if defined(NV_DRM_HAS_HDR_OUTPUT_METADATA)
+@@ -309,7 +315,11 @@ struct nv_drm_device {
+ static inline NvU32 nv_drm_next_display_semaphore(
+     struct nv_drm_device *nv_dev)
+ {
+-    NvU32 current_index = nv_dev->display_semaphores.next_index++;
++    NvU32 current_index;
++
++    lockdep_assert_held(&nv_dev->display_semaphores.lock);
++
++    current_index = nv_dev->display_semaphores.next_index++;
+ 
+     if (nv_dev->display_semaphores.next_index >=
+         nv_dev->display_semaphores.count) {

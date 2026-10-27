@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Sat, 24 Oct 2026 15:06:41 +0200
+Subject: [PATCH] nvidia-uvm: fail fast on the first big-page sysmem attempt
+
+uvm_rm_mem_alloc() asks RM for 2M pages for sysmem allocations of 2M
+or more (64K pages from 64K) and retries with the default page size on
+NV_ERR_NO_MEMORY. This runs for the pushbuffer and the channels every
+time a UVM client retains a GPU, e.g. when a game or a Steam Fossilize
+process starts. With fragmented memory there is often no free order-9
+block, so the first attempt fails after stalling in direct reclaim and
+compaction, and the kernel log gets:
+
+  NVRM: ... Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from _memdescAllocInternal(pMemDesc) @ mem_desc.c:1348
+  NVRM: ... Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from rmStatus @ system_mem.c:448
+  NVRM: nvAssertOkFailedNoLog: Assertion failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from pRmApi->Alloc(...) @ nv_gpu_ops.c:5071
+
+The retry then succeeds with small pages; its log line is a
+UVM_ERR_PRINT() that is hidden unless uvm_debug_prints is set.
+
+Add a bFailFast field to UvmGpuAllocInfo and set it on the first
+attempt. nvGpuOpsAllocPhysical() turns it into the new
+NVOS32_ATTR2_FAIL_FAST bit for sysmem, and sysmemConstruct() sets
+MEMDESC_FLAGS_ALLOC_FAIL_FAST for it, so the high-order page
+allocation uses __GFP_NORETRY.
+
+ATTR2 bit 28 is unused in this driver version, including by the
+user-space driver built from the same release. A client that sets it
+only changes how hard its own allocation is tried.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+(cherry picked from commit 0d683ab7c070562540f967bb0926fb514027a5a9)
+---
+ kernel-open/common/inc/nv_uvm_types.h      | 2 ++
+ kernel-open/nvidia-uvm/uvm_rm_mem.c        | 4 ++++
+ src/common/sdk/nvidia/inc/nvos.h           | 9 +++++++++
+ src/nvidia/interface/nv_uvm_types.h        | 2 ++
+ src/nvidia/src/kernel/mem_mgr/system_mem.c | 7 +++++--
+ src/nvidia/src/kernel/rmapi/nv_gpu_ops.c   | 7 +++++++
+ 6 files changed, 29 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/common/inc/nv_uvm_types.h b/kernel-open/common/inc/nv_uvm_types.h
+index 850c94ef..87bc2f43 100644
+--- a/kernel-open/common/inc/nv_uvm_types.h
++++ b/kernel-open/common/inc/nv_uvm_types.h
+@@ -441,6 +441,8 @@ typedef struct UvmGpuAllocInfo_tag
+     NvHandle hPhysHandle;           // Handle for phys allocation either provided or retrieved
+     NvBool   bUnprotected;            // Allocation to be made in unprotected memory whenever
+                                       // SEV or GPU CC modes are enabled. Ignored otherwise
++    NvBool   bFailFast;               // Sysmem only: the caller retries with a smaller page
++                                      // size if the allocation fails, so fail it early
+ } UvmGpuAllocInfo;
+ 
+ typedef struct UvmGpuExternalMappingInfo_tag
+diff --git a/kernel-open/nvidia-uvm/uvm_rm_mem.c b/kernel-open/nvidia-uvm/uvm_rm_mem.c
+index 756080fb..2f336ef3 100644
+--- a/kernel-open/nvidia-uvm/uvm_rm_mem.c
++++ b/kernel-open/nvidia-uvm/uvm_rm_mem.c
+@@ -220,12 +220,16 @@ NV_STATUS uvm_rm_mem_alloc(uvm_gpu_t *gpu,
+         else if (size >= UVM_PAGE_SIZE_64K)
+             alloc_info.pageSize = UVM_PAGE_SIZE_64K;
+ 
++        // A failed big page attempt is retried below with the default page size
++        alloc_info.bFailFast = (size >= UVM_PAGE_SIZE_64K);
++
+         status = uvm_rm_locked_call(nvUvmInterfaceMemoryAllocSys(gpu->rm_address_space, size, &gpu_va, &alloc_info));
+ 
+         // TODO: Bug 5042223
+         if (status == NV_ERR_NO_MEMORY && size >= UVM_PAGE_SIZE_64K) {
+             UVM_ERR_PRINT("nvUvmInterfaceMemoryAllocSys alloc failed with big page size, retry with default page size\n");
+             alloc_info.pageSize = UVM_PAGE_SIZE_DEFAULT;
++            alloc_info.bFailFast = NV_FALSE;
+             status = uvm_rm_locked_call(nvUvmInterfaceMemoryAllocSys(gpu->rm_address_space, size, &gpu_va, &alloc_info));
+         }
+     }
+diff --git a/src/common/sdk/nvidia/inc/nvos.h b/src/common/sdk/nvidia/inc/nvos.h
+index 6688d736..12f56f5f 100644
+--- a/src/common/sdk/nvidia/inc/nvos.h
++++ b/src/common/sdk/nvidia/inc/nvos.h
+@@ -1299,6 +1299,15 @@ typedef struct
+ #define NVOS32_ATTR2_ALLOCATE_FROM_SUBHEAP_NO           0x00000000
+ #define NVOS32_ATTR2_ALLOCATE_FROM_SUBHEAP_YES          0x00000001
+ 
++//
++// The client retries a failed sysmem allocation with a smaller page size.
++// RM asks the OS to fail high-order page allocations early instead of
++// reclaiming and compacting memory hard for them.
++//
++#define NVOS32_ATTR2_FAIL_FAST                               28:28
++#define NVOS32_ATTR2_FAIL_FAST_NO                       0x00000000
++#define NVOS32_ATTR2_FAIL_FAST_YES                      0x00000001
++
+ //
+ // Force the video memory allocation to localized allocation.
+ // Same attribute can be used to choose between uGPU0 and uGPU1.
+diff --git a/src/nvidia/interface/nv_uvm_types.h b/src/nvidia/interface/nv_uvm_types.h
+index 3059ff2e..ff5304d9 100644
+--- a/src/nvidia/interface/nv_uvm_types.h
++++ b/src/nvidia/interface/nv_uvm_types.h
+@@ -441,6 +441,8 @@ typedef struct UvmGpuAllocInfo_tag
+     NvHandle hPhysHandle;           // Handle for phys allocation either provided or retrieved
+     NvBool   bUnprotected;            // Allocation to be made in unprotected memory whenever
+                                       // SEV or GPU CC modes are enabled. Ignored otherwise
++    NvBool   bFailFast;               // Sysmem only: the caller retries with a smaller page
++                                      // size if the allocation fails, so fail it early
+ } UvmGpuAllocInfo;
+ 
+ typedef struct UvmGpuExternalMappingInfo_tag
+diff --git a/src/nvidia/src/kernel/mem_mgr/system_mem.c b/src/nvidia/src/kernel/mem_mgr/system_mem.c
+index e2374fdd..6101db71 100644
+--- a/src/nvidia/src/kernel/mem_mgr/system_mem.c
++++ b/src/nvidia/src/kernel/mem_mgr/system_mem.c
+@@ -335,8 +335,11 @@ sysmemConstruct_IMPL
+ 
+         memdescSetFlag(pMemDesc, MEMDESC_FLAGS_SYSMEM_OWNED_BY_CLIENT, NV_TRUE);
+ 
+-        // A failed attempt is retried below with the next smaller page size.
+-        if (bRetry)
++        //
++        // A failed attempt is retried with the next smaller page size, either
++        // below or by the client.
++        //
++        if (bRetry || FLD_TEST_DRF(OS32, _ATTR2, _FAIL_FAST, _YES, pAllocData->attr2))
+             memdescSetFlag(pMemDesc, MEMDESC_FLAGS_ALLOC_FAIL_FAST, NV_TRUE);
+ 
+         if ((sysGetStaticConfig(SYS_GET_INSTANCE()))->bOsCCEnabled &&
+diff --git a/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c b/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c
+index 0bb8100a..0e24316b 100644
+--- a/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c
++++ b/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c
+@@ -5063,6 +5063,13 @@ static NV_STATUS nvGpuOpsAllocPhysical(struct gpuDevice *device,
+                                            _UNPROTECTED, memAllocParams.attr2);
+     }
+ 
++    // The client retries a failed big-page allocation with smaller pages.
++    if (isSystemMemory && allocInfo->bFailFast)
++    {
++        memAllocParams.attr2 = FLD_SET_DRF(OS32, _ATTR2, _FAIL_FAST, _YES,
++                                           memAllocParams.attr2);
++    }
++
+     // vid heap ctrl has a different policy as compared to other internal APIS
+     // it expects the gpu lock to not be held. This means we have to drop the gpu lock
+     // here. It is safe in this scenario because we still have the API lock and nothing

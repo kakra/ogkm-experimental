@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Tue, 27 Oct 2026 19:16:36 +0100
+Subject: [PATCH] nvidia: zero os_alloc_mem() allocations
+
+os_alloc_mem() backs the RM heap (portMemAllocNonPaged() and friends)
+with kmalloc() or vmalloc() and returns the memory uninitialized. There
+are about 560 portMemAllocNonPaged() call sites in RM; whether all of
+them initialize everything they later read cannot reasonably be
+checked. Most distribution kernels enable init_on_alloc, so the memory
+is zeroed in practice, and a kernel without it may expose code paths
+that depend on that.
+
+Zero the allocations in os_alloc_mem() with __GFP_ZERO. With
+init_on_alloc set this costs nothing extra, the allocator only zeroes
+once. Without it, RM behaves as it does on a kernel with
+init_on_alloc, while the rest of the system keeps the cheaper
+uninitialized allocations.
+
+GPU system memory (nv_alloc_pages()) is not affected; it is zeroed
+by the driver as long as NVreg_InitializeSystemMemoryAllocations
+keeps its default of 1. nvidia-modeset and nvidia-uvm have their own
+allocators and are not covered by this change.
+
+[Also zero the order 1 to 5 kmalloc() attempt that
+"nvidia: don't retry high-order kmalloc in os_alloc_mem()" added,
+with a new NV_KZALLOC_NORETRY().]
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+(cherry picked from commit 819622c556cda388c8c447a7c96d0536f817b896)
+---
+ kernel-open/common/inc/nv-linux.h | 18 ++++++++++++++++++
+ kernel-open/nvidia/os-interface.c | 13 +++++++++----
+ 2 files changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/kernel-open/common/inc/nv-linux.h b/kernel-open/common/inc/nv-linux.h
+index 636215a5..c90679b4 100644
+--- a/kernel-open/common/inc/nv-linux.h
++++ b/kernel-open/common/inc/nv-linux.h
+@@ -451,6 +451,24 @@ static NvBool nv_numa_node_has_memory(int node_id)
+         NV_MEMDBG_ADD(ptr, size);              \
+     }
+ 
++#define NV_KZALLOC_ATOMIC(ptr, size) \
++    { \
++        (ptr) = kzalloc(size, NV_GFP_ATOMIC); \
++        NV_MEMDBG_ADD(ptr, size);             \
++    }
++
++#define NV_KZALLOC_NO_OOM(ptr, size) \
++    { \
++        (ptr) = kzalloc(size, NV_GFP_NO_OOM); \
++        NV_MEMDBG_ADD(ptr, size);             \
++    }
++
++#define NV_KZALLOC_NORETRY(ptr, size) \
++    { \
++        (ptr) = kzalloc(size, NV_GFP_NORETRY); \
++        NV_MEMDBG_ADD(ptr, size);              \
++    }
++
+ #define NV_KFREE(ptr, size) \
+     { \
+         NV_MEMDBG_REMOVE(ptr, size); \
+diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
+index 73a609f1..673f3632 100644
+--- a/kernel-open/nvidia/os-interface.c
++++ b/kernel-open/nvidia/os-interface.c
+@@ -642,16 +642,21 @@ NV_STATUS NV_API_CALL os_alloc_mem(
+     if (alloc_size != size)
+         return NV_ERR_INVALID_PARAMETER;
+ 
++    //
++    // Return zeroed memory, so that RM behaves the same whether or not the
++    // kernel runs with init_on_alloc. The allocator does not zero twice when
++    // init_on_alloc is set.
++    //
+     if (!NV_MAY_SLEEP())
+     {
+         if (alloc_size <= KMALLOC_LIMIT)
+-            NV_KMALLOC_ATOMIC(*address, alloc_size);
++            NV_KZALLOC_ATOMIC(*address, alloc_size);
+     }
+     else
+     {
+         if (alloc_size <= PAGE_SIZE)
+         {
+-            NV_KMALLOC_NO_OOM(*address, alloc_size);
++            NV_KZALLOC_NO_OOM(*address, alloc_size);
+         }
+         else if (alloc_size <= KMALLOC_LIMIT)
+         {
+@@ -660,11 +665,11 @@ NV_STATUS NV_API_CALL os_alloc_mem(
+             // retry reclaim and compaction for it, we fall back to vmalloc
+             // anyway. This follows kvmalloc().
+             //
+-            NV_KMALLOC_NORETRY(*address, alloc_size);
++            NV_KZALLOC_NORETRY(*address, alloc_size);
+         }
+         if (*address == NULL)
+         {
+-            *address = nv_vmalloc(alloc_size, GFP_KERNEL);
++            *address = nv_vmalloc(alloc_size, GFP_KERNEL | __GFP_ZERO);
+             alloc_size |= VMALLOC_ALLOCATION_SIZE_FLAG;
+         }
+     }

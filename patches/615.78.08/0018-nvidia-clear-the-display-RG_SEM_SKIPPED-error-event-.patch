@@ -1,0 +1,179 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 19 Oct 2026 19:53:00 +0200
+Subject: [PATCH] nvidia: clear the display RG_SEM_SKIPPED error event from the
+ CPU
+
+When the display skips an RG semaphore release (seen on the NVKMS vblank
+RG semaphore, index 5, with nvidia_drm vblank=1), it latches the head's
+NV_PDISP_FE_HEAD_SEM_DEBUG bit and raises RG_SEM_SKIPPED (bit 26) in
+NV_PDISP_FE_EVT_STAT_ERROR_DISP. That event is routed to GSP-RM via
+CTRL_DISP ERROR, but GSP-RM has no handler for it and never resets it.
+The interrupt stays pending, GSP-RM services MC_ENGINE_IDX_DISP_GSP in a
+loop ("Stuck interrupt detected for mcEngine 165" every ~1.7 ms), the
+GSP sits at ~98 % and its utilisation-based PERF_CF controller pins the
+GPU clocks at max until the next suspend/resume. Every GSP RPC is ~4.5x
+slower meanwhile.
+
+Clearing bit 26 from the CPU (write-1-to-clear) ends it immediately
+(verified on an AD104 laptop: GSP 98 % -> 5 %, P0 -> P4). Do that in the
+CPU-RM RG semaphore interrupt handler, which runs on every vblank while
+an RG semaphore interrupt is enabled: one extra register read per
+interrupt, and on a hit clear the per-head HEAD_SEM_DEBUG bits too and
+log a rate-limited line with the heads. Limited to the Ampere/Ada
+displays (v04_01/v04_02) whose manuals define these registers.
+
+nvidia.clear_rg_sem_skipped=0 (module parameter, also writable at
+runtime) disables it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/os-interface.h         |  2 +
+ kernel-open/nvidia/os-interface.c             | 22 +++++++
+ .../arch/nvalloc/unix/include/os-interface.h  |  2 +
+ .../gpu/disp/head/arch/v04/kernel_head_0401.c | 61 +++++++++++++++++++
+ 4 files changed, 87 insertions(+)
+
+diff --git a/kernel-open/common/inc/os-interface.h b/kernel-open/common/inc/os-interface.h
+index 5db83781..5409817c 100644
+--- a/kernel-open/common/inc/os-interface.h
++++ b/kernel-open/common/inc/os-interface.h
+@@ -172,6 +172,8 @@ NvBool      NV_API_CALL  os_is_vgx_hyper                  (void);
+ NvBool      NV_API_CALL  os_lockless_ctrl_no_power_ref    (void);
+ NvBool      NV_API_CALL  os_readonly_get_surface_info     (void);
+ NvBool      NV_API_CALL  os_async_perf_boost              (void);
++NvBool      NV_API_CALL  os_clear_rg_sem_skipped          (void);
++void        NV_API_CALL  os_log_rg_sem_skipped            (NvU32);
+ NV_STATUS   NV_API_CALL  os_inject_vgx_msi                (NvU16, NvU64, NvU32);
+ NvBool      NV_API_CALL  os_is_grid_supported             (void);
+ NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
+diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
+index ea908c4a..b4369be8 100644
+--- a/kernel-open/nvidia/os-interface.c
++++ b/kernel-open/nvidia/os-interface.c
+@@ -1556,6 +1556,28 @@ NvBool NV_API_CALL os_async_perf_boost(void)
+     return READ_ONCE(async_perf_boost);
+ }
+ 
++static bool clear_rg_sem_skipped = true;
++module_param(clear_rg_sem_skipped, bool, 0644);
++MODULE_PARM_DESC(clear_rg_sem_skipped,
++                 "Clear the display RG_SEM_SKIPPED error event from the CPU on RG semaphore "
++                 "interrupts. GSP-RM never clears it, so its interrupt stays pending and keeps "
++                 "the GSP busy (and the GPU clocks at max) until the next suspend/resume.");
++
++static atomic_t rg_sem_skipped_count = ATOMIC_INIT(0);
++
++NvBool NV_API_CALL os_clear_rg_sem_skipped(void)
++{
++    return READ_ONCE(clear_rg_sem_skipped);
++}
++
++void NV_API_CALL os_log_rg_sem_skipped(NvU32 headMask)
++{
++    int count = atomic_inc_return(&rg_sem_skipped_count);
++
++    printk_ratelimited(KERN_INFO "NVRM: cleared display RG_SEM_SKIPPED error "
++                       "(head mask 0x%x, %d since load)\n", headMask, count);
++}
++
+ NV_STATUS NV_API_CALL os_inject_vgx_msi(NvU16 guestID, NvU64 msiAddr, NvU32 msiData)
+ {
+ #if defined(NV_VGX_HYPER) && defined(NV_DOM0_KERNEL_PRESENT) && \
+diff --git a/src/nvidia/arch/nvalloc/unix/include/os-interface.h b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
+index bfcb0443..551be8f8 100644
+--- a/src/nvidia/arch/nvalloc/unix/include/os-interface.h
++++ b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
+@@ -168,6 +168,8 @@ NvBool      NV_API_CALL  os_is_vgx_hyper                  (void);
+ NvBool      NV_API_CALL  os_lockless_ctrl_no_power_ref    (void);
+ NvBool      NV_API_CALL  os_readonly_get_surface_info     (void);
+ NvBool      NV_API_CALL  os_async_perf_boost              (void);
++NvBool      NV_API_CALL  os_clear_rg_sem_skipped          (void);
++void        NV_API_CALL  os_log_rg_sem_skipped            (NvU32);
+ NV_STATUS   NV_API_CALL  os_inject_vgx_msi                (NvU16, NvU64, NvU32);
+ NvBool      NV_API_CALL  os_is_grid_supported             (void);
+ NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
+diff --git a/src/nvidia/src/kernel/gpu/disp/head/arch/v04/kernel_head_0401.c b/src/nvidia/src/kernel/gpu/disp/head/arch/v04/kernel_head_0401.c
+index 32b3d07d..c121468b 100644
+--- a/src/nvidia/src/kernel/gpu/disp/head/arch/v04/kernel_head_0401.c
++++ b/src/nvidia/src/kernel/gpu/disp/head/arch/v04/kernel_head_0401.c
+@@ -38,6 +38,19 @@
+ #include "ctrl/ctrlc370/ctrlc370event.h"
+ #include "gpu/disp/kern_disp.h"
+ #include "gpu/disp/head/kernel_head.h"
++#include "os-interface.h" // os_clear_rg_sem_skipped, os_log_rg_sem_skipped
++
++/* From the v04_01/v04_02 display manuals; not in the published v04_01 excerpt. */
++#ifndef NV_PDISP_FE_EVT_STAT_ERROR_DISP
++#define NV_PDISP_FE_EVT_STAT_ERROR_DISP                         0x00611848 /* RW-4R */
++#define NV_PDISP_FE_EVT_STAT_ERROR_DISP_RG_SEM_SKIPPED               26:26 /* RWIVF */
++#define NV_PDISP_FE_EVT_STAT_ERROR_DISP_RG_SEM_SKIPPED_PENDING  0x00000001 /* R---V */
++#define NV_PDISP_FE_EVT_STAT_ERROR_DISP_RG_SEM_SKIPPED_RESET    0x00000001 /* -W--V */
++#endif
++#ifndef NV_PDISP_FE_HEAD_SEM_DEBUG
++#define NV_PDISP_FE_HEAD_SEM_DEBUG(i)              (0x00612080+(i)*2048) /* RW-4A */
++#define NV_PDISP_FE_HEAD_SEM_DEBUG_STATUS_RGSEM_ALL                   5:0 /* one W1C bit per RG semaphore */
++#endif
+ 
+ void
+ kheadReadPendingRgSemIntr_v04_01
+@@ -62,6 +75,52 @@ kheadReadPendingRgSemIntr_v04_01
+     }
+ }
+ 
++/*
++ * When the display skips an RG semaphore release it latches the head's
++ * HEAD_SEM_DEBUG bit and raises the RG_SEM_SKIPPED error event, which is
++ * routed to GSP-RM through CTRL_DISP ERROR. GSP-RM has no handler for that
++ * event, so it never clears it: the GSP services the pending interrupt in a
++ * loop (its stuck-interrupt watchdog fires every ~1.7 ms), stays ~98 % busy,
++ * and its utilisation-based clock policy pins the GPU clocks at max until
++ * GSP-RM is reloaded. Clear it from here, which runs on every RG semaphore
++ * (vblank) interrupt. Only for the Ampere/Ada displays whose manuals define
++ * these registers.
++ */
++static void
++_kheadClearRgSemSkipped
++(
++    OBJGPU            *pGpu,
++    KernelDisplay     *pKernelDisplay,
++    THREAD_STATE_NODE *pThreadState
++)
++{
++    NvU32 errDisp, head, headMask = 0;
++
++    if (!os_clear_rg_sem_skipped() || !(IsAMPERE(pGpu) || IsADA(pGpu)))
++        return;
++
++    errDisp = GPU_REG_RD32_EX(pGpu, NV_PDISP_FE_EVT_STAT_ERROR_DISP, pThreadState);
++    if (!FLD_TEST_DRF(_PDISP, _FE_EVT_STAT_ERROR_DISP, _RG_SEM_SKIPPED, _PENDING, errDisp))
++        return;
++
++    for (head = 0; head < kdispGetNumHeads(pKernelDisplay); ++head)
++    {
++        NvU32 semDebug = DRF_VAL(_PDISP, _FE_HEAD_SEM_DEBUG, _STATUS_RGSEM_ALL,
++                                 GPU_REG_RD32_EX(pGpu, NV_PDISP_FE_HEAD_SEM_DEBUG(head), pThreadState));
++        if (semDebug != 0)
++        {
++            GPU_REG_WR32_EX(pGpu, NV_PDISP_FE_HEAD_SEM_DEBUG(head), semDebug, pThreadState);
++            headMask |= NVBIT(head);
++        }
++    }
++
++    GPU_REG_WR32_EX(pGpu, NV_PDISP_FE_EVT_STAT_ERROR_DISP,
++                    DRF_DEF(_PDISP, _FE_EVT_STAT_ERROR_DISP, _RG_SEM_SKIPPED, _RESET),
++                    pThreadState);
++
++    os_log_rg_sem_skipped(headMask);
++}
++
+ void
+ kheadHandleRgSemIntr_v04_01
+ (
+@@ -95,4 +154,6 @@ kheadHandleRgSemIntr_v04_01
+             kdispNotifyEvent(pGpu, pKernelDisplay, NVC370_NOTIFIERS_RG_SEM_NOTIFICATION, &params, sizeof(params), 0, 0);
+         }
+     }
++
++    _kheadClearRgSemSkipped(pGpu, pKernelDisplay, pThreadState);
+ }

@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nicholas Gigliotti <ndgigliotti@gmail.com>
+Date: Tue, 6 Oct 2026 12:28:41 -0400
+Subject: [PATCH] nvidia: correct Linux rwsem conditional acquisition status
+
+down_read_trylock() and down_write_trylock() return 1 when they acquire
+the lock and 0 when they cannot, unlike down_trylock(), which returns 0
+on success. os_cond_acquire_rwlock_read() and
+os_cond_acquire_rwlock_write() checked the result as if it were
+down_trylock(): a successful acquire was reported as
+NV_ERR_TIMEOUT_RETRY with the lock left held, and a failed one was
+reported as NV_OK without the lock.
+
+The only RM user is the API_LOCK_FLAGS_COND_ACQUIRE branch of
+rmapiLockAcquire(), and no caller in this tree passes that flag, so this
+is currently dead code. Fix it so a future conditional API lock acquire
+doesn't leak the lock (deadlock) or run without it.
+
+References:
+- NVIDIA/open-gpu-kernel-modules PR 1424
+---
+ kernel-open/nvidia/os-interface.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
+index b4369be8..e7d9607f 100644
+--- a/kernel-open/nvidia/os-interface.c
++++ b/kernel-open/nvidia/os-interface.c
+@@ -345,7 +345,7 @@ NV_STATUS NV_API_CALL os_cond_acquire_rwlock_read(void *pRwLock)
+ {
+     os_rwlock_t *os_rwlock = (os_rwlock_t *)pRwLock;
+ 
+-    if (down_read_trylock(&os_rwlock->sem))
++    if (!down_read_trylock(&os_rwlock->sem))
+     {
+         return NV_ERR_TIMEOUT_RETRY;
+     }
+@@ -357,7 +357,7 @@ NV_STATUS NV_API_CALL os_cond_acquire_rwlock_write(void *pRwLock)
+ {
+     os_rwlock_t *os_rwlock = (os_rwlock_t *)pRwLock;
+ 
+-    if (down_write_trylock(&os_rwlock->sem))
++    if (!down_write_trylock(&os_rwlock->sem))
+     {
+         return NV_ERR_TIMEOUT_RETRY;
+     }

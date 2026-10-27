@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Sun, 18 Oct 2026 22:31:55 +0200
+Subject: [PATCH] nvidia: don't restore caching type after a failed sysmem
+ allocation
+
+When nv_alloc_system_pages() fails partway through, it calls
+nv_free_system_pages() for cleanup. For non-cached allocations, that
+function unconditionally restores the caching type with
+nv_set_memory_type(at, NV_MEMORY_WRITEBACK). It does this even though
+the type was never changed to UC, which only happens after all pages
+have been allocated.
+
+nv_set_memory_type() walks all at->num_pages entries of the page table.
+On a partial allocation, the unpopulated entries have phys_addr 0, so
+set_pages_array_wb() gets the struct page of PFN 0 for each of them.
+memtype_free() then finds no matching entry and logs one line per page:
+
+  x86/PAT: <comm>:<pid> freeing invalid memtype [mem 0x00000000-0x00000fff]
+
+A single failed allocation under memory pressure can produce tens of
+thousands of these lines. That overruns the kernel log buffer
+("/dev/kmsg buffer overrun") and drops the messages that would explain
+the actual failure.
+
+Track whether the caching type was changed with a new memtype_set flag,
+and restore it only in that case.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 7692cd97bedde1db1492306a665ea4efc3ef3e20)
+---
+ kernel-open/common/inc/nv-linux.h |  1 +
+ kernel-open/nvidia/nv-vm.c        | 10 +++++++++-
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/kernel-open/common/inc/nv-linux.h b/kernel-open/common/inc/nv-linux.h
+index 8e432dee..e4471f38 100644
+--- a/kernel-open/common/inc/nv-linux.h
++++ b/kernel-open/common/inc/nv-linux.h
+@@ -929,6 +929,7 @@ typedef struct nv_alloc_s {
+         NvBool coherent    : 1;
+         NvBool carveout    : 1;
+         NvBool pool        : 1;
++        NvBool memtype_set : 1;
+     } flags;
+     unsigned int   cache_type;
+     unsigned int   num_pages;
+diff --git a/kernel-open/nvidia/nv-vm.c b/kernel-open/nvidia/nv-vm.c
+index 2b32e4b3..c4ec2bdc 100644
+--- a/kernel-open/nvidia/nv-vm.c
++++ b/kernel-open/nvidia/nv-vm.c
+@@ -1027,9 +1027,16 @@ nv_free_system_pages
+ 
+     nv_account_mm_free(at->accounting_mm_work);
+ 
+-    if (at->cache_type != NV_MEMORY_CACHED)
++    //
++    // Only restore the caching type if nv_alloc_system_pages() changed it.
++    // On a failed allocation, the page table is only partially populated and
++    // the remaining entries would make set_pages_array_wb() operate on PFN 0,
++    // flooding the kernel log with "x86/PAT: freeing invalid memtype" messages.
++    //
++    if (at->flags.memtype_set)
+     {
+         nv_set_memory_type(at, NV_MEMORY_WRITEBACK);
++        at->flags.memtype_set = NV_FALSE;
+     }
+ 
+     for (i = 0; i < num_pages; i++)
+@@ -1144,6 +1151,7 @@ nv_alloc_system_pages
+     if (at->cache_type != NV_MEMORY_CACHED)
+     {
+         nv_set_memory_type(at, NV_MEMORY_UNCACHED);
++        at->flags.memtype_set = NV_TRUE;
+     }
+ 
+     return NV_OK;

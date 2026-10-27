@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sun, 18 Oct 2026 22:12:44 +0200
+Subject: [PATCH] nvidia: take the API lock for read for GET_SURFACE_INFO
+
+NV0041_CTRL_CMD_GET_SURFACE_INFO is flagged without
+RMCTRL_FLAGS_API_LOCK_READONLY, so it takes the global RM API lock for
+write. nvidia-modeset calls it while registering every framebuffer
+(DRM ADDFB2), and a write acquire waits for every READ-locked control
+of every other client: when an app starts, the compositor's main thread
+waited 2.9 ms behind the app's PERF_BOOST GSP RPC.
+
+The control only reads the Memory object's descriptor (size, address
+space, physical attributes, compression coverage) and HW resource
+attributes, which are fixed once the memory is allocated. Frees, allocs,
+dups and maps take the API lock for write, and the control still takes
+its client lock for write and the GPU lock, so a READ API lock is
+enough.
+
+nvidia.readonly_get_surface_info=0 (module parameter, also writable at
+runtime) restores the WRITE lock.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/os-interface.h         |  1 +
+ kernel-open/nvidia/os-interface.c             | 11 +++++++++++
+ .../arch/nvalloc/unix/include/os-interface.h  |  1 +
+ src/nvidia/src/kernel/rmapi/control.c         | 19 ++++++++++++++++++-
+ 4 files changed, 31 insertions(+), 1 deletion(-)
+
+diff --git a/kernel-open/common/inc/os-interface.h b/kernel-open/common/inc/os-interface.h
+index 9970042b..1b0cdc4b 100644
+--- a/kernel-open/common/inc/os-interface.h
++++ b/kernel-open/common/inc/os-interface.h
+@@ -170,6 +170,7 @@ NvBool      NV_API_CALL  os_is_efi_enabled                (void);
+ NvBool      NV_API_CALL  os_is_xen_dom0                   (void);
+ NvBool      NV_API_CALL  os_is_vgx_hyper                  (void);
+ NvBool      NV_API_CALL  os_lockless_ctrl_no_power_ref    (void);
++NvBool      NV_API_CALL  os_readonly_get_surface_info     (void);
+ NV_STATUS   NV_API_CALL  os_inject_vgx_msi                (NvU16, NvU64, NvU32);
+ NvBool      NV_API_CALL  os_is_grid_supported             (void);
+ NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
+diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
+index eef72ec3..3364a62f 100644
+--- a/kernel-open/nvidia/os-interface.c
++++ b/kernel-open/nvidia/os-interface.c
+@@ -1534,6 +1534,17 @@ NvBool NV_API_CALL os_lockless_ctrl_no_power_ref(void)
+     return READ_ONCE(lockless_ctrl_no_power_ref);
+ }
+ 
++static bool readonly_get_surface_info = true;
++module_param(readonly_get_surface_info, bool, 0644);
++MODULE_PARM_DESC(readonly_get_surface_info,
++                 "Take the RM API lock for read instead of write for NV0041_CTRL_CMD_GET_SURFACE_INFO "
++                 "(a read-only query nvidia-modeset makes when registering a framebuffer).");
++
++NvBool NV_API_CALL os_readonly_get_surface_info(void)
++{
++    return READ_ONCE(readonly_get_surface_info);
++}
++
+ NV_STATUS NV_API_CALL os_inject_vgx_msi(NvU16 guestID, NvU64 msiAddr, NvU32 msiData)
+ {
+ #if defined(NV_VGX_HYPER) && defined(NV_DOM0_KERNEL_PRESENT) && \
+diff --git a/src/nvidia/arch/nvalloc/unix/include/os-interface.h b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
+index f5d6e728..c710e4e6 100644
+--- a/src/nvidia/arch/nvalloc/unix/include/os-interface.h
++++ b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
+@@ -166,6 +166,7 @@ NvBool      NV_API_CALL  os_is_efi_enabled                (void);
+ NvBool      NV_API_CALL  os_is_xen_dom0                   (void);
+ NvBool      NV_API_CALL  os_is_vgx_hyper                  (void);
+ NvBool      NV_API_CALL  os_lockless_ctrl_no_power_ref    (void);
++NvBool      NV_API_CALL  os_readonly_get_surface_info     (void);
+ NV_STATUS   NV_API_CALL  os_inject_vgx_msi                (NvU16, NvU64, NvU32);
+ NvBool      NV_API_CALL  os_is_grid_supported             (void);
+ NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
+diff --git a/src/nvidia/src/kernel/rmapi/control.c b/src/nvidia/src/kernel/rmapi/control.c
+index f4004505..dab39bb5 100644
+--- a/src/nvidia/src/kernel/rmapi/control.c
++++ b/src/nvidia/src/kernel/rmapi/control.c
+@@ -42,7 +42,8 @@
+ #include "ctrl/ctrl0000/ctrl0000gpuacct.h" // NV0000_CTRL_CMD_GPUACCT_*
+ #include "ctrl/ctrl2080/ctrl2080tmr.h" // NV2080_CTRL_CMD_TIMER_SCHEDULE
+ #include "ctrl/ctrl2080/ctrl2080fb.h" // NV2080_CTRL_CMD_FB_GET_MEM_ALIGNMENT
+-#include "os-interface.h" // os_lockless_ctrl_no_power_ref
++#include "ctrl/ctrl0041.h" // NV0041_CTRL_CMD_GET_SURFACE_INFO
++#include "os-interface.h" // os_lockless_ctrl_no_power_ref, os_readonly_get_surface_info
+ 
+ static NV_STATUS
+ releaseDeferRmCtrlBuffer(RmCtrlDeferredCmd* pRmCtrlDeferredCmd)
+@@ -962,6 +963,22 @@ serverControlLookupLockFlags
+             *pAccess = LOCK_ACCESS_READ;
+         }
+ 
++        //
++        // GET_SURFACE_INFO only reads the Memory object's descriptor and HW
++        // resource attributes, which are fixed once the memory is allocated.
++        // Frees, allocs, dups and maps take the API lock for write, and the
++        // control still takes the client lock (write) and the GPU lock, so
++        // a READ API lock is enough. nvidia-modeset calls it while registering
++        // every framebuffer; with the WRITE lock that waited for every other
++        // client's READ-locked control (e.g. a PERF_BOOST GSP RPC when an app
++        // starts), stalling the compositor.
++        //
++        if ((pRmCtrlParams->cmd == NV0041_CTRL_CMD_GET_SURFACE_INFO) &&
++            os_readonly_get_surface_info())
++        {
++            *pAccess = LOCK_ACCESS_READ;
++        }
++
+         //
+         // ROUTE_TO_PHYSICAL controls always take the READ API lock. This only applies
+         // to GSP clients: Only there can we guarantee per-gpu execution of commands.

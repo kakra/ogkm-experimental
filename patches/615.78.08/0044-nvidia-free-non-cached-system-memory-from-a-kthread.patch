@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Mon, 26 Oct 2026 21:26:08 +0000
+Subject: [PATCH] nvidia: free non-cached system memory from a kthread
+
+When the RM frees write-combined or uncached system memory,
+nv_free_system_pages() first restores the pages to write-back with
+set_pages_array_wb(). That updates the PAT memtype tree for every page
+and flushes the TLBs, which takes several milliseconds for a large
+allocation. For SystemMemory objects the RM does this with its GPU lock
+and the API lock held, so other clients and the display interrupt
+bottom half have to wait. At 144 Hz a single such free can make a head
+miss a flip.
+
+Measured on an RTX 3080 Ti with bpftrace: Chrome regularly freed
+non-cached memory in 2-3.5 ms, a game freed five allocations of
+3.4-5.7 ms each within one second on exit.
+
+Once the usage count of the allocation drops to zero, no user mapping
+is left and the RM no longer references the pages. Hand the
+non-cached case over to a new nv_free_queue kthread, which restores
+the caching type, frees the pages and then the nv_alloc_t. If the
+queue is not running, free synchronously as before. Cached and
+contiguous allocations are not affected.
+
+The queue is stopped after the other queues on module unload, so all
+pending frees complete before the page pools are destroyed.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nv-linux.h |  1 +
+ kernel-open/nvidia/nv.c           | 40 +++++++++++++++++++++++++++++++
+ 2 files changed, 41 insertions(+)
+
+diff --git a/kernel-open/common/inc/nv-linux.h b/kernel-open/common/inc/nv-linux.h
+index ba21929d..636215a5 100644
+--- a/kernel-open/common/inc/nv-linux.h
++++ b/kernel-open/common/inc/nv-linux.h
+@@ -953,6 +953,7 @@ typedef struct nv_alloc_s {
+     struct sg_table *import_sgt;
+     dma_addr_t     dma_handle;          /* dma handle used by dma_alloc_coherent(), dma_free_coherent() */
+     nv_linux_mm_free_work_t *accounting_mm_work;
++    nv_kthread_q_item_t free_q_item;    /* deferred free of non-cached pages */
+ } nv_alloc_t;
+ 
+ /**
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index 3439d0cb..fe0acbc3 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -190,6 +190,7 @@ extern NvU32 nv_dma_remap_peer_mmio;
+ 
+ nv_kthread_q_t nv_kthread_q;
+ nv_kthread_q_t nv_deferred_close_kthread_q;
++nv_kthread_q_t nv_deferred_free_kthread_q;
+ 
+ struct rw_semaphore nv_system_pm_lock;
+ 
+@@ -584,6 +585,7 @@ nv_module_state_exit(nv_stack_t *sp)
+ 
+     nv_kthread_q_stop(&nv_deferred_close_kthread_q);
+     nv_kthread_q_stop(&nv_kthread_q);
++    nv_kthread_q_stop(&nv_deferred_free_kthread_q);
+ 
+     nv_destroy_page_pools();
+ 
+@@ -622,6 +624,14 @@ nv_module_state_init(nv_stack_t *sp)
+         goto exit;
+     }
+ 
++    rc = nv_kthread_q_init(&nv_deferred_free_kthread_q, "nv_free_queue");
++    if (rc != 0)
++    {
++        nv_kthread_q_stop(&nv_deferred_close_kthread_q);
++        nv_kthread_q_stop(&nv_kthread_q);
++        goto exit;
++    }
++
+     nv_linux_devices = NULL;
+     bitmap_clear(nv_linux_minor_bitmap, 0, NV_MINOR_DEVICE_NUMBER_REGULAR_MAX + 1);
+     NV_INIT_MUTEX(&nv_linux_devices_lock);
+@@ -4210,6 +4220,14 @@ failed:
+     return status;
+ }
+ 
++static void nv_free_system_pages_deferred(void *args)
++{
++    nv_alloc_t *at = args;
++
++    nv_free_system_pages(at);
++    nvos_free_alloc(at);
++}
++
+ NV_STATUS NV_API_CALL nv_free_pages(
+     nv_state_t *nv,
+     NvU32 page_count,
+@@ -4240,9 +4258,31 @@ NV_STATUS NV_API_CALL nv_free_pages(
+     if (!at->flags.guest && !at->import_sgt)
+     {
+         if (at->flags.contig)
++        {
+             nv_free_contig_pages(at);
++        }
+         else
++        {
++            //
++            // Restoring the caching type of non-cached pages takes a PAT
++            // update and TLB flushes per page, which adds up to several
++            // milliseconds for big allocations. The RM usually calls this
++            // with its GPU lock held, which also stalls display interrupt
++            // handling. The last user mapping is gone at this point and
++            // the RM no longer references the pages, so restore and free
++            // them from a kthread instead.
++            //
++            if (at->flags.memtype_set)
++            {
++                nv_kthread_q_item_init(&at->free_q_item,
++                                       nv_free_system_pages_deferred, at);
++                if (nv_kthread_q_schedule_q_item(&nv_deferred_free_kthread_q,
++                                                 &at->free_q_item))
++                    return rmStatus;
++            }
++
+             nv_free_system_pages(at);
++        }
+     }
+ 
+     nvos_free_alloc(at);

@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Sat, 24 Oct 2026 15:05:26 +0200
+Subject: [PATCH] nvidia: fail fast on big-page sysmem attempts that RM retries
+ itself
+
+Two RM-internal sysmem allocations try big pages first and fall back to
+smaller pages on NV_ERR_NO_MEMORY:
+
+- sysmemConstruct() with NVOS32_ATTR_PAGE_SIZE_DEFAULT on GPUs that
+  allow large default sysmem pages walks down the page sizes with
+  _sysmemGetNextSmallestPageSize().
+- _kgmmuClientShadowFaultBufferPagesAllocate() asks for huge pages
+  and retries with RM_PAGE_SIZE (Bug 5042223). This runs every time a
+  UVM client registers a GPU.
+
+Set MEMDESC_FLAGS_ALLOC_FAIL_FAST on these attempts so that they don't
+stall in direct reclaim and compaction when memory is fragmented. The
+last attempt uses the smallest page size, which is an order-0
+allocation and keeps __GFP_RETRY_MAYFAIL either way; the shadow fault
+buffer clears the flag before its retry to make that explicit.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+(cherry picked from commit 57486605d761809ed40501b9163c1c6bf47dfd1e)
+---
+ src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c  | 4 +++-
+ src/nvidia/src/kernel/mem_mgr/system_mem.c | 4 ++++
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c b/src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c
+index a1fcfb37..56169d1d 100644
+--- a/src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c
++++ b/src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c
+@@ -1606,7 +1606,8 @@ _kgmmuClientShadowFaultBufferPagesAllocate
+     NV_STATUS status;
+     GMMU_CLIENT_SHADOW_FAULT_BUFFER *pClientShadowFaultBuffer;
+     MEMORY_DESCRIPTOR *pMemDesc;
+-    NvU64 flags = MEMDESC_FLAGS_NONE;
++    // The huge page attempt below falls back to small pages.
++    NvU64 flags = MEMDESC_FLAGS_ALLOC_FAIL_FAST;
+     NvU32 shadowFaultBufferSizeTotal;
+ 
+     //
+@@ -1642,6 +1643,7 @@ _kgmmuClientShadowFaultBufferPagesAllocate
+     {
+         NV_PRINTF(LEVEL_ERROR, "Allocation failed with big page size, retrying with default page size\n");
+         memdescSetPageSize(pMemDesc, AT_GPU, RM_PAGE_SIZE);
++        memdescSetFlag(pMemDesc, MEMDESC_FLAGS_ALLOC_FAIL_FAST, NV_FALSE);
+         memdescTagAlloc(status, NV_FB_ALLOC_RM_INTERNAL_OWNER_UNNAMED_TAG_33, pMemDesc);
+     }
+ 
+diff --git a/src/nvidia/src/kernel/mem_mgr/system_mem.c b/src/nvidia/src/kernel/mem_mgr/system_mem.c
+index 2dc8f00d..e2374fdd 100644
+--- a/src/nvidia/src/kernel/mem_mgr/system_mem.c
++++ b/src/nvidia/src/kernel/mem_mgr/system_mem.c
+@@ -335,6 +335,10 @@ sysmemConstruct_IMPL
+ 
+         memdescSetFlag(pMemDesc, MEMDESC_FLAGS_SYSMEM_OWNED_BY_CLIENT, NV_TRUE);
+ 
++        // A failed attempt is retried below with the next smaller page size.
++        if (bRetry)
++            memdescSetFlag(pMemDesc, MEMDESC_FLAGS_ALLOC_FAIL_FAST, NV_TRUE);
++
+         if ((sysGetStaticConfig(SYS_GET_INSTANCE()))->bOsCCEnabled &&
+             gpuIsCCFeatureEnabled(pGpu) 
+             && FLD_TEST_DRF(OS32, _ATTR2, _MEMORY_PROTECTION, _UNPROTECTED,

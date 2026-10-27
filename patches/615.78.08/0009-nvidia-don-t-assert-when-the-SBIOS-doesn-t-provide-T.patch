@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Fri, 16 Oct 2026 07:33:27 +0200
+Subject: [PATCH] nvidia: don't assert when the SBIOS doesn't provide TGPU/PPMD
+ limits
+
+NV_ERR_INVALID_DATA means the limit is advertised but not provided, which
+the spec allows; stop logging it as a failed assertion at boot.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../platform/platform_request_handler_ctrl.c     | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/src/nvidia/src/kernel/platform/platform_request_handler_ctrl.c b/src/nvidia/src/kernel/platform/platform_request_handler_ctrl.c
+index f342f424..803f3d1b 100644
+--- a/src/nvidia/src/kernel/platform/platform_request_handler_ctrl.c
++++ b/src/nvidia/src/kernel/platform/platform_request_handler_ctrl.c
+@@ -2115,7 +2115,15 @@ _pfmreqhndlrUpdatePpmdLimit
+         &counterVal);
+     if (status != NV_OK)
+     {
+-        NV_ASSERT_OK_FAILED("PlatformRequestHandler failed to get platform power mode from SBIOS", status);
++        //
++        // NV_ERR_INVALID_DATA: the SBIOS advertises the limit but isn't
++        // providing it right now, which the spec allows (see
++        // pfmreqhndlrGetPerfSensorCounterById); not worth an assert.
++        //
++        if (status != NV_ERR_INVALID_DATA)
++        {
++            NV_ASSERT_OK_FAILED("PlatformRequestHandler failed to get platform power mode from SBIOS", status);
++        }
+         goto _pfmreqhndlrUpdatePpmdLimit_exit;
+     }
+ 
+@@ -2172,7 +2180,11 @@ _pfmreqhndlrUpdateTgpuLimit
+ 
+     if (status != NV_OK)
+     {
+-        NV_ASSERT_OK_FAILED("PlatformRequestHandler failed to get target temp from SBIOS", status);
++        // See _pfmreqhndlrUpdatePpmdLimit()
++        if (status != NV_ERR_INVALID_DATA)
++        {
++            NV_ASSERT_OK_FAILED("PlatformRequestHandler failed to get target temp from SBIOS", status);
++        }
+         return status;
+     }
+ 

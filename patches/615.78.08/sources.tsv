@@ -1,0 +1,46 @@
+# subject	source (Markdown)
+nvidia: free the GSP channel group when construction fails	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: boost GPU clocks when fences miss their deadlines	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: fix vblank timestamp clock and flip event vblank	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: use system_percpu_wq/system_dfl_wq	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-modeset: really stop RG semaphore vblank interrupts	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: use nv_vmalloc when pt_size >= PMD_SIZE	upstream PR [#1383](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1383), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: don't accumulate override EDID modes in detect	upstream PR [#1430](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1430), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: don't assert when the SBIOS doesn't provide TGPU/PPMD limits	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-modeset: bind surfaces to window channels on first use	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-modeset: map surfaces into the NVKMS GPU VA space on first use	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-modeset: make surface registration RM calls without nvkms_lock	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-modeset: read and set the backlight without nvkms_lock	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-modeset: fetch KAPI events in batches	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: don't take the API lock for NO_API_LOCK controls' GPU reference	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: take the API lock for read for GET_SURFACE_INFO	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: request non-CUDA PERF_BOOST boosts asynchronously	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: clear the display RG_SEM_SKIPPED error event from the CPU	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: allocate the atomic state with kvzalloc	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: skip NVPCF event wake when no client listens	upstream PR [#1466](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1466), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvport: fix month and year boundaries in wall-time conversion	upstream PR [#1432](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1432), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: correct Linux rwsem conditional acquisition status	upstream PR [#1424](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1424), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: let kernel clients release references during GPU removal	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: scan the non-stall interrupt tree once per interrupt	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms: fix HDMI FRL DSC hblankMin overflow and lane count	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: keep kernel clients' user-space BAR1 mappings contiguous	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms: enable the DisplayPort SST EDID recovery fix by default	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: also clear RG_SEM_SKIPPED without an RG semaphore interrupt	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms: keep nvidia-drm's in-fence display semaphores in system memory	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: serialize claiming in-fence display semaphores	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms: don't yield after wrapping a display push buffer	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms: don't wake the NVKMS worker for unneeded non-stall interrupts	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: don't restore caching type after a failed sysmem allocation	own (alternative to upstream PR [#1278](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1278))
+nvidia-modeset: free the semaphore surface callback record when the waiter is already signalled	upstream PR [#1368](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368)
+nvidia-drm: retry GEM allocations without compression, return -ENOMEM	own
+nvidia: let sysmem allocations with a fallback fail fast at high order	own
+nvidia: fail fast on big-page sysmem attempts that RM retries itself	own
+nvidia-uvm: fail fast on the first big-page sysmem attempt	own
+nvidia: don't log fail-fast sysmem allocation failures as errors	own
+Fix VA space bookkeeping corruption on partial unmaps	upstream PR [#1483](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1483)
+nvidia-drm: drop duplicate newline from infoframe log message	own
+nvidia-drm: don't report flips a vblank early when NVKMS takes long	own, fixes patch 3
+nvidia: retry explicit big-page sysmem allocations with smaller pages	own
+nvidia: don't retry high-order kmalloc in os_alloc_mem()	own
+nvidia: free non-cached system memory from a kthread	own
+nvidia: zero os_alloc_mem() allocations	own

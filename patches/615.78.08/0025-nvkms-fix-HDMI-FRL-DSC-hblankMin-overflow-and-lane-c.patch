@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Tue, 20 Oct 2026 17:28:59 +0200
+Subject: [PATCH] nvkms: fix HDMI FRL DSC hblankMin overflow and lane count
+
+nvHdmiFrlQueryConfigOneColorFormatAndBpc() computed
+pixelClock * 1000 * dscHBlankTriBytes in 32 bits, which wraps for
+4K high-refresh modes (e.g. 1697380 kHz * 72 -> hblankMin = 2 instead
+of ~184). The divisor also assumed 4 FRL lanes and ignored 16b/18b
+coding, so 3-lane rates (3L3G, 3L6G) got a too-small minimum.
+
+Compute in 64 bits and derive the tri-byte rate from the lane count
+and FRL coding. Only affects HDMI 2.1 FRL links with DSC.
+
+References:
+- NVIDIA/open-gpu-kernel-modules issue 1445
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/nvkms-hdmi.c | 24 ++++++++++++++++++++----
+ 1 file changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/src/nvidia-modeset/src/nvkms-hdmi.c b/src/nvidia-modeset/src/nvkms-hdmi.c
+index a4e4f763..b7963b14 100644
+--- a/src/nvidia-modeset/src/nvkms-hdmi.c
++++ b/src/nvidia-modeset/src/nvkms-hdmi.c
+@@ -2685,10 +2685,26 @@ NvBool nvHdmiFrlQueryConfigOneColorFormatAndBpc(
+                     pConfig->dscInfo.dscHBlankTriBytes;
+                 pDscInfo->hdmi.dscTBlankToTTotalRatioX1k =
+                     pConfig->dscInfo.dscTBlankToTTotalRatioX1k;
+-                pDscInfo->hdmi.hblankMin =
+-                    NV_UNSIGNED_DIV_CEIL(((pHwTimings->pixelClock * 1000) *
+-                                              pConfig->dscInfo.dscHBlankTriBytes),
+-                                         (hdmiLinkRate / 6));
++                {
++                    /*
++                     * hdmiLinkRate is per lane. FRL carries
++                     * lanes * laneRate * 16/18 (16b/18b coding) bits/s,
++                     * 24 bits per tri-byte. Compute in 64 bits: the
++                     * numerator overflows 32 bits for 4K high-refresh modes.
++                     */
++                    const NvU64 frlLanes =
++                        ((pConfig->frlRate == HDMI_FRL_DATA_RATE_3LANES_3GBPS) ||
++                         (pConfig->frlRate == HDMI_FRL_DATA_RATE_3LANES_6GBPS)) ?
++                            3 : 4;
++                    const NvU64 triBytesPerSec =
++                        (hdmiLinkRate * frlLanes * 16) / (18 * 24);
++                    const NvU64 hcBlankTimesPclk =
++                        (NvU64)pHwTimings->pixelClock * 1000 *
++                        pConfig->dscInfo.dscHBlankTriBytes;
++
++                    pDscInfo->hdmi.hblankMin = (NvU32)
++                        NV_UNSIGNED_DIV_CEIL(hcBlankTimesPclk, triBytesPerSec);
++                }
+             } else {
+                 pDscInfo->type = NV_DSC_INFO_EVO_TYPE_DISABLED;
+             }

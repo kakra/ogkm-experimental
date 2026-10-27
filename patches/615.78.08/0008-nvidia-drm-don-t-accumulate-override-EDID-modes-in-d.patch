@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gian Marco Toso <info@gianmarcotoso.com>
+Date: Fri, 16 Oct 2026 07:33:27 +0200
+Subject: [PATCH] nvidia-drm: don't accumulate override EDID modes in detect
+
+References:
+- NVIDIA/open-gpu-kernel-modules PR 1430
+---
+ kernel-open/nvidia-drm/nvidia-drm-connector.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index 20c916e3..79407636 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -107,6 +107,18 @@ static void nv_drm_connector_destroy(struct drm_connector *connector)
+     nv_drm_free(nv_connector);
+ }
+ 
++#if !defined(NV_DRM_CONNECTOR_HAS_OVERRIDE_EDID)
++static void nv_drm_connector_drop_probed_modes(struct drm_connector *connector)
++{
++    struct drm_display_mode *mode, *tmp;
++
++    list_for_each_entry_safe(mode, tmp, &connector->probed_modes, head) {
++        list_del(&mode->head);
++        drm_mode_destroy(connector->dev, mode);
++    }
++}
++#endif
++
+ static bool
+ __nv_drm_detect_encoder(struct NvKmsKapiDynamicDisplayParams *pDetectParams,
+                         struct drm_connector *connector,
+@@ -150,6 +162,7 @@ __nv_drm_detect_encoder(struct NvKmsKapiDynamicDisplayParams *pDetectParams,
+ #if defined(NV_DRM_CONNECTOR_HAS_OVERRIDE_EDID)
+     if (connector->override_edid) {
+ #else
++    nv_drm_connector_drop_probed_modes(connector);
+     if (drm_edid_override_connector_update(connector) > 0) {
+ #endif
+         const struct drm_property_blob *edid = connector->edid_blob_ptr;

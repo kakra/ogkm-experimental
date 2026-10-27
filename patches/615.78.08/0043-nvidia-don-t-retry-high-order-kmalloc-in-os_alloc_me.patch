@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Mon, 26 Oct 2026 20:35:37 +0000
+Subject: [PATCH] nvidia: don't retry high-order kmalloc in os_alloc_mem()
+
+os_alloc_mem() uses kmalloc() with __GFP_RETRY_MAYFAIL for sizes up
+to KMALLOC_LIMIT (128 KiB) and only falls back to vmalloc when that
+fails. Above PAGE_SIZE, kmalloc() needs a block of order 1 to 5. With
+__GFP_RETRY_MAYFAIL the page allocator keeps retrying direct reclaim
+and compaction for such a block before it gives up.
+
+On a desktop with fragmented memory this stalls the caller even though
+the vmalloc fallback would succeed right away. Many callers run under
+RM locks, e.g. the page arrays of memory descriptors and the page array
+in nv_set_memory_type(), so the stall can also block other RM clients
+and display event handling.
+
+Use __GFP_NORETRY | __GFP_NOWARN above PAGE_SIZE, like kvmalloc() does.
+Allocations up to PAGE_SIZE keep __GFP_RETRY_MAYFAIL.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nv-linux.h |  8 ++++++++
+ kernel-open/nvidia/os-interface.c | 11 ++++++++++-
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/kernel-open/common/inc/nv-linux.h b/kernel-open/common/inc/nv-linux.h
+index 7775911e..ba21929d 100644
+--- a/kernel-open/common/inc/nv-linux.h
++++ b/kernel-open/common/inc/nv-linux.h
+@@ -443,6 +443,14 @@ static NvBool nv_numa_node_has_memory(int node_id)
+         NV_MEMDBG_ADD(ptr, size);             \
+     }
+ 
++#define NV_GFP_NORETRY (NV_GFP_KERNEL | __GFP_NORETRY | __GFP_NOWARN)
++
++#define NV_KMALLOC_NORETRY(ptr, size) \
++    { \
++        (ptr) = kmalloc(size, NV_GFP_NORETRY); \
++        NV_MEMDBG_ADD(ptr, size);              \
++    }
++
+ #define NV_KFREE(ptr, size) \
+     { \
+         NV_MEMDBG_REMOVE(ptr, size); \
+diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
+index b499df6e..73a609f1 100644
+--- a/kernel-open/nvidia/os-interface.c
++++ b/kernel-open/nvidia/os-interface.c
+@@ -649,10 +649,19 @@ NV_STATUS NV_API_CALL os_alloc_mem(
+     }
+     else
+     {
+-        if (alloc_size <= KMALLOC_LIMIT)
++        if (alloc_size <= PAGE_SIZE)
+         {
+             NV_KMALLOC_NO_OOM(*address, alloc_size);
+         }
++        else if (alloc_size <= KMALLOC_LIMIT)
++        {
++            //
++            // Above PAGE_SIZE, kmalloc() needs a high-order block. Don't
++            // retry reclaim and compaction for it, we fall back to vmalloc
++            // anyway. This follows kvmalloc().
++            //
++            NV_KMALLOC_NORETRY(*address, alloc_size);
++        }
+         if (*address == NULL)
+         {
+             *address = nv_vmalloc(alloc_size, GFP_KERNEL);

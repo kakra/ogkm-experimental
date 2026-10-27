@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 21 Oct 2026 14:35:29 +0200
+Subject: [PATCH] nvkms: keep nvidia-drm's in-fence display semaphores in
+ system memory
+
+For every plane with an in-fence, nv_drm_atomic_commit() picks a display
+semaphore with nvKms->tryInitDisplaySemaphore(), which reads the
+semaphore's current value from the CPU to check that the display engine
+has released it. On dGPUs the KAPI semaphore pool is allocated in video
+memory, so that check is an uncached read through BAR1.
+
+On an RTX 4080 Laptop (AD104) playing an NVDEC video stream in Firefox
+under KWin (240 Hz eDP), that single read cost 125-150 us on every fenced
+commit: LBR branch stacks show exactly one try per commit (no scan over
+busy slots), and function_graph shows commits with an in-fence at p50
+169 us against 36 us for commits without one. That is about 3 % of a
+240 Hz frame, spent on the compositor's commit thread.
+
+Allocate the pool in system memory instead, the way the KAPI notifier
+surface already is. The allocation uses the display NISO coherency mode
+(write-back if display NISO access is coherent, otherwise write-combined),
+so the display engine sees the CPU's READY writes and the CPU sees the
+engine's DONE releases, as it does for notifiers. SOC display keeps using
+system memory as before.
+
+The choice is made when nvidia-drm sets up the device. The new
+nvidia_modeset.kapi_sysmem_semaphores parameter (default Y, 0444) can be
+set to N on the kernel command line or in modprobe.d to return to video
+memory.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-modeset/nvidia-modeset-linux.c   | 12 ++++++++++++
+ .../nvidia-modeset/nvidia-modeset-os-interface.h    |  1 +
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c            | 13 +++++++++++--
+ .../include/nvidia-modeset-os-interface.h           |  1 +
+ 4 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+index 6608c919..b65f927e 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+@@ -167,6 +167,13 @@ MODULE_PARM_DESC(dp_sst_edid_recovery_fix,
+ static bool dp_sst_edid_recovery_fix = true;
+ module_param_named(dp_sst_edid_recovery_fix, dp_sst_edid_recovery_fix, bool, 0444);
+ 
++MODULE_PARM_DESC(kapi_sysmem_semaphores,
++                 "Keep the nvidia-drm display semaphores (used for plane in-fences) in system memory "
++                 "instead of video memory, so the CPU check on every fenced commit doesn't read video "
++                 "memory over PCIe. Read when the GPU is set up for nvidia-drm.");
++static bool kapi_sysmem_semaphores = true;
++module_param_named(kapi_sysmem_semaphores, kapi_sysmem_semaphores, bool, 0444);
++
+ /* Fail allocating the RM core channel for NVKMS using the i-th method (see
+  * FailAllocCoreChannelMethod). Failures not using the i-th method are ignored. */
+ MODULE_PARM_DESC(fail_alloc_core_channel, "Control testing for hardware core channel allocation failure");
+@@ -263,6 +270,11 @@ NvBool nvkms_dp_sst_edid_recovery_fix(void)
+     return dp_sst_edid_recovery_fix;
+ }
+ 
++NvBool nvkms_kapi_sysmem_semaphores(void)
++{
++    return kapi_sysmem_semaphores;
++}
++
+ NvBool nvkms_conceal_vrr_caps(void)
+ {
+     return conceal_vrr_caps;
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+index 78a79804..3103e42e 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+@@ -134,6 +134,7 @@ enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void);
+ NvBool nvkms_enable_overlay_layers(void);
+ NvBool nvkms_debug_logging(void);
+ NvBool nvkms_dp_sst_edid_recovery_fix(void);
++NvBool nvkms_kapi_sysmem_semaphores(void);
+ void nvkms_extcon_report_hdmi(NvBool state);
+ void nvkms_extcon_report_hdmi_audio(NvBool state);
+ 
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index d8b8d468..ac55a303 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -665,8 +665,17 @@ static NvBool KmsAllocateDevice(struct NvKmsKapiDevice *device)
+         goto done;
+     }
+ 
+-    /* Allocate semaphore memory in video memory whenever available */
+-    if (!nvKmsKapiAllocateSemaphores(device, !device->isSOC)) {
++    /*
++     * Allocate semaphore memory in video memory whenever available, unless
++     * nvkms_kapi_sysmem_semaphores() asks for system memory: nvidia-drm reads
++     * a semaphore from the CPU on every commit with a plane in-fence, and an
++     * uncached read of video memory through BAR1 took ~130 us on a dGPU
++     * (AD104). The display engine already accesses the notifier surface in
++     * system memory the same way.
++     */
++    if (!nvKmsKapiAllocateSemaphores(device,
++                                     !device->isSOC &&
++                                     !nvkms_kapi_sysmem_semaphores())) {
+         nvKmsKapiLogDebug(
+             "Failed to allocate Semaphore objects for GPU ID 0x%08x",
+             device->gpuId);
+diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+index 78a79804..3103e42e 100644
+--- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
++++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+@@ -134,6 +134,7 @@ enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void);
+ NvBool nvkms_enable_overlay_layers(void);
+ NvBool nvkms_debug_logging(void);
+ NvBool nvkms_dp_sst_edid_recovery_fix(void);
++NvBool nvkms_kapi_sysmem_semaphores(void);
+ void nvkms_extcon_report_hdmi(NvBool state);
+ void nvkms_extcon_report_hdmi_audio(NvBool state);
+ 

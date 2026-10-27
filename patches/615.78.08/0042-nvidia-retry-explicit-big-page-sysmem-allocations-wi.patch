@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Mon, 26 Oct 2026 22:29:12 +0100
+Subject: [PATCH] nvidia: retry explicit big-page sysmem allocations with
+ smaller pages
+
+sysmemConstruct() walks down the page sizes on NV_ERR_NO_MEMORY only
+when the client left the page size at its default. A client that asks
+for NVOS32_ATTR_PAGE_SIZE_BIG or _HUGE explicitly gets the error back
+as soon as the OS has no free block of that order, which is the normal
+state of a desktop after some uptime: pageblocks fill up with unmovable
+allocations and compaction cannot rebuild order-9 blocks any more.
+
+Seen with Marvel's Guardians of the Galaxy under vkd3d-proton after
+20 h uptime, 5.7 GB free but no free order-9 block even after a manual
+compaction. The user-space driver's sysmem allocations failed with
+
+  NVRM: ... Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from _memdescAllocInternal(pMemDesc) @ mem_desc.c:1354
+  NVRM: ... Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from rmStatus @ system_mem.c:460
+
+four times within 60 ms, and the game exited a second later. Without
+the dxgi.maxDeviceMemory workaround this happened while loading the
+game world; with VKD3D_CONFIG=no_upload_hvv after 24 minutes.
+
+Retry these requests with the next smaller page size as well, using the
+existing loop. Smaller physical pages don't break the client's mappings:
+dmaAllocMapping_GM107() maps memory at its physical page size when a
+larger mapping page size is requested for non-contiguous memory. The
+client also gets the page size it ended up with back in attr/attr2, as
+with the default page size path.
+
+Contiguous allocations are left alone, they need one block of the
+whole size regardless of the page size. Clients that set
+NVOS32_ATTR2_FAIL_FAST (UVM) already retry themselves.
+
+As in the default path, the attempts before the last one are fail-fast,
+so an explicit 2M request no longer stalls in direct compaction before
+falling back. Each fallback is logged at LEVEL_ERROR, the only level
+release builds print, because the client gets smaller pages than it
+asked for.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+(cherry picked from commit 673e452ebf4dd73d63e2f4d94a5841d434eaf1cf)
+---
+ src/nvidia/src/kernel/mem_mgr/system_mem.c | 34 ++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/src/nvidia/src/kernel/mem_mgr/system_mem.c b/src/nvidia/src/kernel/mem_mgr/system_mem.c
+index 7e88506b..4fe65a18 100644
+--- a/src/nvidia/src/kernel/mem_mgr/system_mem.c
++++ b/src/nvidia/src/kernel/mem_mgr/system_mem.c
+@@ -192,6 +192,7 @@ sysmemConstruct_IMPL
+     NvU32 flags;
+     RM_ATTR_PAGE_SIZE pageSizeAttr;
+     NvBool bRetry = NV_FALSE;
++    NvBool bExplicitPageSize = NV_FALSE;
+     NvBool bLockAcquired = NV_FALSE;
+     NvBool bPrevSkipIommuMapping = NV_FALSE;
+ 
+@@ -281,7 +282,7 @@ sysmemConstruct_IMPL
+     }
+ 
+     //
+-    // Enable retrying the allocation only if the page size is default.
++    // Enable retrying the allocation if the page size is default.
+     // Each new attempt decreases the page size to the next supported RM value
+     // until the minimum OS granularity is reached.
+     //
+@@ -290,6 +291,22 @@ sysmemConstruct_IMPL
+     {
+         bRetry = NV_TRUE;
+     }
++    else if ((FLD_TEST_DRF(OS32, _ATTR, _PAGE_SIZE, _BIG, pAllocData->attr) ||
++              FLD_TEST_DRF(OS32, _ATTR, _PAGE_SIZE, _HUGE, pAllocData->attr)) &&
++             !FLD_TEST_DRF(OS32, _ATTR, _PHYSICALITY, _CONTIGUOUS, pAllocData->attr) &&
++             !FLD_TEST_DRF(OS32, _ATTR2, _FAIL_FAST, _YES, pAllocData->attr2))
++    {
++        //
++        // Explicit big or huge page requests fail when the OS has no free
++        // block of that order, which is common after some uptime. Retry them
++        // with smaller pages, too: a mapping requested at a larger page size
++        // than the physical one falls back to the physical page size in
++        // dmaAllocMapping_GM107(). Contiguous allocations need one block of
++        // the whole size either way, and fail-fast clients retry themselves.
++        //
++        bRetry = NV_TRUE;
++        bExplicitPageSize = NV_TRUE;
++    }
+ 
+     do
+     {
+@@ -443,7 +460,20 @@ sysmemConstruct_IMPL
+                 {
+                     NV_CHECK_OK_OR_GOTO(rmStatus, LEVEL_ERROR, rmStatus, failed_destroy_memdesc);
+                 }
+-                NV_PRINTF(LEVEL_INFO, "Sysmem alloc failed, retrying with page size 0x%llx.\n", pageSize);
++                if (bExplicitPageSize)
++                {
++                    //
++                    // Release builds only print LEVEL_ERROR. The client gets
++                    // smaller pages than it asked for, which is worth seeing.
++                    //
++                    NV_PRINTF(LEVEL_ERROR,
++                              "Sysmem alloc of 0x%llx bytes with page size 0x%llx failed, retrying with page size 0x%llx.\n",
++                              pAllocData->size, memdescGetPageSize(pMemDesc, AT_GPU), pageSize);
++                }
++                else
++                {
++                    NV_PRINTF(LEVEL_INFO, "Sysmem alloc failed, retrying with page size 0x%llx.\n", pageSize);
++                }
+ 
+                 // Freeing memdescs to avoid leaks on retry.
+                 memdescFree(pMemDesc);

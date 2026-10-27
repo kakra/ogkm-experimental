@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Andy Qin <andy.qin@aol.com>
+Date: Tue, 20 Oct 2026 17:07:45 +0800
+Subject: [PATCH] nvidia: skip NVPCF event wake when no client listens
+
+rm_acpi_nvpcf_notify() only forwards NV2080_NOTIFIERS_NVPCF_EVENTS to
+RM clients, but it takes a dynamic power reference first, which wakes a
+runtime-suspended (RTD3) GPU. When no client has enabled that
+notification (e.g. nvidia-powerd is not running), the GPU is powered up
+for nothing and then stays awake until the idle timeout.
+
+On an ASUS ROG Zephyrus G14 (GA403WR) the EC raises query _QB6 after
+each battery status update on battery, and its STPL handler notifies
+NPCF every 80 to 105 seconds. This keeps the dGPU awake roughly 20% of
+the time while the system is idle.
+
+Check the subdevices' notification actions (software state only) and
+skip the wake when nobody listens. Behavior is unchanged when a listener
+exists. rm_power_source_change_event() already returns early in the
+same way when there is no work to do.
+
+References:
+- NVIDIA/open-gpu-kernel-modules PR 1466
+---
+ src/nvidia/arch/nvalloc/unix/src/osapi.c | 37 +++++++++++++++++++++++-
+ 1 file changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/src/nvidia/arch/nvalloc/unix/src/osapi.c b/src/nvidia/arch/nvalloc/unix/src/osapi.c
+index 22c4ede2..7379fe04 100644
+--- a/src/nvidia/arch/nvalloc/unix/src/osapi.c
++++ b/src/nvidia/arch/nvalloc/unix/src/osapi.c
+@@ -6178,6 +6178,35 @@ NvBool NV_API_CALL rm_is_altstack_in_use(void)
+ #endif
+ }
+ 
++//
++// Returns NV_TRUE if any subdevice of pGpu has a listener enabled for
++// notifyIndex. Only reads software state, so it does not wake the GPU.
++//
++static NvBool _rmGpuHasSubDeviceEventListener(
++    OBJGPU *pGpu,
++    NvU32   notifyIndex
++)
++{
++    NvBool bFound = NV_FALSE;
++    NvU32 i;
++
++    portSyncSpinlockAcquire(pGpu->pSubdeviceBackReferencesLock);
++    for (i = 0; i < pGpu->numSubdeviceBackReferences; i++)
++    {
++        Subdevice *pSubdevice = pGpu->pSubdeviceBackReferences[i];
++        if ((pSubdevice != NULL) &&
++            (pSubdevice->notifyActions[notifyIndex] !=
++             NV2080_CTRL_EVENT_SET_NOTIFICATION_ACTION_DISABLE))
++        {
++            bFound = NV_TRUE;
++            break;
++        }
++    }
++    portSyncSpinlockRelease(pGpu->pSubdeviceBackReferencesLock);
++
++    return bFound;
++}
++
+ void NV_API_CALL rm_acpi_nvpcf_notify(
+     nvidia_stack_t *sp
+ )
+@@ -6194,7 +6223,13 @@ void NV_API_CALL rm_acpi_nvpcf_notify(
+                                      RM_LOCK_MODULES_EVENT)) == NV_OK)
+     {
+         OBJGPU *pGpu = gpumgrGetGpu(0);
+-        if (pGpu != NULL)
++        //
++        // The only work done here is forwarding the event to clients. If no
++        // client listens for NVPCF events (e.g. nvidia-powerd is not
++        // running), skip it instead of waking a runtime-suspended GPU.
++        //
++        if ((pGpu != NULL) &&
++            _rmGpuHasSubDeviceEventListener(pGpu, NV2080_NOTIFIERS_NVPCF_EVENTS))
+         {
+             nv_state_t *nv = NV_GET_NV_STATE(pGpu);
+             if ((rmStatus = os_ref_dynamic_power(nv, NV_DYNAMIC_PM_FINE)) ==

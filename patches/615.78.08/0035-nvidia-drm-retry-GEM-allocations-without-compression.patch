@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Fri, 23 Oct 2026 03:23:26 +0200
+Subject: [PATCH] nvidia-drm: retry GEM allocations without compression, return
+ -ENOMEM
+
+NVKMS allocates scanout GEM objects as physically contiguous video memory.
+With compression, the allocation also needs comptags and is aligned to the
+compression page size. When video memory is fragmented, such an allocation
+can fail although enough memory is free, and a scanout allocation has no
+sysmem fallback because the display engine of a dGPU can't scan out from
+system memory. Clients such as Chrome then fail to create scanout buffers,
+e.g. "Cannot create bo with format=RGBA_F16 and usage=Scanout", and the
+kernel log only says "Failed to allocate NVKMS memory for GEM object".
+
+If a compressible block-linear allocation fails, retry it once without
+compression before falling back to sysmem. The compressible field of the
+ioctl is IN/OUT, so the caller learns that compression wasn't granted.
+
+The ioctl also returned -EINVAL for a failed allocation, which makes
+clients report "Invalid argument". Return -ENOMEM like nv_drm_dumb_create()
+does, and log the size and type of the failed allocation.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 3433796b8f12d6e725ee1cc8e36a9ba28f69baed)
+---
+ .../nvidia-drm/nvidia-drm-gem-nvkms-memory.c  | 23 +++++++++++++++++--
+ 1 file changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
+index 0785dddf..4af3e9d7 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
+@@ -658,6 +658,22 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+     allocParams.compressible = &p->compressible;
+ 
+     pMemory = nvKms->allocateMemory(nv_dev->pDevice, &allocParams);
++    if (pMemory == NULL && p->block_linear && p->compressible) {
++        /*
++         * Compressible allocations need comptags and are aligned to the
++         * compression page size, and scanout allocations must also be
++         * physically contiguous. In fragmented video memory, an uncompressed
++         * allocation can still fit. p->compressible is IN/OUT, so the caller
++         * sees that compression wasn't granted.
++         */
++        NV_DRM_DEV_LOG_INFO(
++                nv_dev,
++                "Failed to allocate compressible NVKMS video memory of size %" NvU64_fmtu " for GEM object, retrying without compression",
++                p->memory_size);
++        p->compressible = 0;
++        pMemory = nvKms->allocateMemory(nv_dev->pDevice, &allocParams);
++    }
++
+     if (pMemory == NULL && (p->flags & NV_GEM_ALLOC_NO_SCANOUT)) {
+         NV_DRM_DEV_LOG_INFO(
+                 nv_dev,
+@@ -667,9 +683,12 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+     }
+ 
+     if (pMemory == NULL) {
+-        ret = -EINVAL;
++        ret = -ENOMEM;
+         NV_DRM_DEV_LOG_ERR(nv_dev,
+-                           "Failed to allocate NVKMS memory for GEM object");
++                           "Failed to allocate NVKMS memory of size %" NvU64_fmtu " for %s GEM object",
++                           p->memory_size,
++                           (p->flags & NV_GEM_ALLOC_NO_SCANOUT) ?
++                               "offscreen" : "scanout");
+         goto nvkms_alloc_memory_failed;
+     }
+ 

@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Fri, 16 Oct 2026 07:33:27 +0200
+Subject: [PATCH] nvidia-modeset: really stop RG semaphore vblank interrupts
+
+Program the RG semaphore control to ONE_TIME/WRITE when disabling, so the
+per-vblank interrupt actually stops, and kick off the core UPDATE async on
+vblank callback (un)registration instead of waiting a frame under
+nvkms_lock.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/nvkms-evo3.c    | 13 +++++++++++++
+ src/nvidia-modeset/src/nvkms-evo4.c    | 11 +++++++++++
+ src/nvidia-modeset/src/nvkms-modeset.c | 15 ++++++++++++---
+ 3 files changed, 36 insertions(+), 3 deletions(-)
+
+diff --git a/src/nvidia-modeset/src/nvkms-evo3.c b/src/nvidia-modeset/src/nvkms-evo3.c
+index 36a53a92..f5d411de 100644
+--- a/src/nvidia-modeset/src/nvkms-evo3.c
++++ b/src/nvidia-modeset/src/nvkms-evo3.c
+@@ -3554,6 +3554,19 @@ static void EvoSetupVBlankRgSemaphoreInterruptC6(
+ 
+     nvUpdateUpdateState(pDevEvo, pUpdateState, pChannel);
+ 
++    if ((pSurfaceDesc == NULL) || (pSurfaceDesc->ctxDmaHandle == 0)) {
++        /*
++         * Stop the continuous release and its awaken interrupt too; clearing
++         * only the ctxdma handle leaves the per-vblank interrupt running.
++         */
++        nvDmaSetStartEvoMethod(pChannel,
++                               NVC67D_HEAD_SET_RG_REL_SEMAPHORE_CONTROL(head, NVKMS_VBLANK_INTR_SEMAPHORE_INDEX),
++                               1);
++        nvDmaSetEvoMethodData(pChannel,
++                DRF_DEF(C67D, _HEAD_SET_RG_REL_SEMAPHORE_CONTROL, _REL_MODE, _WRITE) |
++                DRF_DEF(C67D, _HEAD_SET_RG_REL_SEMAPHORE_CONTROL, _RUN_MODE, _ONE_TIME));
++    }
++
+     /* ctxdma handle 0 disables the semaphore */
+     nvDmaSetStartEvoMethod(pChannel,
+                            NVC67D_HEAD_SET_CONTEXT_DMA_RG_REL_SEMAPHORE(head, NVKMS_VBLANK_INTR_SEMAPHORE_INDEX),
+diff --git a/src/nvidia-modeset/src/nvkms-evo4.c b/src/nvidia-modeset/src/nvkms-evo4.c
+index b1cc61a2..e7f2ae4f 100644
+--- a/src/nvidia-modeset/src/nvkms-evo4.c
++++ b/src/nvidia-modeset/src/nvkms-evo4.c
+@@ -1880,6 +1880,17 @@ static void EvoSetupVBlankRgSemaphoreInterruptC9 (
+                 DRF_DEF(C97D, _HEAD_SET_RG_REL_SEMAPHORE_CONTROL, _REL_MODE, _WRITE_AWAKEN) |
+                 DRF_DEF(C97D, _HEAD_SET_RG_REL_SEMAPHORE_CONTROL, _RUN_MODE, _CONTINUOUS) |
+                 DRF_NUM(C97D, _HEAD_SET_RG_REL_SEMAPHORE_CONTROL, _RASTER_LINE, rasterLine));
++    } else {
++        /*
++         * Stop the continuous release and its awaken interrupt too; clearing
++         * only the surface enable leaves the per-vblank interrupt running.
++         */
++        nvDmaSetStartEvoMethod(pChannel,
++                               NVC97D_HEAD_SET_RG_REL_SEMAPHORE_CONTROL(head, NVKMS_VBLANK_INTR_SEMAPHORE_INDEX),
++                               1);
++        nvDmaSetEvoMethodData(pChannel,
++                DRF_DEF(C97D, _HEAD_SET_RG_REL_SEMAPHORE_CONTROL, _REL_MODE, _WRITE) |
++                DRF_DEF(C97D, _HEAD_SET_RG_REL_SEMAPHORE_CONTROL, _RUN_MODE, _ONE_TIME));
+     }
+ }
+ 
+diff --git a/src/nvidia-modeset/src/nvkms-modeset.c b/src/nvidia-modeset/src/nvkms-modeset.c
+index f51f97bc..e385b795 100644
+--- a/src/nvidia-modeset/src/nvkms-modeset.c
++++ b/src/nvidia-modeset/src/nvkms-modeset.c
+@@ -3064,11 +3064,15 @@ static void DisableVBlankRgSemaphoreInterrupt(NVDispEvoPtr pDispEvo,
+     }
+ 
+     /*
+-     * If using local updateState, apply UPDATE to hardware now.
++     * If using local updateState, apply UPDATE to hardware now. Don't wait
++     * for it to complete: this runs with the global NVKMS lock held, e.g.
++     * whenever DRM disables vblank interrupts, and waiting would block flips
++     * for up to a frame. The semaphore surface stays allocated.
+      */
+     if (pUpdateState == &localUpdateState) {
+         if (!nvIsUpdateStateEmpty(pDevEvo, &localUpdateState)) {
+-            nvEvoUpdateAndKickOff(pDispEvo, TRUE, &localUpdateState, TRUE);
++            nvEvoUpdateAndKickOff(pDispEvo, FALSE /* sync */,
++                                  &localUpdateState, TRUE);
+         }
+     }
+ 
+@@ -4521,8 +4525,13 @@ nvApiHeadRegisterRgInterruptCallback(NVDispEvoPtr pDispEvo,
+ 
+             SetupVBlankRgSemaphoreForApiHead(pDispEvo, apiHead, head, &updateState);
+ 
++            /*
++             * Don't wait for completion with the NVKMS lock held, see
++             * DisableVBlankRgSemaphoreInterrupt().
++             */
+             if (!nvIsUpdateStateEmpty(pDispEvo->pDevEvo, &updateState)) {
+-                nvEvoUpdateAndKickOff(pDispEvo, TRUE, &updateState, TRUE);
++                nvEvoUpdateAndKickOff(pDispEvo, FALSE /* sync */,
++                                      &updateState, TRUE);
+             }
+         }
+     }

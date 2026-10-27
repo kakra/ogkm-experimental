@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Tue, 20 Oct 2026 12:22:58 +0200
+Subject: [PATCH] nvidia: scan the non-stall interrupt tree once per interrupt
+
+The top half (osInterruptPending) first calls intrGetPendingNonStall,
+which reads INTR_TOP and the leaf and LEAF_EN_SET registers of every
+pending non-stall subtree, and then intrServiceNonStall, which reads
+all of them again before servicing. Each of these is a BAR0 read over
+PCIe. Non-stall interrupts signal semaphore releases, so explicit-sync
+clients raise about 1.5 of them per frame: glmark2 at 13k FPS produced
+19k interrupts/s, at 15 us each in hard IRQ context (~30 % of a CPU),
+two thirds of it register reads, a third of those from the second scan.
+
+The pending vector is only needed before servicing when there are FECS
+ctxsw log consumers (intrCheckFecsEventbufferPending). Without them,
+call intrServiceNonStall directly: it reports the engines it serviced in
+the same vector. Keep the GC6 check intrGetPendingNonStall does, so no
+register is touched while the GPU is powered down.
+
+nvidia.isr_single_nonstall_scan=0 (module parameter, also writable at
+runtime) restores the separate scan.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/os-interface.h         |  1 +
+ kernel-open/nvidia/os-interface.c             | 11 ++++++
+ .../arch/nvalloc/unix/include/os-interface.h  |  1 +
+ src/nvidia/arch/nvalloc/unix/src/unix_intr.c  | 38 ++++++++++++++++---
+ 4 files changed, 46 insertions(+), 5 deletions(-)
+
+diff --git a/kernel-open/common/inc/os-interface.h b/kernel-open/common/inc/os-interface.h
+index 5409817c..cad8d398 100644
+--- a/kernel-open/common/inc/os-interface.h
++++ b/kernel-open/common/inc/os-interface.h
+@@ -178,6 +178,7 @@ NV_STATUS   NV_API_CALL  os_inject_vgx_msi                (NvU16, NvU64, NvU32);
+ NvBool      NV_API_CALL  os_is_grid_supported             (void);
+ NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
+ void        NV_API_CALL  os_bug_check                     (NvU32, const char *);
++NvBool      NV_API_CALL  os_isr_single_nonstall_scan      (void);
+ NV_STATUS   NV_API_CALL  os_lock_user_pages               (void *, NvU64, void **, NvU32);
+ NV_STATUS   NV_API_CALL  os_lookup_user_io_memory         (void *, NvU64, NvU64 **);
+ NV_STATUS   NV_API_CALL  os_unlock_user_pages             (NvU64, void *, NvU32);
+diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
+index e7d9607f..6d9cea8e 100644
+--- a/kernel-open/nvidia/os-interface.c
++++ b/kernel-open/nvidia/os-interface.c
+@@ -1620,6 +1620,17 @@ void NV_API_CALL os_bug_check(NvU32 bugCode, const char *bugCodeStr)
+     panic(bugCodeStr);
+ }
+ 
++static bool isr_single_nonstall_scan = true;
++module_param(isr_single_nonstall_scan, bool, 0644);
++MODULE_PARM_DESC(isr_single_nonstall_scan,
++                 "Scan the non-stall interrupt tree once per interrupt (while servicing it) "
++                 "instead of a separate pending scan first, when no ctxsw log consumer exists.");
++
++NvBool NV_API_CALL os_isr_single_nonstall_scan(void)
++{
++    return READ_ONCE(isr_single_nonstall_scan);
++}
++
+ NV_STATUS NV_API_CALL os_get_euid(NvU32 *pSecToken)
+ {
+     *pSecToken = NV_CURRENT_EUID();
+diff --git a/src/nvidia/arch/nvalloc/unix/include/os-interface.h b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
+index 551be8f8..1048cf6f 100644
+--- a/src/nvidia/arch/nvalloc/unix/include/os-interface.h
++++ b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
+@@ -174,6 +174,7 @@ NV_STATUS   NV_API_CALL  os_inject_vgx_msi                (NvU16, NvU64, NvU32);
+ NvBool      NV_API_CALL  os_is_grid_supported             (void);
+ NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
+ void        NV_API_CALL  os_bug_check                     (NvU32, const char *);
++NvBool      NV_API_CALL  os_isr_single_nonstall_scan      (void);
+ NV_STATUS   NV_API_CALL  os_lock_user_pages               (void *, NvU64, void **, NvU32);
+ NV_STATUS   NV_API_CALL  os_lookup_user_io_memory         (void *, NvU64, NvU64 **);
+ NV_STATUS   NV_API_CALL  os_unlock_user_pages             (NvU64, void *, NvU32);
+diff --git a/src/nvidia/arch/nvalloc/unix/src/unix_intr.c b/src/nvidia/arch/nvalloc/unix/src/unix_intr.c
+index aef36ab6..e51ba1da 100644
+--- a/src/nvidia/arch/nvalloc/unix/src/unix_intr.c
++++ b/src/nvidia/arch/nvalloc/unix/src/unix_intr.c
+@@ -33,6 +33,7 @@
+ #include "gpu/mmu/kern_gmmu.h"
+ #include "gpu/disp/kern_disp.h"
+ #include "gpu/disp/head/kernel_head.h"
++#include "kernel/gpu/gr/fecs_event_list.h"
+ #include <nv_sriov_defines.h>
+ 
+ #include "platform/sli/sli.h"
+@@ -272,12 +273,39 @@ static NvBool osInterruptPending(
+             if ((pIntr != NULL) && (INTERRUPT_TYPE_HARDWARE == intrGetIntrEn(pIntr)))
+             {
+                 NvBool bCtxswLog = NV_FALSE;
+-                intrGetPendingNonStall_HAL(pGpu, pIntr, &intr1Pending, &threadState);
+-                intrCheckFecsEventbufferPending(pGpu, pIntr, &intr1Pending, &bCtxswLog);
+-                if (!bitVectorTestAllCleared(&intr1Pending))
++                KernelGraphicsManager *pKernelGraphicsManager = GPU_GET_KERNEL_GRAPHICS_MANAGER(pGpu);
++
++                if (os_isr_single_nonstall_scan() &&
++                    ((pKernelGraphicsManager == NULL) ||
++                     (fecsGetCtxswLogConsumerCount(pGpu, pKernelGraphicsManager) <= 0)))
+                 {
+-                    intrServiceNonStall_HAL(pGpu, pIntr, &intr1Pending, &threadState);
+-                    *serviced = NV_TRUE;
++                    //
++                    // intrServiceNonStall_HAL() reads the same TOP/leaf/enable
++                    // registers as intrGetPendingNonStall_HAL() and reports the
++                    // engines it serviced. Without ctxsw log consumers the pending
++                    // vector isn't needed before servicing, so skip the separate
++                    // scan (about five BAR0 reads per interrupt). Keep its GC6
++                    // check: no register access while the GPU is powered down.
++                    //
++                    bitVectorClrAll(&intr1Pending);
++                    if (!IS_GPU_GC6_STATE_ENTERED(pGpu))
++                    {
++                        intrServiceNonStall_HAL(pGpu, pIntr, &intr1Pending, &threadState);
++                        if (!bitVectorTestAllCleared(&intr1Pending))
++                        {
++                            *serviced = NV_TRUE;
++                        }
++                    }
++                }
++                else
++                {
++                    intrGetPendingNonStall_HAL(pGpu, pIntr, &intr1Pending, &threadState);
++                    intrCheckFecsEventbufferPending(pGpu, pIntr, &intr1Pending, &bCtxswLog);
++                    if (!bitVectorTestAllCleared(&intr1Pending))
++                    {
++                        intrServiceNonStall_HAL(pGpu, pIntr, &intr1Pending, &threadState);
++                        *serviced = NV_TRUE;
++                    }
+                 }
+ 
+                 //

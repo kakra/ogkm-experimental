@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Sat, 24 Oct 2026 15:07:21 +0200
+Subject: [PATCH] nvidia: don't log fail-fast sysmem allocation failures as
+ errors
+
+A failed MEMDESC_FLAGS_ALLOC_FAIL_FAST allocation is expected under
+memory fragmentation and is retried by its caller with smaller pages.
+Still, each one logs a check failure in memdescAlloc() and in
+sysmemConstruct(), and for UVM an assertion failure in
+nvGpuOpsAllocPhysical(), all at LEVEL_ERROR. They look like real
+allocation failures in the kernel log, but nothing failed.
+
+Log these at LEVEL_INFO instead, and skip the assertion in
+nvGpuOpsAllocPhysical() for NV_ERR_NO_MEMORY on a bFailFast sysmem
+allocation. The same goes for the "Allocation failed with big page
+size" message of the client shadow fault buffer. Other errors and the
+final small-page attempts are still reported as before.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+(cherry picked from commit 4e84cbf322f5423a9e32da4f0267967edc486e4f)
+---
+ src/nvidia/src/kernel/gpu/mem_mgr/mem_desc.c | 10 ++++++++--
+ src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c    |  2 +-
+ src/nvidia/src/kernel/mem_mgr/system_mem.c   |  5 +++++
+ src/nvidia/src/kernel/rmapi/nv_gpu_ops.c     | 21 +++++++++++++-------
+ 4 files changed, 28 insertions(+), 10 deletions(-)
+
+diff --git a/src/nvidia/src/kernel/gpu/mem_mgr/mem_desc.c b/src/nvidia/src/kernel/gpu/mem_mgr/mem_desc.c
+index 41007bfd..c7bdccb2 100644
+--- a/src/nvidia/src/kernel/gpu/mem_mgr/mem_desc.c
++++ b/src/nvidia/src/kernel/gpu/mem_mgr/mem_desc.c
+@@ -1344,8 +1344,14 @@ memdescAlloc
+     // Unicast memdescAlloc call but with flag set to allocate per subdevice.
+     NV_ASSERT(!((pMemDesc->_flags & MEMDESC_FLAGS_ALLOC_PER_SUBDEVICE) && !gpumgrGetBcEnabledStatus(pGpu)));
+ 
+-    // Actually allocate the memory
+-    NV_CHECK_OK(status, LEVEL_ERROR, _memdescAllocInternal(pMemDesc));
++    //
++    // Actually allocate the memory. The caller of a fail-fast allocation
++    // retries with smaller pages, so its failure is not an error.
++    //
++    if (memdescGetFlag(pMemDesc, MEMDESC_FLAGS_ALLOC_FAIL_FAST))
++        NV_CHECK_OK(status, LEVEL_INFO, _memdescAllocInternal(pMemDesc));
++    else
++        NV_CHECK_OK(status, LEVEL_ERROR, _memdescAllocInternal(pMemDesc));
+ 
+     if (status != NV_OK)
+     {
+diff --git a/src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c b/src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c
+index 56169d1d..7c5c80b7 100644
+--- a/src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c
++++ b/src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c
+@@ -1641,7 +1641,7 @@ _kgmmuClientShadowFaultBufferPagesAllocate
+     // TODO: Bug 5042223
+     if (status == NV_ERR_NO_MEMORY)
+     {
+-        NV_PRINTF(LEVEL_ERROR, "Allocation failed with big page size, retrying with default page size\n");
++        NV_PRINTF(LEVEL_INFO, "Allocation failed with big page size, retrying with default page size\n");
+         memdescSetPageSize(pMemDesc, AT_GPU, RM_PAGE_SIZE);
+         memdescSetFlag(pMemDesc, MEMDESC_FLAGS_ALLOC_FAIL_FAST, NV_FALSE);
+         memdescTagAlloc(status, NV_FB_ALLOC_RM_INTERNAL_OWNER_UNNAMED_TAG_33, pMemDesc);
+diff --git a/src/nvidia/src/kernel/mem_mgr/system_mem.c b/src/nvidia/src/kernel/mem_mgr/system_mem.c
+index 6101db71..7e88506b 100644
+--- a/src/nvidia/src/kernel/mem_mgr/system_mem.c
++++ b/src/nvidia/src/kernel/mem_mgr/system_mem.c
+@@ -450,6 +450,11 @@ sysmemConstruct_IMPL
+                 memdescDestroy(pMemDesc);
+                 pAllocRequest->pMemDesc = pMemDesc = NULL;
+             }
++            else if (memdescGetFlag(pMemDesc, MEMDESC_FLAGS_ALLOC_FAIL_FAST))
++            {
++                // The client retries with a smaller page size.
++                NV_CHECK_OK_OR_GOTO(rmStatus, LEVEL_INFO, rmStatus, failed_free_scanout_carveout);
++            }
+             else
+             {
+                 NV_CHECK_OK_OR_GOTO(rmStatus, LEVEL_ERROR, rmStatus, failed_free_scanout_carveout);
+diff --git a/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c b/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c
+index 0e24316b..0a5f3914 100644
+--- a/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c
++++ b/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c
+@@ -5075,13 +5075,20 @@ static NV_STATUS nvGpuOpsAllocPhysical(struct gpuDevice *device,
+     // here. It is safe in this scenario because we still have the API lock and nothing
+     // from a GPU interrupt can change anything in the OPS state.
+     physHandle = NV01_NULL_OBJECT;
+-    NV_ASSERT_OK_OR_GOTO(status, pRmApi->Alloc(pRmApi,
+-                                                device->session->handle,
+-                                                isSystemMemory ? device->handle : device->subhandle,
+-                                                &physHandle,
+-                                                isSystemMemory ? NV01_MEMORY_SYSTEM : NV01_MEMORY_LOCAL_USER,
+-                                                &memAllocParams,
+-                                                sizeof(memAllocParams)), done);
++    status = pRmApi->Alloc(pRmApi,
++                           device->session->handle,
++                           isSystemMemory ? device->handle : device->subhandle,
++                           &physHandle,
++                           isSystemMemory ? NV01_MEMORY_SYSTEM : NV01_MEMORY_LOCAL_USER,
++                           &memAllocParams,
++                           sizeof(memAllocParams));
++    if (status != NV_OK)
++    {
++        // The client retries a failed fail-fast allocation with smaller pages.
++        if (!(isSystemMemory && allocInfo->bFailFast && (status == NV_ERR_NO_MEMORY)))
++            NV_ASSERT_OK_FAILED("pRmApi->Alloc", status);
++        goto done;
++    }
+     if (allocInfo->bContiguousPhysAlloc)
+         allocInfo->gpuPhysOffset = memAllocParams.offset;
+ 

@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Royere <troyere@nvidia.com>
+Date: Thu, 8 Oct 2026 13:37:52 -0400
+Subject: [PATCH] nvport: fix month and year boundaries in wall-time conversion
+
+The remaining day count is zero-based, so a full month or year must be consumed when the count equals its length. Using strict comparisons leaves the first day of a new period in the preceding month or year, producing dates such as September 31.
+
+Use inclusive comparisons in both loops so the residual day count stays within the selected month and year.
+
+References:
+- NVIDIA/open-gpu-kernel-modules PR 1432
+---
+ src/nvidia/src/libraries/nvport/time/time_generic.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/nvidia/src/libraries/nvport/time/time_generic.c b/src/nvidia/src/libraries/nvport/time/time_generic.c
+index 784a28d2..da346ff9 100644
+--- a/src/nvidia/src/libraries/nvport/time/time_generic.c
++++ b/src/nvidia/src/libraries/nvport/time/time_generic.c
+@@ -64,7 +64,7 @@ _portTimeUnixTimeToDate
+     *pYear = 1970;
+     *pDay = 0;
+ 
+-    while (t > _portTimeDaysInYear(*pYear))
++    while (t >= _portTimeDaysInYear(*pYear))
+     {
+         t -= _portTimeDaysInYear(*pYear);
+         (*pYear)++;
+@@ -73,7 +73,7 @@ _portTimeUnixTimeToDate
+     if (_portTimeIsLeapYear(*pYear))
+         daysInMonth[1]++;
+ 
+-    for (*pMonth = 0; t > daysInMonth[*pMonth]; (*pMonth)++)
++    for (*pMonth = 0; t >= daysInMonth[*pMonth]; (*pMonth)++)
+         t -= daysInMonth[*pMonth];
+ 
+     (*pMonth)++;

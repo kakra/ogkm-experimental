@@ -1,0 +1,174 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E4=BC=81=E9=B9=852035?= <qie2035@qq.com>
+Date: Sat, 24 Oct 2026 18:59:03 +0800
+Subject: [PATCH] Fix VA space bookkeeping corruption on partial unmaps
+
+virtmemUnmapMemoryDma() split the client DMA mapping list at the exact byte
+range requested, while dmaFreeMapping_GM107()/gpu_vaspace update the page
+tables and the VA space mapping tree at mapping page granularity
+(mapPageSize).  A partial unmap that does not cover whole mapping pages
+therefore leaves DMA mapping descriptors covering VA that gpu_vaspace has
+already released.  The next unmap of such a descriptor fails
+gpu_vaspace.c's "_gvaspaceMappingRemove(): NV_OK == status" check, and the
+dmaFreeMapping_GM107() error path then called vaspaceFree() with the base
+of the *whole* VA space block: for the last reference this unmaps every
+mapping still registered in that block and frees it, turning a single bad
+unmap into "already mapped" / "mapping not found" failures for unrelated
+mappings of the same client.
+
+- virtmemUnmapMemoryDma(): snap the range of a partial unmap to
+  pDmaMappingInfo->mapPageSize before splitting the mapping list, so the
+  page tables, gpu_vaspace and pDmaMappingList describe the same range.
+  The invalidated page range is unchanged (dmaFreeMapping() already rounds
+  outwards); only the client side DMA mapping list becomes page aligned.
+- dmaFreeMapping_GM107(): do not vaspaceFree() the VA space block when PTE
+  invalidation fails.  The block is owned by the client VirtualMemory and
+  is reclaimed by memmgrFree_IMPL() (or the VA space leak scanner).
+
+Symptom on a 4 GB GPU under memory pressure: intermap "Failed to insert new
+mapping node for range ...", gpu_vaspace.c asserts and "can't update VA
+space for mapping @vaddr=..." from dmaAllocMapping, i.e. the same family as
+the upstream issues below.
+
+References:
+- NVIDIA/open-gpu-kernel-modules issue 1364
+- NVIDIA/open-gpu-kernel-modules issue 1453
+
+(cherry picked from commit 37ef7bc0f289a02319b58d88144192f81d78f865)
+---
+ .../arch/maxwell/virt_mem_allocator_gm107.c   | 26 +++++++-
+ src/nvidia/src/kernel/mem_mgr/virtual_mem.c   | 65 ++++++++++++++++++-
+ 2 files changed, 86 insertions(+), 5 deletions(-)
+
+diff --git a/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/virt_mem_allocator_gm107.c b/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/virt_mem_allocator_gm107.c
+index 9d16c9b1..f11210c9 100644
+--- a/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/virt_mem_allocator_gm107.c
++++ b/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/virt_mem_allocator_gm107.c
+@@ -1628,8 +1628,30 @@ dmaFreeMapping_GM107
+                                           pageSize);
+             if (status != NV_OK)
+             {
+-                NV_PRINTF(LEVEL_ERROR, "error updating VA space.\n");
+-                vaspaceFree(pVAS, vaLo);
++                //
++                // Do NOT call vaspaceFree() here.
++                //
++                // This branch runs when the PTE invalidation for a client
++                // (NV01_MEMORY_VIRTUAL) mapping failed, typically because the
++                // VA range is no longer registered in the VA space block's
++                // mapping tree (gpu_vaspace.c: _gvaspaceMappingRemove()).
++                //
++                // vaLo is the start of the *whole* VA space block, not just
++                // this mapping: vaspaceFree() drops the block's reference
++                // count and, for the last reference, unmaps every mapping
++                // still registered in that block and frees it (see
++                // _gvaspaceInternalFree()).  That would destroy VA space and
++                // PTE state which belongs to other, still live mappings of the
++                // same client, turning one failed unmap into a cascade of
++                // "already mapped" / "mapping not found" failures later on.
++                //
++                // The VA space block is owned by the client VirtualMemory
++                // object and is reclaimed by memmgrFree_IMPL() (which calls
++                // vaspaceFree()) when the client releases it, or by the VA
++                // space leak scanner.  Propagate the error and leave the block
++                // intact.
++                //
++                NV_PRINTF(LEVEL_ERROR, "error updating VA space; keeping VA block\n");
+                 return status;
+             }
+         }
+diff --git a/src/nvidia/src/kernel/mem_mgr/virtual_mem.c b/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
+index ed676a72..bb7014aa 100644
+--- a/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
++++ b/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
+@@ -1698,6 +1698,65 @@ virtmemUnmapFrom_IMPL
+     NV_ASSERT_OR_RETURN(!bPartialUnmap || (gpuMask & (gpuMask - 1)) == 0, NV_ERR_INVALID_ARGUMENT);
+     NV_ASSERT_OR_RETURN(!bPartialUnmap || !bIsIndirectPeer, NV_ERR_INVALID_ARGUMENT);
+ 
++    //
++    // Snap partial unmaps to the mapping page size.
++    //
++    // Three layers keep track of a mapping and they must all describe the
++    // same range:
++    //
++    //   1. the MMU page tables / gvaspace mapping tree, which are updated by
++    //      dmaFreeMapping() with a range that is always aligned to
++    //      pDmaMappingInfo->mapPageSize (it aligns the start down and the end
++    //      up),
++    //   2. the VA space block bookkeeping in gpu_vaspace.c, which splits the
++    //      registered range at those page aligned boundaries, and
++    //   3. pVirtualMemory->pDmaMappingList, which is split below at the exact
++    //      byte range the client asked for.
++    //
++    // If a client unmaps a sub-range that does not cover whole mapping pages,
++    // (2) releases the pages containing the request while (3) keeps
++    // descriptors that still cover part of them.  The next unmap of such a
++    // descriptor searches for a registration the VA space no longer has
++    // (gpu_vaspace.c "_gvaspaceMappingRemove(): NV_OK == status") and the
++    // error path then tears down the whole VA space block, which is what
++    // makes a single bad unmap turn into "already mapped"/"mapping not
++    // found" failures for unrelated mappings.
++    //
++    // Aligning the split boundaries makes (1), (2) and (3) agree again.  The
++    // invalidated page range is unchanged: dmaFreeMapping() already rounds
++    // outwards to the mapping page size, so only the client side DMA mapping
++    // list becomes page aligned.
++    //
++    NvU64 unmapSize = pParams->size;
++
++    if (bPartialUnmap && pDmaMappingInfo->mapPageSize != 0)
++    {
++        const NvU64 mapPageSize = pDmaMappingInfo->mapPageSize;
++        const NvU64 mappedLo    = pDmaMappingInfo->DmaOffset;
++        const NvU64 mappedHi    = pDmaMappingInfo->DmaOffset + pDmaMappingInfo->pMemDesc->Size;
++        NvU64       alignedLo;
++        NvU64       alignedHi;
++
++        NV_ASSERT_OR_RETURN((mapPageSize & (mapPageSize - 1)) == 0, NV_ERR_INVALID_STATE);
++
++        alignedLo = RM_ALIGN_DOWN(dmaOffset, mapPageSize);
++        alignedHi = RM_ALIGN_UP(dmaOffset + unmapSize, mapPageSize);
++
++        if (alignedLo < mappedLo)
++            alignedLo = mappedLo;
++        if (alignedHi > mappedHi)
++            alignedHi = mappedHi;
++
++        if (alignedHi <= alignedLo)
++            return NV_ERR_INVALID_ARGUMENT;
++
++        dmaOffset = alignedLo;
++        unmapSize = alignedHi - alignedLo;
++
++        bPartialUnmap = dmaOffset != pDmaMappingInfo->DmaOffset ||
++                        unmapSize != pDmaMappingInfo->pMemDesc->Size;
++    }
++
+     if (FLD_TEST_DRF(OS46, _FLAGS, _KERNEL_MAPPING, _ENABLE, pDmaMappingInfo->Flags))
+     {
+         NV_ASSERT_OR_RETURN(!bPartialUnmap, NV_ERR_INVALID_ARGUMENT);
+@@ -1745,13 +1804,13 @@ virtmemUnmapFrom_IMPL
+             failed);
+     }
+ 
+-    if (dmaOffset + pParams->size < pDmaMappingInfo->DmaOffset + pDmaMappingInfo->pMemDesc->Size)
++    if (dmaOffset + unmapSize < pDmaMappingInfo->DmaOffset + pDmaMappingInfo->pMemDesc->Size)
+     {
+         NV_ASSERT_OK_OR_GOTO(status,
+             intermapCreateDmaMapping(pClient, pVirtualMemory, &pDmaMappingInfoRight, pDmaMappingInfo->Flags, pDmaMappingInfo->Flags2),
+             failed);
+ 
+-        pDmaMappingInfoRight->DmaOffset          = dmaOffset + pParams->size;
++        pDmaMappingInfoRight->DmaOffset          = dmaOffset + unmapSize;
+         pDmaMappingInfoRight->bP2P               = pDmaMappingInfo->bP2P;
+         pDmaMappingInfoRight->addressTranslation = pDmaMappingInfo->addressTranslation;
+         pDmaMappingInfoRight->mapPageSize        = pDmaMappingInfo->mapPageSize;
+@@ -1779,7 +1838,7 @@ virtmemUnmapFrom_IMPL
+         NV_ASSERT_OK_OR_GOTO(status,
+             memdescCreateSubMem(&pDmaMappingInfoUnmap->pMemDesc, pDmaMappingInfo->pMemDesc, pGpu,
+                                 pDmaMappingInfoUnmap->DmaOffset - pDmaMappingInfo->DmaOffset,
+-                                pParams->size),
++                                unmapSize),
+             failed);
+     }
+ 

@@ -1,0 +1,241 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Tue, 20 Oct 2026 11:53:45 +0200
+Subject: [PATCH] nvidia: let kernel clients release references during GPU
+ removal
+
+nv_pci_remove_helper() takes the device off nv_linux_devices and then
+waits for its usage count to drop to zero. References held through file
+descriptors are dropped via the nvl stored with the file, but kernel
+clients (UVM) release theirs with nvidia_dev_put_uuid() and
+nvidia_dev_put(), which look the device up in nv_linux_devices. They no
+longer find it, return without calling nv_close_device(), and the
+removal waits forever: unbinding the GPU while a CUDA process runs hangs
+even after the process exits.
+
+Keep devices whose removal is waiting on a separate list and let the
+release paths (nvidia_dev_put(), nvidia_dev_put_uuid(),
+nvidia_dev_unblock_gc6()) also search it. Acquire paths still only see
+nv_linux_devices, so a device being removed can't gain new users.
+
+References:
+- NVIDIA/open-gpu-kernel-modules issue 1374
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nv-linux.h |  3 +
+ kernel-open/common/inc/nv-proto.h |  2 +
+ kernel-open/nvidia/nv-pci.c       | 12 ++++
+ kernel-open/nvidia/nv.c           | 93 ++++++++++++++++++++++++++++++-
+ 4 files changed, 107 insertions(+), 3 deletions(-)
+
+diff --git a/kernel-open/common/inc/nv-linux.h b/kernel-open/common/inc/nv-linux.h
+index f377db1e..8e432dee 100644
+--- a/kernel-open/common/inc/nv-linux.h
++++ b/kernel-open/common/inc/nv-linux.h
+@@ -1327,6 +1327,9 @@ typedef struct nv_linux_state_s {
+     NvU32 minor_num;
+     struct nv_linux_state_s *next;
+ 
++    /* Link in nv_linux_removing_devices while removal waits for users */
++    struct nv_linux_state_s *next_removing;
++
+     /* DRM private information */
+     struct drm_device *drm;
+ 
+diff --git a/kernel-open/common/inc/nv-proto.h b/kernel-open/common/inc/nv-proto.h
+index f5fc8836..943f3318 100644
+--- a/kernel-open/common/inc/nv-proto.h
++++ b/kernel-open/common/inc/nv-proto.h
+@@ -102,6 +102,8 @@ void          nv_linux_add_device_locked(nv_linux_state_t *);
+ int           nv_linux_assign_minor_locked(nv_linux_state_t *);
+ void          nv_linux_remove_minor_locked(nv_linux_state_t *);
+ void          nv_linux_remove_device_locked(nv_linux_state_t *);
++void          nv_linux_add_removing_device_locked(nv_linux_state_t *);
++void          nv_linux_remove_removing_device_locked(nv_linux_state_t *);
+ NvBool        nv_acpi_power_resource_method_present(struct pci_dev *);
+ 
+ int           nv_linux_init_open_q(nv_linux_state_t *);
+diff --git a/kernel-open/nvidia/nv-pci.c b/kernel-open/nvidia/nv-pci.c
+index 48d8b788..5c48eb82 100644
+--- a/kernel-open/nvidia/nv-pci.c
++++ b/kernel-open/nvidia/nv-pci.c
+@@ -2821,6 +2821,8 @@ static void nv_pci_remove_helper(struct pci_dev *pci_dev, bool block_if_gpu_in_u
+      */
+     if ((atomic64_read(&nvl->usage_count) != 0) && !(nv->is_external_gpu))
+     {
++        nv_linux_state_t *removing_nvl = nvl;
++
+         nv_printf(NV_DBG_ERRORS,
+                   "NVRM: Attempting to remove device %04x:%02x:%02x.%x with non-zero usage count!\n",
+                   NV_PCI_DOMAIN_NUMBER(pci_dev), NV_PCI_BUS_NUMBER(pci_dev),
+@@ -2829,7 +2831,14 @@ static void nv_pci_remove_helper(struct pci_dev *pci_dev, bool block_if_gpu_in_u
+         /*
+          * We can't return from this function without corrupting state, so we wait for
+          * the usage count to go to zero.
++         *
++         * The device is no longer on nv_linux_devices. Keep it findable for
++         * the kernel-client release paths (nvidia_dev_put*(),
++         * nvidia_dev_unblock_gc6()), or the references they hold are never
++         * dropped and this loop never ends.
+          */
++        nv_linux_add_removing_device_locked(nvl);
++
+         while (atomic64_read(&nvl->usage_count) != 0)
+         {
+             /*
+@@ -2852,12 +2861,15 @@ static void nv_pci_remove_helper(struct pci_dev *pci_dev, bool block_if_gpu_in_u
+                           NV_PCI_DOMAIN_NUMBER(pci_dev), NV_PCI_BUS_NUMBER(pci_dev),
+                           NV_PCI_SLOT_NUMBER(pci_dev), PCI_FUNC(pci_dev->devfn));
+                 WARN_ON(1);
++                nv_linux_remove_removing_device_locked(removing_nvl);
+                 goto done;
+             }
+             nv = NV_STATE_PTR(nvl);
+             down(&nvl->ldata_lock);
+         }
+ 
++        nv_linux_remove_removing_device_locked(removing_nvl);
++
+         nv_printf(NV_DBG_ERRORS,
+                   "NVRM: Continuing with GPU removal for device %04x:%02x:%02x.%x\n",
+                   NV_PCI_DOMAIN_NUMBER(pci_dev), NV_PCI_BUS_NUMBER(pci_dev),
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index d1f845a8..12044106 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -164,6 +164,17 @@ atomic_t num_probed_nv_devices = ATOMIC_INIT(0);
+  *       are protected by nv_linux_devices_lock
+  */
+ nv_linux_state_t *nv_linux_devices;
++
++/*
++ * Devices whose PCI removal is waiting for their usage count to drop to zero.
++ * They are no longer on nv_linux_devices, so new users can't find them, but
++ * kernel clients (e.g. UVM) must still be able to drop the references they
++ * hold, or the removal waits forever.
++ *
++ * Protected by nv_linux_devices_lock.
++ */
++static nv_linux_state_t *nv_linux_removing_devices;
++
+ static DECLARE_BITMAP(nv_linux_minor_bitmap, NV_MINOR_DEVICE_NUMBER_REGULAR_MAX + 1);
+ 
+ // Global state for the control device
+@@ -1295,6 +1306,58 @@ out:
+     return nvl;
+ }
+ 
++/*
++ * Like find_gpu_id(), but also searches devices whose removal is waiting for
++ * their usage count to drop. Only for paths that release a reference taken
++ * earlier. If found, nvl is returned with nvl->ldata_lock taken.
++ */
++static nv_linux_state_t *find_gpu_id_for_release(NvU32 gpu_id)
++{
++    nv_linux_state_t *nvl = find_gpu_id(gpu_id);
++
++    if (nvl != NULL)
++        return nvl;
++
++    LOCK_NV_LINUX_DEVICES();
++
++    for (nvl = nv_linux_removing_devices; nvl; nvl = nvl->next_removing)
++    {
++        nv_state_t *nv = NV_STATE_PTR(nvl);
++        if (nv->gpu_id == gpu_id)
++        {
++            down(&nvl->ldata_lock);
++            break;
++        }
++    }
++
++    UNLOCK_NV_LINUX_DEVICES();
++    return nvl;
++}
++
++/* Like find_gpu_id_for_release(), but by UUID. */
++static nv_linux_state_t *find_uuid_for_release(const NvU8 *uuid)
++{
++    nv_linux_state_t *nvl = find_uuid(uuid);
++    const NvU8 *dev_uuid;
++
++    if (nvl != NULL)
++        return nvl;
++
++    LOCK_NV_LINUX_DEVICES();
++
++    for (nvl = nv_linux_removing_devices; nvl; nvl = nvl->next_removing)
++    {
++        down(&nvl->ldata_lock);
++        dev_uuid = nv_get_cached_uuid(NV_STATE_PTR(nvl));
++        if (dev_uuid && memcmp(dev_uuid, uuid, GPU_UUID_LEN) == 0)
++            break;
++        up(&nvl->ldata_lock);
++    }
++
++    UNLOCK_NV_LINUX_DEVICES();
++    return nvl;
++}
++
+ /*
+  * Search the global list of nv devices. The search logic is:
+  *
+@@ -5508,7 +5571,7 @@ void nvidia_dev_put(NvU32 gpu_id, nvidia_stack_t *sp, NvBool reset_aware)
+     nv_linux_state_t *nvl;
+ 
+     /* Takes nvl->ldata_lock */
+-    nvl = find_gpu_id(gpu_id);
++    nvl = find_gpu_id_for_release(gpu_id);
+     if (!nvl)
+         return;
+ 
+@@ -5587,7 +5650,7 @@ void nvidia_dev_put_uuid(const NvU8 *uuid, nvidia_stack_t *sp)
+     /* Callers must already have called nvidia_dev_get_uuid() */
+ 
+     /* Takes nvl->ldata_lock */
+-    nvl = find_uuid(uuid);
++    nvl = find_uuid_for_release(uuid);
+     if (!nvl)
+         return;
+ 
+@@ -5629,7 +5692,7 @@ int nvidia_dev_unblock_gc6(const NvU8 *uuid, nvidia_stack_t *sp)
+     /* Callers must already have called nvidia_dev_get_uuid() */
+ 
+     /* Takes nvl->ldata_lock */
+-    nvl = find_uuid(uuid);
++    nvl = find_uuid_for_release(uuid);
+     if (!nvl)
+         return -ENODEV;
+ 
+@@ -5827,6 +5890,30 @@ void nv_linux_remove_device_locked(nv_linux_state_t *nvl)
+     }
+ }
+ 
++/* caller should hold nv_linux_devices_lock using LOCK_NV_LINUX_DEVICES */
++void nv_linux_add_removing_device_locked(nv_linux_state_t *nvl)
++{
++    nvl->next_removing = nv_linux_removing_devices;
++    nv_linux_removing_devices = nvl;
++}
++
++/* caller should hold nv_linux_devices_lock using LOCK_NV_LINUX_DEVICES */
++void nv_linux_remove_removing_device_locked(nv_linux_state_t *nvl)
++{
++    nv_linux_state_t **pnvl;
++
++    for (pnvl = &nv_linux_removing_devices; *pnvl != NULL;
++         pnvl = &(*pnvl)->next_removing)
++    {
++        if (*pnvl == nvl)
++        {
++            *pnvl = nvl->next_removing;
++            nvl->next_removing = NULL;
++            return;
++        }
++    }
++}
++
+ int nv_linux_init_open_q(nv_linux_state_t *nvl)
+ {
+     int rc;

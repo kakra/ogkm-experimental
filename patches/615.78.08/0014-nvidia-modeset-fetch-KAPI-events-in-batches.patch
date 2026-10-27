@@ -1,0 +1,347 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sun, 18 Oct 2026 19:26:38 +0200
+Subject: [PATCH] nvidia-modeset: fetch KAPI events in batches
+
+nvKmsKapiHandleEventQueueChange() fetched queued NVKMS events for
+nvidia-drm one NVKMS_IOCTL_GET_NEXT_EVENT at a time until the queue was
+empty, so a single flip completion event cost two nvkms_lock acquisitions
+on the NVKMS kthread (one for the event, one for the "no event" reply) on
+top of the one for the deferred work that queued it. Each acquisition can
+queue behind a long nvkms_lock holder.
+
+Add NVKMS_IOCTL_GET_NEXT_EVENTS (kernel-space clients only), which pops up
+to 8 events and says whether more are queued, and use it in KAPI: one
+acquisition per batch. The conversion to NvKmsKapiEvent moves to
+DispatchKmsEvent(), shared by both fetch loops (the "err" path was dead).
+
+nvidia_modeset.batch_kapi_events=0 (module parameter, writable at runtime)
+goes back to one event per ioctl.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../nvidia-modeset/nvidia-modeset-linux.c     |  11 ++
+ .../nvidia-modeset-os-interface.h             |   1 +
+ src/nvidia-modeset/interface/nvkms-api.h      |  26 ++++
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 132 +++++++++++-------
+ .../include/nvidia-modeset-os-interface.h     |   1 +
+ src/nvidia-modeset/src/nvkms.c                |  42 ++++++
+ 6 files changed, 162 insertions(+), 51 deletions(-)
+
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+index 1f21478b..d8787738 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+@@ -149,6 +149,12 @@ MODULE_PARM_DESC(unlocked_backlight,
+ static bool unlocked_backlight = true;
+ module_param_named(unlocked_backlight, unlocked_backlight, bool, 0644);
+ 
++MODULE_PARM_DESC(batch_kapi_events,
++                 "Fetch NVKMS events (e.g. flip completions) for nvidia-drm in batches, "
++                 "taking the global NVKMS lock once per batch instead of once per event plus once more.");
++static bool batch_kapi_events = true;
++module_param_named(batch_kapi_events, batch_kapi_events, bool, 0644);
++
+ MODULE_PARM_DESC(enhanced_pcon_support,
+                  "Enable enhanced display protocol converter features (e.g. VRR over active DP-HDMI converters)");
+ static bool enhanced_pcon_support = false;
+@@ -270,6 +276,11 @@ NvBool nvkms_unlocked_surface_rm(void)
+     return READ_ONCE(unlocked_surface_rm);
+ }
+ 
++NvBool nvkms_batch_kapi_events(void)
++{
++    return READ_ONCE(batch_kapi_events);
++}
++
+ NvBool nvkms_output_rounding_fix(void)
+ {
+     return output_rounding_fix;
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+index 09f465fd..abe27af8 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+@@ -123,6 +123,7 @@ NvBool nvkms_enhanced_pcon_support(void);
+ NvBool nvkms_lazy_ctxdma_bind(void);
+ NvBool nvkms_lazy_gpu_map(void);
+ NvBool nvkms_unlocked_surface_rm(void);
++NvBool nvkms_batch_kapi_events(void);
+ NvBool nvkms_output_rounding_fix(void);
+ NvBool nvkms_disable_hdmi_frl(void);
+ NvBool nvkms_disable_vrr_memclk_switch(void);
+diff --git a/src/nvidia-modeset/interface/nvkms-api.h b/src/nvidia-modeset/interface/nvkms-api.h
+index b48bfddb..f92317ac 100644
+--- a/src/nvidia-modeset/interface/nvkms-api.h
++++ b/src/nvidia-modeset/interface/nvkms-api.h
+@@ -273,6 +273,7 @@ enum NvKmsIoctlCommand {
+     NVKMS_IOCTL_FRAMEBUFFER_CONSOLE_DISABLED,
+     NVKMS_IOCTL_REGISTER_VBLANK_INTR_CALLBACK,
+     NVKMS_IOCTL_UNREGISTER_VBLANK_INTR_CALLBACK,
++    NVKMS_IOCTL_GET_NEXT_EVENTS,
+ };
+ 
+ 
+@@ -3283,6 +3284,31 @@ struct NvKmsGetNextEventParams {
+ };
+ 
+ 
++/*!
++ * NVKMS_IOCTL_GET_NEXT_EVENTS: Pop up to NVKMS_GET_NEXT_EVENTS_MAX events off
++ * of the client's event queue in one call. Only for kernel-space clients.
++ */
++
++#define NVKMS_GET_NEXT_EVENTS_MAX 8
++
++struct NvKmsGetNextEventsRequest {
++    NvU32 padding;
++};
++
++struct NvKmsGetNextEventsReply {
++    /*! The number of valid entries in events[]. */
++    NvU32 numEvents;
++    /*! TRUE if events are left in the queue. */
++    NvBool moreEvents;
++    struct NvKmsEvent events[NVKMS_GET_NEXT_EVENTS_MAX];
++};
++
++struct NvKmsGetNextEventsParams {
++    struct NvKmsGetNextEventsRequest request; /*! in */
++    struct NvKmsGetNextEventsReply reply;     /*! out */
++};
++
++
+ struct NvKmsDeclareEventInterestRequest {
+     /*!
+      * Mask of event types, where each event type is indicated by (1
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index 3af7498f..d8b8d468 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -3950,6 +3950,56 @@ static NvBool ApplyModeSetConfig(
+  * This executes without the nvkms_lock held. The lock will be grabbed
+  * during the kapi dispatching contained in this function.
+  */
++/*
++ * Convert an NVKMS event and pass it to the device's event callback.
++ */
++static void DispatchKmsEvent
++(
++    struct NvKmsKapiDevice *device,
++    const struct NvKmsEvent *pEvent
++)
++{
++    struct NvKmsKapiEvent kapiEvent = { };
++
++    kapiEvent.type = pEvent->eventType;
++
++    kapiEvent.device = device;
++    kapiEvent.privateData = device->privateData;
++
++    switch (pEvent->eventType) {
++        case NVKMS_EVENT_TYPE_DPY_CHANGED:
++            kapiEvent.u.displayChanged.display =
++                nvDpyIdToNvU32(pEvent->u.dpyChanged.dpyId);
++            break;
++        case NVKMS_EVENT_TYPE_DPY_CONTENT_PROTECTION_CHANGED:
++            kapiEvent.u.displayCpChanged.display =
++                nvDpyIdToNvU32(pEvent->u.dpyCpChanged.dpyId);
++            kapiEvent.u.displayCpChanged.cp =
++                pEvent->u.dpyCpChanged.cp;
++            break;
++        case NVKMS_EVENT_TYPE_DPY_CP_TOPOLOGY_CHANGED:
++            kapiEvent.u.displayCpTopologyChanged.display =
++                nvDpyIdToNvU32(pEvent->u.dpyCpTopologyChanged.dpyId);
++            kapiEvent.u.displayCpTopologyChanged.topology =
++                pEvent->u.dpyCpTopologyChanged.topology;
++            break;
++        case NVKMS_EVENT_TYPE_DYNAMIC_DPY_CONNECTED:
++            kapiEvent.u.dynamicDisplayConnected.display =
++                nvDpyIdToNvU32(pEvent->u.dynamicDpyConnected.dpyId);
++            break;
++        case NVKMS_EVENT_TYPE_FLIP_OCCURRED:
++            kapiEvent.u.flipOccurred.head =
++                pEvent->u.flipOccurred.head;
++            kapiEvent.u.flipOccurred.layer =
++                pEvent->u.flipOccurred.layer;
++            break;
++        default:
++            return;
++    }
++
++    device->eventCallback(&kapiEvent);
++}
++
+ void nvKmsKapiHandleEventQueueChange
+ (
+     struct NvKmsKapiDevice *device
+@@ -3965,11 +4015,39 @@ void nvKmsKapiHandleEventQueueChange
+      */
+     nvAssert(device->eventCallback != NULL);
+ 
++    /*
++     * Every NVKMS ioctl takes the global NVKMS lock: fetch the events in
++     * batches instead of one by one, which costs an extra lock round trip
++     * per event (for the final "no event" reply).
++     */
++    if (nvkms_batch_kapi_events()) {
++        do
++        {
++            struct NvKmsGetNextEventsParams kmsEventsParams = { };
++            NvU32 i;
++
++            if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
++                                       NVKMS_IOCTL_GET_NEXT_EVENTS,
++                                       &kmsEventsParams,
++                                       sizeof(kmsEventsParams))) {
++                break;
++            }
++
++            for (i = 0; i < kmsEventsParams.reply.numEvents; i++) {
++                DispatchKmsEvent(device, &kmsEventsParams.reply.events[i]);
++            }
++
++            if (!kmsEventsParams.reply.moreEvents) {
++                break;
++            }
++        } while (1);
++
++        return;
++    }
++
+     do
+     {
+         struct NvKmsGetNextEventParams kmsEventParams = { };
+-        struct NvKmsKapiEvent kapiEvent = { };
+-        NvBool err = NV_FALSE;
+ 
+         if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
+                                    NVKMS_IOCTL_GET_NEXT_EVENT,
+@@ -3981,55 +4059,7 @@ void nvKmsKapiHandleEventQueueChange
+             break;
+         }
+ 
+-        kapiEvent.type = kmsEventParams.reply.event.eventType;
+-
+-        kapiEvent.device = device;
+-        kapiEvent.privateData = device->privateData;
+-
+-        switch (kmsEventParams.reply.event.eventType) {
+-            case NVKMS_EVENT_TYPE_DPY_CHANGED:
+-                kapiEvent.u.displayChanged.display =
+-                    nvDpyIdToNvU32(kmsEventParams.
+-                                   reply.event.u.dpyChanged.dpyId);
+-                break;
+-            case NVKMS_EVENT_TYPE_DPY_CONTENT_PROTECTION_CHANGED:
+-                kapiEvent.u.displayCpChanged.display =
+-                    nvDpyIdToNvU32(kmsEventParams.
+-                                   reply.event.u.dpyCpChanged.dpyId);
+-                kapiEvent.u.displayCpChanged.cp =
+-                    kmsEventParams.reply.event.u.dpyCpChanged.cp;
+-                break;
+-            case NVKMS_EVENT_TYPE_DPY_CP_TOPOLOGY_CHANGED:
+-                kapiEvent.u.displayCpTopologyChanged.display =
+-                    nvDpyIdToNvU32(kmsEventParams.
+-                                   reply.event.u.dpyCpTopologyChanged.dpyId);
+-                kapiEvent.u.displayCpTopologyChanged.topology =
+-                    kmsEventParams.reply.event.u.dpyCpTopologyChanged.topology;
+-                break;
+-            case NVKMS_EVENT_TYPE_DYNAMIC_DPY_CONNECTED:
+-                kapiEvent.u.dynamicDisplayConnected.display =
+-                    nvDpyIdToNvU32(kmsEventParams.
+-                                   reply.event.u.dynamicDpyConnected.dpyId);
+-                break;
+-            case NVKMS_EVENT_TYPE_FLIP_OCCURRED:
+-                kapiEvent.u.flipOccurred.head =
+-                    kmsEventParams.reply.event.u.flipOccurred.head;
+-                kapiEvent.u.flipOccurred.layer =
+-                    kmsEventParams.reply.event.u.flipOccurred.layer;
+-                break;
+-            default:
+-                continue;
+-        }
+-
+-        if (err) {
+-            nvKmsKapiLogDeviceDebug(
+-                device,
+-                "Error in conversion from "
+-                "NvKmsGetNextEventParams to NvKmsKapiEvent");
+-            continue;
+-        }
+-
+-        device->eventCallback(&kapiEvent);
++        DispatchKmsEvent(device, &kmsEventParams.reply.event);
+ 
+     } while(1);
+ }
+diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+index 09f465fd..abe27af8 100644
+--- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
++++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+@@ -123,6 +123,7 @@ NvBool nvkms_enhanced_pcon_support(void);
+ NvBool nvkms_lazy_ctxdma_bind(void);
+ NvBool nvkms_lazy_gpu_map(void);
+ NvBool nvkms_unlocked_surface_rm(void);
++NvBool nvkms_batch_kapi_events(void);
+ NvBool nvkms_output_rounding_fix(void);
+ NvBool nvkms_disable_hdmi_frl(void);
+ NvBool nvkms_disable_vrr_memclk_switch(void);
+diff --git a/src/nvidia-modeset/src/nvkms.c b/src/nvidia-modeset/src/nvkms.c
+index 0dd064b9..f26c7e85 100644
+--- a/src/nvidia-modeset/src/nvkms.c
++++ b/src/nvidia-modeset/src/nvkms.c
+@@ -3335,6 +3335,47 @@ static NvBool GetNextEvent(struct NvKmsPerOpen *pOpen,
+ }
+ 
+ 
++/*!
++ * Pop up to NVKMS_GET_NEXT_EVENTS_MAX events off of the client's event queue.
++ */
++static NvBool GetNextEvents(struct NvKmsPerOpen *pOpen,
++                            void *pParamsVoid)
++{
++    struct NvKmsGetNextEventsParams *pParams = pParamsVoid;
++    struct NvKmsPerOpenEventListEntry *pEntry;
++
++    nvAssert(pOpen->type == NvKmsPerOpenTypeIoctl);
++
++    if (pOpen->clientType != NVKMS_CLIENT_KERNEL_SPACE) {
++        return FALSE;
++    }
++
++    pParams->reply.numEvents = 0;
++
++    while (!nvListIsEmpty(&pOpen->ioctl.eventList) &&
++           (pParams->reply.numEvents < NVKMS_GET_NEXT_EVENTS_MAX)) {
++
++        pEntry = nvListFirstEntry(&pOpen->ioctl.eventList,
++                                  struct NvKmsPerOpenEventListEntry,
++                                  eventListEntry);
++
++        pParams->reply.events[pParams->reply.numEvents++] = pEntry->event;
++
++        nvListDel(&pEntry->eventListEntry);
++
++        nvFree(pEntry);
++    }
++
++    pParams->reply.moreEvents = !nvListIsEmpty(&pOpen->ioctl.eventList);
++
++    if (!pParams->reply.moreEvents && (pParams->reply.numEvents > 0)) {
++        nvkms_event_queue_changed(pOpen->pOpenKernel, FALSE);
++    }
++
++    return TRUE;
++}
++
++
+ /*!
+  * Record the client's event interest for the specified device.
+  */
+@@ -5179,6 +5220,7 @@ NvBool nvKmsIoctl(
+         ENTRY(NVKMS_IOCTL_FRAMEBUFFER_CONSOLE_DISABLED, FramebufferConsoleDisabled),
+         ENTRY(NVKMS_IOCTL_REGISTER_VBLANK_INTR_CALLBACK, RegisterVblankIntrCallback),
+         ENTRY(NVKMS_IOCTL_UNREGISTER_VBLANK_INTR_CALLBACK, UnregisterVblankIntrCallback),
++        ENTRY(NVKMS_IOCTL_GET_NEXT_EVENTS, GetNextEvents),
+     };
+ 
+     struct NvKmsPerOpen *pOpen = pOpenVoid;

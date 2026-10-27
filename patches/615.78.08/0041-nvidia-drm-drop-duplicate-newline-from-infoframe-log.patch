@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Mon, 26 Oct 2026 00:17:34 +0100
+Subject: [PATCH] nvidia-drm: drop duplicate newline from infoframe log message
+
+NV_DRM_LOG_INFO() already appends "\n" to the format string, so the
+"Infoframe changed on CRTC ..." message added in 615.71.09 (61dcc937)
+was followed by an empty line in the kernel log.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-modeset.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-modeset.c b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+index 06f39b32..479f0e33 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-modeset.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+@@ -704,7 +704,7 @@ int nv_drm_atomic_check(struct drm_device *dev,
+ 
+                 /* Check if HDR metadata or colorspace changed */
+                 if (hdr_changed || colorspace_changed || vsif_metadata_changed) {
+-                    NV_DRM_LOG_INFO("Infoframe changed on CRTC %d (hdr=%d colorspace=%d vsif=%d), adding planes on CRTC to atomic commit\n",
++                    NV_DRM_LOG_INFO("Infoframe changed on CRTC %d (hdr=%d colorspace=%d vsif=%d), adding planes on CRTC to atomic commit",
+                            to_nv_crtc(crtc)->head,
+                            hdr_changed,
+                            colorspace_changed,

@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Fri, 16 Oct 2026 07:33:27 +0200
+Subject: [PATCH] nvidia-drm: use system_percpu_wq/system_dfl_wq
+
+Linux 7.x deprecates system_wq and system_unbound_wq. Use the new
+workqueues when exported, with a conftest fallback to the old ones.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-crtc.c     |  2 +-
+ kernel-open/nvidia-drm/nvidia-drm-drv.c      |  4 ++--
+ kernel-open/nvidia-drm/nvidia-drm-encoder.c  |  4 ++--
+ kernel-open/nvidia-drm/nvidia-drm-fence.c    |  2 +-
+ kernel-open/nvidia-drm/nvidia-drm-priv.h     | 19 ++++++++++++++++++-
+ kernel-open/nvidia-drm/nvidia-drm-sources.mk |  2 ++
+ 6 files changed, 26 insertions(+), 7 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+index 9be3ddc6..edf0602f 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -3468,7 +3468,7 @@ bool nv_drm_crtc_handle_flip_events(struct nv_drm_crtc *nv_crtc,
+     list_add_tail(&nv_flip->list_entry, &nv_crtc->pending_flip_events);
+     *pp_nv_flip = NULL;
+ 
+-    mod_delayed_work(system_wq, &nv_crtc->pending_flip_events_work,
++    mod_delayed_work(nv_drm_percpu_wq, &nv_crtc->pending_flip_events_work,
+                      msecs_to_jiffies(NV_DRM_PENDING_FLIP_EVENTS_TIMEOUT_MS));
+ 
+     return true;
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index 52b7e83f..b39e77a7 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -2324,8 +2324,8 @@ static void nv_drm_reprobe_connectors(struct nv_drm_device *nv_dev)
+      * frozen.  An immediate hotplug event could drive a modeset (fbdev
+      * helper or DRM client) concurrently with the device-resume phase.
+      */
+-    schedule_delayed_work(&nv_dev->hotplug_event_work,
+-                          msecs_to_jiffies(2000));
++    queue_delayed_work(nv_drm_percpu_wq, &nv_dev->hotplug_event_work,
++                       msecs_to_jiffies(2000));
+ }
+ 
+ /*
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-encoder.c b/kernel-open/nvidia-drm/nvidia-drm-encoder.c
+index a4fc8838..7ca3f1c0 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-encoder.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-encoder.c
+@@ -296,7 +296,7 @@ void nv_drm_handle_display_change(struct nv_drm_device *nv_dev,
+ 
+     nv_drm_connector_mark_connection_status_dirty(nv_encoder->nv_connector);
+ 
+-    schedule_delayed_work(&nv_dev->hotplug_event_work, 0);
++    queue_delayed_work(nv_drm_percpu_wq, &nv_dev->hotplug_event_work, 0);
+ }
+ 
+ void nv_drm_handle_display_cp_change(struct nv_drm_device *nv_dev,
+@@ -372,6 +372,6 @@ void nv_drm_handle_dynamic_display_connected(struct nv_drm_device *nv_dev,
+         return;
+     }
+ 
+-    schedule_delayed_work(&nv_dev->hotplug_event_work, 0);
++    queue_delayed_work(nv_drm_percpu_wq, &nv_dev->hotplug_event_work, 0);
+ }
+ #endif
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-fence.c b/kernel-open/nvidia-drm/nvidia-drm-fence.c
+index 72561c88..b3a5173a 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-fence.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-fence.c
+@@ -310,7 +310,7 @@ static bool __nv_drm_deadline_request_boost(struct nv_drm_device *nv_dev)
+                  nv_dev->deadline.boost_interval_ms);
+ 
+     atomic64_inc(&nv_drm_deadline_boost_count);
+-    queue_work(system_unbound_wq, &nv_dev->deadline.boost_work);
++    queue_work(nv_drm_dfl_wq, &nv_dev->deadline.boost_work);
+ 
+     return true;
+ }
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-priv.h b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+index dad6208a..3d581c3f 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-priv.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+@@ -35,10 +35,27 @@
+ #include <drm/drm_device.h>
+ #include <drm/drm_gem.h>
+ 
++#include <linux/workqueue.h>
++
+ #if defined(NV_DMA_FENCE_OPS_HAS_SET_DEADLINE)
+ #include <linux/dma-fence.h>
+ #include <linux/hrtimer.h>
+-#include <linux/workqueue.h>
++#endif
++
++/*
++ * system_wq and system_unbound_wq are deprecated in favour of
++ * system_percpu_wq and system_dfl_wq where those exist.
++ */
++#if NV_IS_EXPORT_SYMBOL_PRESENT_system_percpu_wq
++#define nv_drm_percpu_wq system_percpu_wq
++#else
++#define nv_drm_percpu_wq system_wq
++#endif
++
++#if NV_IS_EXPORT_SYMBOL_PRESENT_system_dfl_wq
++#define nv_drm_dfl_wq system_dfl_wq
++#else
++#define nv_drm_dfl_wq system_unbound_wq
+ #endif
+ 
+ #include "nvidia-drm-os-interface.h"
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-sources.mk b/kernel-open/nvidia-drm/nvidia-drm-sources.mk
+index 658f6c62..061d6919 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-sources.mk
++++ b/kernel-open/nvidia-drm/nvidia-drm-sources.mk
+@@ -38,6 +38,8 @@ NV_CONFTEST_GENERIC_COMPILE_TESTS += is_export_symbol_present_drm_gem_prime_fd_t
+ NV_CONFTEST_GENERIC_COMPILE_TESTS += is_export_symbol_present_drm_gem_prime_handle_to_fd
+ NV_CONFTEST_GENERIC_COMPILE_TESTS += is_export_symbol_present_hrtimer_setup
+ NV_CONFTEST_GENERIC_COMPILE_TESTS += is_export_symbol_present_timer_delete_sync
++NV_CONFTEST_GENERIC_COMPILE_TESTS += is_export_symbol_present_system_percpu_wq
++NV_CONFTEST_GENERIC_COMPILE_TESTS += is_export_symbol_present_system_dfl_wq
+ NV_CONFTEST_GENERIC_COMPILE_TESTS += is_export_symbol_gpl___vma_start_write
+ 
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += get_user_pages_remote
