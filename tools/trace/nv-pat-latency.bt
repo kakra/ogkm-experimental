@@ -1,0 +1,33 @@
+#!/usr/bin/env bpftrace
+// Latency of the page attribute (PAT) changes and of the NVIDIA sysmem
+// alloc/free paths, in microseconds. Frees slower than 2 ms are printed live.
+// Usage: sudo bpftrace nv-pat-latency.bt   (Ctrl+C prints the histograms)
+// If nv_*_system_pages are not in /proc/kallsyms (inlined), remove the two
+// blocks at the end.
+
+kprobe:set_pages_array_uc { @t_uc[tid] = nsecs; }
+kretprobe:set_pages_array_uc /@t_uc[tid]/ {
+	@uc_us = hist((uint64)(nsecs - (uint64)@t_uc[tid]) / 1000); $_d = delete(@t_uc[tid]);
+}
+
+kprobe:set_pages_array_wc { @t_wc[tid] = nsecs; }
+kretprobe:set_pages_array_wc /@t_wc[tid]/ {
+	@wc_us = hist((uint64)(nsecs - (uint64)@t_wc[tid]) / 1000); $_d = delete(@t_wc[tid]);
+}
+
+kprobe:set_pages_array_wb { @t_wb[tid] = nsecs; @wb_comm[comm] = count(); }
+kretprobe:set_pages_array_wb /@t_wb[tid]/ {
+	@wb_us = hist((uint64)(nsecs - (uint64)@t_wb[tid]) / 1000); $_d = delete(@t_wb[tid]);
+}
+
+kprobe:nvidia:nv_alloc_system_pages { @t_alloc[tid] = nsecs; }
+kretprobe:nvidia:nv_alloc_system_pages /@t_alloc[tid]/ {
+	@alloc_us = hist((uint64)(nsecs - (uint64)@t_alloc[tid]) / 1000); $_d = delete(@t_alloc[tid]);
+}
+
+kprobe:nvidia:nv_free_system_pages { @t_free[tid] = nsecs; }
+kretprobe:nvidia:nv_free_system_pages /@t_free[tid]/ {
+	$us = (uint64)(nsecs - (uint64)@t_free[tid]) / 1000;
+	@free_us = hist($us); $_d = delete(@t_free[tid]);
+	if ($us > 2000) { printf("%s free %d us (%s)\n", strftime("%H:%M:%S", nsecs), $us, comm); }
+}
