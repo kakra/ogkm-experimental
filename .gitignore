@@ -1,0 +1,4 @@
+# Scratch output of the helper scripts
+/build/
+*.orig
+*.rej
