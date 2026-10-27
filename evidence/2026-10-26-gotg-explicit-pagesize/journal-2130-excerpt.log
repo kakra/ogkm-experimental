@@ -1,0 +1,27 @@
+Okt 26 21:31:25.885221 host systemd[2202]: app-steam-app0-553192.scope: Consumed 3.346s CPU time over 9.228s wall clock time, 1.5G memory peak.
+Okt 26 21:31:27.287021 host systemd[2202]: Started app-steam-app1088850-553478.scope.
+Okt 26 21:31:32.216878 host kernel: x86/split lock detection: #AC: gotg.exe/553695 took a split_lock trap at address: 0x15aa4b3b7
+Okt 26 21:31:32.463545 host kernel: umip: gotg.exe[553695] ip:144666a75 sp:10f560: SGDT instruction cannot be used by applications.
+Okt 26 21:31:32.463599 host kernel: umip: gotg.exe[553695] ip:144666a75 sp:10f560: For now, expensive software emulation returns the result.
+Okt 26 21:31:32.480246 host kernel: umip: gotg.exe[553695] ip:15197a322 sp:10f560: SGDT instruction cannot be used by applications.
+Okt 26 21:31:32.480307 host kernel: umip: gotg.exe[553695] ip:15197a322 sp:10f560: For now, expensive software emulation returns the result.
+Okt 26 21:31:34.756879 host kernel: umip: gotg.exe[553695] ip:14dd89b85 sp:10f4d0: SGDT instruction cannot be used by applications.
+Okt 26 21:31:47.210198 host kernel: x86/split lock detection: #AC: ZRenderManager:/554050 took a split_lock trap at address: 0x1449d57b0
+Okt 26 21:31:49.476880 host kernel: x86/split lock detection: #AC: JobWorkerThread/553833 took a split_lock trap at address: 0x150bbd40e
+Okt 26 21:31:49.783568 host kernel: x86/split lock detection: #AC: AK::EventManage/554035 took a split_lock trap at address: 0x1490e6610
+Okt 26 21:31:50.433527 host kernel: x86/split lock detection: #AC: gotg.exe/554033 took a split_lock trap at address: 0x1556b0b4c
+Okt 26 21:31:51.276908 host kernel: x86/split lock detection: #AC: JobWorkerThread/553832 took a split_lock trap at address: 0x14eb490b9
+Okt 26 21:31:51.773533 host kernel: x86/split lock detection: #AC: JobWorkerThread/553830 took a split_lock trap at address: 0x14f3d9bd7
+Okt 26 21:31:53.853528 host kernel: x86/split lock detection: #AC: JobWorkerThread/553835 took a split_lock trap at address: 0x15e07e2d7
+Okt 26 21:31:54.013531 host kernel: x86/split lock detection: #AC: JobWorkerThread/553831 took a split_lock trap at address: 0x15ccb72aa
+Okt 26 21:31:55.513531 host kernel: x86/split lock detection: #AC: JobWorkerThread/553834 took a split_lock trap at address: 0x14b6a136d
+Okt 26 21:32:01.636874 host kernel: x86/split lock detection: #AC: JobWorkerThread/553829 took a split_lock trap at address: 0x1490e6610
+Okt 26 21:33:00.393532 host kernel: NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from _memdescAllocInternal(pMemDesc) @ mem_desc.c:1354
+Okt 26 21:33:00.403614 host kernel: NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from rmStatus @ system_mem.c:460
+Okt 26 21:33:00.403642 host kernel: NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from _memdescAllocInternal(pMemDesc) @ mem_desc.c:1354
+Okt 26 21:33:00.403650 host kernel: NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from rmStatus @ system_mem.c:460
+Okt 26 21:33:00.436855 host kernel: NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from _memdescAllocInternal(pMemDesc) @ mem_desc.c:1354
+Okt 26 21:33:00.436908 host kernel: NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from rmStatus @ system_mem.c:460
+Okt 26 21:33:00.453531 host kernel: NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from _memdescAllocInternal(pMemDesc) @ mem_desc.c:1354
+Okt 26 21:33:00.453703 host kernel: NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from rmStatus @ system_mem.c:460
+Okt 26 21:33:01.486470 host systemd[2202]: app-steam-app1088850-553478.scope: Consumed 6min 13.677s CPU time over 1min 34.199s wall clock time, 6.2G memory peak.

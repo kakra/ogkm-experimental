@@ -1,0 +1,92 @@
+nv-pat-latency.bt:9:17-43: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    @uc_us = hist((nsecs - @t_uc[tid]) / 1000); delete(@t_uc[tid]);
+                   ~~~~~~~~~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:14:17-43: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    @wc_us = hist((nsecs - @t_wc[tid]) / 1000); delete(@t_wc[tid]);
+                   ~~~~~~~~~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:19:17-43: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    @wb_us = hist((nsecs - @t_wb[tid]) / 1000); delete(@t_wb[tid]);
+                   ~~~~~~~~~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:24:20-49: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    @alloc_us = hist((nsecs - @t_alloc[tid]) / 1000); delete(@t_alloc[tid]);
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:29:9-37: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    $us = (nsecs - @t_free[tid]) / 1000;
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:9:17-43: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    @uc_us = hist((nsecs - @t_uc[tid]) / 1000); delete(@t_uc[tid]);
+                   ~~~~~~~~~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:14:17-43: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    @wc_us = hist((nsecs - @t_wc[tid]) / 1000); delete(@t_wc[tid]);
+                   ~~~~~~~~~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:19:17-43: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    @wb_us = hist((nsecs - @t_wb[tid]) / 1000); delete(@t_wb[tid]);
+                   ~~~~~~~~~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:24:20-49: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    @alloc_us = hist((nsecs - @t_alloc[tid]) / 1000); delete(@t_alloc[tid]);
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:29:9-37: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    $us = (nsecs - @t_free[tid]) / 1000;
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:9:17-22: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    @uc_us = hist((nsecs - @t_uc[tid]) / 1000); delete(@t_uc[tid]);
+                   ~~~~~
+nv-pat-latency.bt:9:25-35: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    @uc_us = hist((nsecs - @t_uc[tid]) / 1000); delete(@t_uc[tid]);
+                           ~~~~~~~~~~
+nv-pat-latency.bt:14:17-22: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    @wc_us = hist((nsecs - @t_wc[tid]) / 1000); delete(@t_wc[tid]);
+                   ~~~~~
+nv-pat-latency.bt:14:25-35: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    @wc_us = hist((nsecs - @t_wc[tid]) / 1000); delete(@t_wc[tid]);
+                           ~~~~~~~~~~
+nv-pat-latency.bt:19:17-22: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    @wb_us = hist((nsecs - @t_wb[tid]) / 1000); delete(@t_wb[tid]);
+                   ~~~~~
+nv-pat-latency.bt:19:25-35: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    @wb_us = hist((nsecs - @t_wb[tid]) / 1000); delete(@t_wb[tid]);
+                           ~~~~~~~~~~
+nv-pat-latency.bt:24:20-25: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    @alloc_us = hist((nsecs - @t_alloc[tid]) / 1000); delete(@t_alloc[tid]);
+                      ~~~~~
+nv-pat-latency.bt:24:28-41: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    @alloc_us = hist((nsecs - @t_alloc[tid]) / 1000); delete(@t_alloc[tid]);
+                              ~~~~~~~~~~~~~
+nv-pat-latency.bt:29:9-14: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    $us = (nsecs - @t_free[tid]) / 1000;
+           ~~~~~
+nv-pat-latency.bt:29:17-29: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    $us = (nsecs - @t_free[tid]) / 1000;
+                   ~~~~~~~~~~~~
+nv-pat-latency.bt:9:46-64: WARNING: Return value discarded.
+    @uc_us = hist((nsecs - @t_uc[tid]) / 1000); delete(@t_uc[tid]);
+                                                ~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:14:46-64: WARNING: Return value discarded.
+    @wc_us = hist((nsecs - @t_wc[tid]) / 1000); delete(@t_wc[tid]);
+                                                ~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:19:46-64: WARNING: Return value discarded.
+    @wb_us = hist((nsecs - @t_wb[tid]) / 1000); delete(@t_wb[tid]);
+                                                ~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:24:52-73: WARNING: Return value discarded.
+    @alloc_us = hist((nsecs - @t_alloc[tid]) / 1000); delete(@t_alloc[tid]);
+                                                      ~~~~~~~~~~~~~~~~~~~~~
+nv-pat-latency.bt:30:24-45: WARNING: Return value discarded.
+    @free_us = hist($us); delete(@t_free[tid]);
+                          ~~~~~~~~~~~~~~~~~~~~~
+22:00:06 free 2124 us (chrome)
+22:00:25 free 2825 us (chrome)
+22:01:18 free 2696 us (chrome)
+22:01:56 free 2138 us (chrome)
+22:01:59 free 3549 us (chrome)
+22:02:29 free 3503 us (chrome)
+22:03:57 free 2463 us (chrome)
+22:04:28 free 2017 us (chrome)
+22:05:31 free 2736 us (chrome)
+22:08:31 free 3004 us (chrome)
+22:08:41 free 3026 us (chrome)
+22:09:04 free 2116 us (DeferedReleaseT)
+22:20:18 free 3547 us (JobWorkerThread)
+22:20:18 free 4416 us (JobWorkerThread)
+22:20:18 free 4686 us (JobWorkerThread)
+22:20:18 free 3381 us (JobWorkerThread)
+22:20:18 free 5657 us (JobWorkerThread)
