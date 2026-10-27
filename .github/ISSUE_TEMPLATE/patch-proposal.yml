@@ -1,0 +1,30 @@
+name: Patch proposal
+description: Suggest a patch or an upstream pull request for the series.
+labels: [proposal]
+body:
+  - type: input
+    id: link
+    attributes:
+      label: Patch or pull request
+      placeholder: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1234
+    validations:
+      required: true
+  - type: input
+    id: release
+    attributes:
+      label: Driver release it applies to
+      placeholder: 615.78.08
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Problem it fixes
+      description: Symptom, affected hardware, how common it is.
+    validations:
+      required: true
+  - type: textarea
+    id: tested
+    attributes:
+      label: Testing
+      description: Where and how long it ran, on which GPU and kernel, and what was measured.
