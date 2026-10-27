@@ -1,0 +1,40 @@
+name: Regression by a patch
+description: A specific patch of the series makes something worse.
+labels: [regression]
+body:
+  - type: input
+    id: release
+    attributes:
+      label: Driver release and series
+      placeholder: 615.78.08, ogkm/615.78.08 at 706df0ca
+    validations:
+      required: true
+  - type: input
+    id: patch
+    attributes:
+      label: Suspected patch
+      description: Number and subject from `patches/<release>/README.md`, if known.
+      placeholder: "42: nvidia: retry explicit big-page sysmem allocations with smaller pages"
+  - type: textarea
+    id: bisect
+    attributes:
+      label: How it was narrowed down
+      description: |
+        The series is linear, so it can be bisected on the fork branch:
+        `git bisect start ogkm/<release> <release>`, build and test each step
+        (`make modules -j$(nproc)`, install, reboot or reload the modules).
+        Or apply only the first N patches of `patches/<release>/series`.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens with the patch, and without it
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Kernel log with and without the patch
+      description: Remove private data first.
+      render: text
