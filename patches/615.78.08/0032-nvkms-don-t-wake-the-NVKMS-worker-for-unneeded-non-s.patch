@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tom Englund <tomenglund26@gmail.com>
-Date: Thu, 22 Oct 2026 11:42:21 +0200
+Date: Mon, 26 Oct 2026 10:07:27 +0100
 Subject: [PATCH] nvkms: don't wake the NVKMS worker for unneeded non-stall
  interrupts
 
@@ -30,66 +30,19 @@ client gets the FIFO handle and before headSurface renders, so the
 interrupts they cause see it non-zero. Teardown paths that don't decrement
 it only make the callback queue work as before.
 
-nvidia_modeset.nonstall_skip_idle=0 (module parameter, writable at
-runtime) restores the old behaviour.
-
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- kernel-open/nvidia-modeset/nvidia-modeset-linux.c   | 11 +++++++++++
- .../nvidia-modeset/nvidia-modeset-os-interface.h    |  1 +
- src/nvidia-modeset/include/nvkms-types.h            |  8 ++++++++
- .../include/nvidia-modeset-os-interface.h           |  1 +
- src/nvidia-modeset/src/nvkms-headsurface-config.c   |  4 ++++
- src/nvidia-modeset/src/nvkms-rm.c                   | 13 +++++++++++++
- src/nvidia-modeset/src/nvkms-surface.c              |  6 ++++++
- 7 files changed, 44 insertions(+)
+ src/nvidia-modeset/include/nvkms-types.h          |  8 ++++++++
+ src/nvidia-modeset/src/nvkms-headsurface-config.c |  4 ++++
+ src/nvidia-modeset/src/nvkms-rm.c                 | 12 ++++++++++++
+ src/nvidia-modeset/src/nvkms-surface.c            |  6 ++++++
+ 4 files changed, 30 insertions(+)
 
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-index 190791ad..a140a42e 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-@@ -180,6 +180,12 @@ MODULE_PARM_DESC(pushbuf_wrap_no_yield,
- static bool pushbuf_wrap_no_yield = true;
- module_param_named(pushbuf_wrap_no_yield, pushbuf_wrap_no_yield, bool, 0644);
- 
-+MODULE_PARM_DESC(nonstall_skip_idle,
-+                 "Don't wake the NVKMS worker (and take the NVKMS lock) for GPU non-stall interrupts "
-+                 "when no deferred request FIFO or headSurface channel exists to service.");
-+static bool nonstall_skip_idle = true;
-+module_param_named(nonstall_skip_idle, nonstall_skip_idle, bool, 0644);
-+
- /* Fail allocating the RM core channel for NVKMS using the i-th method (see
-  * FailAllocCoreChannelMethod). Failures not using the i-th method are ignored. */
- MODULE_PARM_DESC(fail_alloc_core_channel, "Control testing for hardware core channel allocation failure");
-@@ -286,6 +292,11 @@ NvBool nvkms_pushbuf_wrap_no_yield(void)
-     return READ_ONCE(pushbuf_wrap_no_yield);
- }
- 
-+NvBool nvkms_nonstall_skip_idle(void)
-+{
-+    return READ_ONCE(nonstall_skip_idle);
-+}
-+
- NvBool nvkms_conceal_vrr_caps(void)
- {
-     return conceal_vrr_caps;
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-index 3e3d8e96..982bce6c 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-@@ -136,6 +136,7 @@ NvBool nvkms_debug_logging(void);
- NvBool nvkms_dp_sst_edid_recovery_fix(void);
- NvBool nvkms_kapi_sysmem_semaphores(void);
- NvBool nvkms_pushbuf_wrap_no_yield(void);
-+NvBool nvkms_nonstall_skip_idle(void);
- void nvkms_extcon_report_hdmi(NvBool state);
- void nvkms_extcon_report_hdmi_audio(NvBool state);
- 
 diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
-index 10ceb3e9..9738773c 100644
+index e6464c85..25d57743 100644
 --- a/src/nvidia-modeset/include/nvkms-types.h
 +++ b/src/nvidia-modeset/include/nvkms-types.h
-@@ -2994,6 +2994,14 @@ typedef struct {
+@@ -2996,6 +2996,14 @@ typedef struct {
  #endif
  
      struct NvKmsPerOpen *nvKmsPerOpen;
@@ -104,18 +57,6 @@ index 10ceb3e9..9738773c 100644
  } NVEvoGlobal;
  
  extern NVEvoGlobal nvEvoGlobal;
-diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-index 3e3d8e96..982bce6c 100644
---- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-+++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-@@ -136,6 +136,7 @@ NvBool nvkms_debug_logging(void);
- NvBool nvkms_dp_sst_edid_recovery_fix(void);
- NvBool nvkms_kapi_sysmem_semaphores(void);
- NvBool nvkms_pushbuf_wrap_no_yield(void);
-+NvBool nvkms_nonstall_skip_idle(void);
- void nvkms_extcon_report_hdmi(NvBool state);
- void nvkms_extcon_report_hdmi_audio(NvBool state);
- 
 diff --git a/src/nvidia-modeset/src/nvkms-headsurface-config.c b/src/nvidia-modeset/src/nvkms-headsurface-config.c
 index 341c6417..7cef51d2 100644
 --- a/src/nvidia-modeset/src/nvkms-headsurface-config.c
@@ -139,10 +80,10 @@ index 341c6417..7cef51d2 100644
      }
  
 diff --git a/src/nvidia-modeset/src/nvkms-rm.c b/src/nvidia-modeset/src/nvkms-rm.c
-index 7ccc2161..b1e8a826 100644
+index 83e4b91e..62b80ea2 100644
 --- a/src/nvidia-modeset/src/nvkms-rm.c
 +++ b/src/nvidia-modeset/src/nvkms-rm.c
-@@ -4321,7 +4321,20 @@ static void NonStallInterruptCallback(
+@@ -4321,7 +4321,19 @@ static void NonStallInterruptCallback(
       * XXX It might be nice to use a lighter-weight lock here to check if any
       * requests are pending in any NvKmsDeferredRequestFifo before scheduling
       * nvKmsServiceNonStallInterrupt().
@@ -156,15 +97,14 @@ index 7ccc2161..b1e8a826 100644
 +     * held, before the client can use a new FIFO or headSurface renders, so
 +     * any interrupt they cause sees it non-zero.
       */
-+    if (nvkms_nonstall_skip_idle() &&
-+        (*(volatile const NvU32 *)&nvEvoGlobal.nonStallWorkCount == 0)) {
++    if (*(volatile const NvU32 *)&nvEvoGlobal.nonStallWorkCount == 0) {
 +        return;
 +    }
  
      (void) nvkms_alloc_timer_with_ref_ptr(
          nvKmsServiceNonStallInterrupt, /* callback */
 diff --git a/src/nvidia-modeset/src/nvkms-surface.c b/src/nvidia-modeset/src/nvkms-surface.c
-index c37cea3c..c3fef3cb 100644
+index bc347e97..9a744a73 100644
 --- a/src/nvidia-modeset/src/nvkms-surface.c
 +++ b/src/nvidia-modeset/src/nvkms-surface.c
 @@ -1674,6 +1674,9 @@ NVDeferredRequestFifoRec *nvEvoRegisterDeferredRequestFifo(

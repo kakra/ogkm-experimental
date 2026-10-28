@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: xa9igor <32750511+xa9igor@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 23:20:08 +0100
+Subject: [PATCH] nvidia: restore RMAPI_GPU_LOCK_INTERNAL on golden image
+ channel cleanup
+
+kgraphicsCreateGoldenImageChannel_IMPL() drops the GPU lock and switches
+pRmApi to RMAPI_API_LOCK_INTERNAL while it allocates the channel. The
+success path re-acquires the GPU lock and switches pRmApi back, but the
+error path under cleanup: only re-acquires the lock.
+
+pRmApi->Free() then runs with the GPU lock held through the API-lock
+interface: serverResLock_Prologue() asserts and returns
+NV_ERR_INVALID_LOCK_STATE, the resource is never removed from
+pendingFreeList, and serverFreeResourceTreeUnderLock() spins forever in
+the kernel. Seen on S4 resume when the channel allocation fails with
+NV_ERR_STATE_IN_USE from GSP (upstream issue 1497, PR 1498).
+
+Switch pRmApi back to RMAPI_GPU_LOCK_INTERNAL when re-acquiring the lock.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/src/kernel/gpu/gr/kernel_graphics.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/nvidia/src/kernel/gpu/gr/kernel_graphics.c b/src/nvidia/src/kernel/gpu/gr/kernel_graphics.c
+index d0f68df4..31d7398e 100644
+--- a/src/nvidia/src/kernel/gpu/gr/kernel_graphics.c
++++ b/src/nvidia/src/kernel/gpu/gr/kernel_graphics.c
+@@ -2558,6 +2558,7 @@ cleanup:
+     {
+         NV_ASSERT_OK_OR_CAPTURE_FIRST_ERROR(status,
+             rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_GR));
++        pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+     }
+ 
+     if (pVaParams != NULL)

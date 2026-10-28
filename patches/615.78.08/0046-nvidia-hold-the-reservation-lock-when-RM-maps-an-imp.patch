@@ -1,0 +1,133 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 09:42:22 +0100
+Subject: [PATCH] nvidia: hold the reservation lock when RM maps an imported
+ dma-buf
+
+nv_dma_import_dma_buf() and nv_dma_release_dma_buf() called
+dma_buf_map_attachment() and dma_buf_unmap_attachment() without the
+dma-buf's reservation lock, which those functions require since the
+dynamic dma-buf locking rules. dma-buf core pins the buffer and the
+exporter maps (and may migrate) it under that lock, so without it RM
+raced with the exporter. Reached by every PRIME import into nvidia-drm
+(getSystemMemoryHandleFromDmaBuf) and by dma-buf fd imports from
+userspace. The assertion is lockdep-only, so nothing warned.
+
+Use the _unlocked variants, which take the lock, where present. This
+adds no new lock order: dma_buf_attach() and dma_buf_detach(), called
+from the same RM paths, already take the reservation lock under the RM
+API lock.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/conftest.sh          | 17 +++++++++++++
+ kernel-open/nvidia/nv-dmabuf.c   | 41 +++++++++++++++++++++++++++++---
+ kernel-open/nvidia/nvidia.Kbuild |  1 +
+ 3 files changed, 56 insertions(+), 3 deletions(-)
+
+diff --git a/kernel-open/conftest.sh b/kernel-open/conftest.sh
+index a66db93d..c863ca13 100755
+--- a/kernel-open/conftest.sh
++++ b/kernel-open/conftest.sh
+@@ -3019,6 +3019,23 @@ compile_test() {
+             compile_check_conftest "$CODE" "NV_PCI_ENABLE_ATOMIC_OPS_TO_ROOT_PRESENT" "" "functions"
+         ;;
+ 
++        dma_buf_map_attachment_unlocked)
++            #
++            # Determine if the function dma_buf_map_attachment_unlocked() is
++            # present.
++            #
++            # Added when dma_buf_map_attachment() started requiring the
++            # caller to hold the dma-buf's reservation lock.
++            #
++            CODE="
++            #include <linux/dma-buf.h>
++            void conftest_dma_buf_map_attachment_unlocked(void) {
++                dma_buf_map_attachment_unlocked();
++            }"
++
++            compile_check_conftest "$CODE" "NV_DMA_BUF_MAP_ATTACHMENT_UNLOCKED_PRESENT" "" "functions"
++        ;;
++
+         drm_gem_object_put_unlocked)
+             #
+             # Determine if the function drm_gem_object_put_unlocked() is present.
+diff --git a/kernel-open/nvidia/nv-dmabuf.c b/kernel-open/nvidia/nv-dmabuf.c
+index 3bf02e8a..b2f779be 100644
+--- a/kernel-open/nvidia/nv-dmabuf.c
++++ b/kernel-open/nvidia/nv-dmabuf.c
+@@ -1882,6 +1882,41 @@ nv_dma_buf_export(
+ #endif // CONFIG_DMA_SHARED_BUFFER
+ }
+ 
++#if defined(CONFIG_DMA_SHARED_BUFFER)
++//
++// dma_buf_map_attachment() and dma_buf_unmap_attachment() require the
++// reservation lock since it became the dma-buf locking rule; the unlocked
++// variants take it. Exporters that pin or migrate the buffer on map rely
++// on it.
++//
++static struct sg_table *
++nv_dma_buf_map_attachment_unlocked(
++    struct dma_buf_attachment *attach,
++    enum dma_data_direction direction
++)
++{
++#if defined(NV_DMA_BUF_MAP_ATTACHMENT_UNLOCKED_PRESENT)
++    return dma_buf_map_attachment_unlocked(attach, direction);
++#else
++    return dma_buf_map_attachment(attach, direction);
++#endif
++}
++
++static void
++nv_dma_buf_unmap_attachment_unlocked(
++    struct dma_buf_attachment *attach,
++    struct sg_table *sgt,
++    enum dma_data_direction direction
++)
++{
++#if defined(NV_DMA_BUF_MAP_ATTACHMENT_UNLOCKED_PRESENT)
++    dma_buf_unmap_attachment_unlocked(attach, sgt, direction);
++#else
++    dma_buf_unmap_attachment(attach, sgt, direction);
++#endif
++}
++#endif // CONFIG_DMA_SHARED_BUFFER
++
+ NV_STATUS NV_API_CALL nv_dma_import_dma_buf
+ (
+     nv_dma_device_t *dma_dev,
+@@ -1938,7 +1973,7 @@ NV_STATUS NV_API_CALL nv_dma_import_dma_buf
+         nv_dma_buf->direction = DMA_BIDIRECTIONAL;
+     }
+ 
+-    map_sgt = dma_buf_map_attachment(dma_attach, nv_dma_buf->direction);
++    map_sgt = nv_dma_buf_map_attachment_unlocked(dma_attach, nv_dma_buf->direction);
+     if (IS_ERR_OR_NULL(map_sgt))
+     {
+         nv_printf(NV_DBG_ERRORS, "Can't map dma attachment!\n");
+@@ -2014,8 +2049,8 @@ void NV_API_CALL nv_dma_release_dma_buf
+     }
+ 
+     nv_dma_buf = (nv_dma_buf_t *)import_priv;
+-    dma_buf_unmap_attachment(nv_dma_buf->dma_attach, nv_dma_buf->sgt,
+-                             nv_dma_buf->direction);
++    nv_dma_buf_unmap_attachment_unlocked(nv_dma_buf->dma_attach, nv_dma_buf->sgt,
++                                         nv_dma_buf->direction);
+     dma_buf_detach(nv_dma_buf->dma_buf, nv_dma_buf->dma_attach);
+     dma_buf_put(nv_dma_buf->dma_buf);
+ 
+diff --git a/kernel-open/nvidia/nvidia.Kbuild b/kernel-open/nvidia/nvidia.Kbuild
+index bfef6718..7e16d68a 100644
+--- a/kernel-open/nvidia/nvidia.Kbuild
++++ b/kernel-open/nvidia/nvidia.Kbuild
+@@ -161,6 +161,7 @@ NV_CONFTEST_FUNCTION_COMPILE_TESTS += follow_pfn
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += ptep_get
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += pfn_is_map_memory
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_gem_object_put_unlocked
++NV_CONFTEST_FUNCTION_COMPILE_TESTS += dma_buf_map_attachment_unlocked
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += add_memory_driver_managed
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += of_dma_configure
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += i2c_new_client_device

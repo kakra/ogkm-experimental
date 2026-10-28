@@ -66,20 +66,20 @@ index a4fc8838..7ca3f1c0 100644
  }
  #endif
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-fence.c b/kernel-open/nvidia-drm/nvidia-drm-fence.c
-index 72561c88..b3a5173a 100644
+index 2a0aac5f..74af6472 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-fence.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-fence.c
-@@ -310,7 +310,7 @@ static bool __nv_drm_deadline_request_boost(struct nv_drm_device *nv_dev)
-                  nv_dev->deadline.boost_interval_ms);
+@@ -213,7 +213,7 @@ static bool __nv_drm_deadline_request_boost(struct nv_drm_device *nv_dev)
+         min(nv_dev->deadline.boost_interval_ms * 2,
+             (unsigned int)NV_DRM_DEADLINE_BACKOFF_MAX_MS);
  
-     atomic64_inc(&nv_drm_deadline_boost_count);
 -    queue_work(system_unbound_wq, &nv_dev->deadline.boost_work);
 +    queue_work(nv_drm_dfl_wq, &nv_dev->deadline.boost_work);
  
      return true;
  }
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-priv.h b/kernel-open/nvidia-drm/nvidia-drm-priv.h
-index dad6208a..3d581c3f 100644
+index a15c59af..2f86c7eb 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-priv.h
 +++ b/kernel-open/nvidia-drm/nvidia-drm-priv.h
 @@ -35,10 +35,27 @@

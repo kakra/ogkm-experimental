@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tom Englund <tomenglund26@gmail.com>
-Date: Sun, 18 Oct 2026 19:26:38 +0200
+Date: Mon, 26 Oct 2026 09:56:44 +0100
 Subject: [PATCH] nvidia-modeset: fetch KAPI events in batches
 
 nvKmsKapiHandleEventQueueChange() fetched queued NVKMS events for
@@ -15,60 +15,13 @@ to 8 events and says whether more are queued, and use it in KAPI: one
 acquisition per batch. The conversion to NvKmsKapiEvent moves to
 DispatchKmsEvent(), shared by both fetch loops (the "err" path was dead).
 
-nvidia_modeset.batch_kapi_events=0 (module parameter, writable at runtime)
-goes back to one event per ioctl.
-
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../nvidia-modeset/nvidia-modeset-linux.c     |  11 ++
- .../nvidia-modeset-os-interface.h             |   1 +
- src/nvidia-modeset/interface/nvkms-api.h      |  26 ++++
- src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 132 +++++++++++-------
- .../include/nvidia-modeset-os-interface.h     |   1 +
- src/nvidia-modeset/src/nvkms.c                |  42 ++++++
- 6 files changed, 162 insertions(+), 51 deletions(-)
+ src/nvidia-modeset/interface/nvkms-api.h |  26 +++++
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c | 124 ++++++++++++-----------
+ src/nvidia-modeset/src/nvkms.c           |  42 ++++++++
+ 3 files changed, 134 insertions(+), 58 deletions(-)
 
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-index 1f21478b..d8787738 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-@@ -149,6 +149,12 @@ MODULE_PARM_DESC(unlocked_backlight,
- static bool unlocked_backlight = true;
- module_param_named(unlocked_backlight, unlocked_backlight, bool, 0644);
- 
-+MODULE_PARM_DESC(batch_kapi_events,
-+                 "Fetch NVKMS events (e.g. flip completions) for nvidia-drm in batches, "
-+                 "taking the global NVKMS lock once per batch instead of once per event plus once more.");
-+static bool batch_kapi_events = true;
-+module_param_named(batch_kapi_events, batch_kapi_events, bool, 0644);
-+
- MODULE_PARM_DESC(enhanced_pcon_support,
-                  "Enable enhanced display protocol converter features (e.g. VRR over active DP-HDMI converters)");
- static bool enhanced_pcon_support = false;
-@@ -270,6 +276,11 @@ NvBool nvkms_unlocked_surface_rm(void)
-     return READ_ONCE(unlocked_surface_rm);
- }
- 
-+NvBool nvkms_batch_kapi_events(void)
-+{
-+    return READ_ONCE(batch_kapi_events);
-+}
-+
- NvBool nvkms_output_rounding_fix(void)
- {
-     return output_rounding_fix;
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-index 09f465fd..abe27af8 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-@@ -123,6 +123,7 @@ NvBool nvkms_enhanced_pcon_support(void);
- NvBool nvkms_lazy_ctxdma_bind(void);
- NvBool nvkms_lazy_gpu_map(void);
- NvBool nvkms_unlocked_surface_rm(void);
-+NvBool nvkms_batch_kapi_events(void);
- NvBool nvkms_output_rounding_fix(void);
- NvBool nvkms_disable_hdmi_frl(void);
- NvBool nvkms_disable_vrr_memclk_switch(void);
 diff --git a/src/nvidia-modeset/interface/nvkms-api.h b/src/nvidia-modeset/interface/nvkms-api.h
 index b48bfddb..f92317ac 100644
 --- a/src/nvidia-modeset/interface/nvkms-api.h
@@ -114,7 +67,7 @@ index b48bfddb..f92317ac 100644
      /*!
       * Mask of event types, where each event type is indicated by (1
 diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
-index 3af7498f..d8b8d468 100644
+index 3af7498f..2a923e36 100644
 --- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
 +++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
 @@ -3950,6 +3950,56 @@ static NvBool ApplyModeSetConfig(
@@ -174,7 +127,7 @@ index 3af7498f..d8b8d468 100644
  void nvKmsKapiHandleEventQueueChange
  (
      struct NvKmsKapiDevice *device
-@@ -3965,11 +4015,39 @@ void nvKmsKapiHandleEventQueueChange
+@@ -3965,73 +4015,31 @@ void nvKmsKapiHandleEventQueueChange
       */
      nvAssert(device->eventCallback != NULL);
  
@@ -183,43 +136,32 @@ index 3af7498f..d8b8d468 100644
 +     * batches instead of one by one, which costs an extra lock round trip
 +     * per event (for the final "no event" reply).
 +     */
-+    if (nvkms_batch_kapi_events()) {
-+        do
-+        {
-+            struct NvKmsGetNextEventsParams kmsEventsParams = { };
-+            NvU32 i;
-+
-+            if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
-+                                       NVKMS_IOCTL_GET_NEXT_EVENTS,
-+                                       &kmsEventsParams,
-+                                       sizeof(kmsEventsParams))) {
-+                break;
-+            }
-+
-+            for (i = 0; i < kmsEventsParams.reply.numEvents; i++) {
-+                DispatchKmsEvent(device, &kmsEventsParams.reply.events[i]);
-+            }
-+
-+            if (!kmsEventsParams.reply.moreEvents) {
-+                break;
-+            }
-+        } while (1);
-+
-+        return;
-+    }
-+
      do
      {
-         struct NvKmsGetNextEventParams kmsEventParams = { };
+-        struct NvKmsGetNextEventParams kmsEventParams = { };
 -        struct NvKmsKapiEvent kapiEvent = { };
 -        NvBool err = NV_FALSE;
++        struct NvKmsGetNextEventsParams kmsEventsParams = { };
++        NvU32 i;
  
          if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
-                                    NVKMS_IOCTL_GET_NEXT_EVENT,
-@@ -3981,55 +4059,7 @@ void nvKmsKapiHandleEventQueueChange
+-                                   NVKMS_IOCTL_GET_NEXT_EVENT,
+-                                   &kmsEventParams, sizeof(kmsEventParams))) {
++                                   NVKMS_IOCTL_GET_NEXT_EVENTS,
++                                   &kmsEventsParams,
++                                   sizeof(kmsEventsParams))) {
              break;
          }
  
+-        if (!kmsEventParams.reply.valid) {
++        for (i = 0; i < kmsEventsParams.reply.numEvents; i++) {
++            DispatchKmsEvent(device, &kmsEventsParams.reply.events[i]);
++        }
++
++        if (!kmsEventsParams.reply.moreEvents) {
+             break;
+         }
+-
 -        kapiEvent.type = kmsEventParams.reply.event.eventType;
 -
 -        kapiEvent.device = device;
@@ -269,27 +211,17 @@ index 3af7498f..d8b8d468 100644
 -        }
 -
 -        device->eventCallback(&kapiEvent);
-+        DispatchKmsEvent(device, &kmsEventParams.reply.event);
- 
-     } while(1);
+-
+-    } while(1);
++    } while (1);
  }
-diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-index 09f465fd..abe27af8 100644
---- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-+++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-@@ -123,6 +123,7 @@ NvBool nvkms_enhanced_pcon_support(void);
- NvBool nvkms_lazy_ctxdma_bind(void);
- NvBool nvkms_lazy_gpu_map(void);
- NvBool nvkms_unlocked_surface_rm(void);
-+NvBool nvkms_batch_kapi_events(void);
- NvBool nvkms_output_rounding_fix(void);
- NvBool nvkms_disable_hdmi_frl(void);
- NvBool nvkms_disable_vrr_memclk_switch(void);
+ 
+ /*
 diff --git a/src/nvidia-modeset/src/nvkms.c b/src/nvidia-modeset/src/nvkms.c
-index 0dd064b9..f26c7e85 100644
+index e111fa44..e2fe61cd 100644
 --- a/src/nvidia-modeset/src/nvkms.c
 +++ b/src/nvidia-modeset/src/nvkms.c
-@@ -3335,6 +3335,47 @@ static NvBool GetNextEvent(struct NvKmsPerOpen *pOpen,
+@@ -3333,6 +3333,47 @@ static NvBool GetNextEvent(struct NvKmsPerOpen *pOpen,
  }
  
  
@@ -337,7 +269,7 @@ index 0dd064b9..f26c7e85 100644
  /*!
   * Record the client's event interest for the specified device.
   */
-@@ -5179,6 +5220,7 @@ NvBool nvKmsIoctl(
+@@ -5177,6 +5218,7 @@ NvBool nvKmsIoctl(
          ENTRY(NVKMS_IOCTL_FRAMEBUFFER_CONSOLE_DISABLED, FramebufferConsoleDisabled),
          ENTRY(NVKMS_IOCTL_REGISTER_VBLANK_INTR_CALLBACK, RegisterVblankIntrCallback),
          ENTRY(NVKMS_IOCTL_UNREGISTER_VBLANK_INTR_CALLBACK, UnregisterVblankIntrCallback),

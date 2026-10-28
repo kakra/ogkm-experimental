@@ -10,16 +10,13 @@ descriptors are dropped via the nvl stored with the file, but kernel
 clients (UVM) release theirs with nvidia_dev_put_uuid() and
 nvidia_dev_put(), which look the device up in nv_linux_devices. They no
 longer find it, return without calling nv_close_device(), and the
-removal waits forever: unbinding the GPU while a CUDA process runs hangs
-even after the process exits.
+removal waits forever (upstream issue 1374: unbinding the
+GPU while a CUDA process runs hangs even after the process exits).
 
 Keep devices whose removal is waiting on a separate list and let the
 release paths (nvidia_dev_put(), nvidia_dev_put_uuid(),
 nvidia_dev_unblock_gc6()) also search it. Acquire paths still only see
 nv_linux_devices, so a device being removed can't gain new users.
-
-References:
-- NVIDIA/open-gpu-kernel-modules issue 1374
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

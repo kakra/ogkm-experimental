@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 09:42:22 +0100
+Subject: [PATCH] nvidia-drm: fix error handling and binary syncobjs in semsurf
+ syncobj ioctls
+
+nv_drm_semsurf_export_to_syncobj_point_ioctl():
+- When creating the fence failed, the error path called dma_fence_put()
+  on the ERR_PTR and leaked the dma_fence_chain allocated before it.
+  Clear the fence pointer and free the chain on every error path.
+- Point 0 means a binary syncobj, whose fence is replaced
+  (drm_syncobj_replace_fence(), like the DRM transfer ioctl and amdgpu
+  do). drm_syncobj_add_point() chained every signal onto the previous
+  fence instead, so waiters also waited on the old fence and the chain
+  kept growing. Only allocate a chain and add a point for non-zero
+  points.
+
+nv_drm_semsurf_fence_wait_ioctl() returned 0 on every failure (invalid
+sync FD, non-monotonic values, unknown context, allocation failure), so
+userspace queued GPU work behind a semaphore value that was never going
+to be written. Return the error.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-fence.c | 40 ++++++++++++++++-------
+ 1 file changed, 29 insertions(+), 11 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-fence.c b/kernel-open/nvidia-drm/nvidia-drm-fence.c
+index 74af6472..5492e8e6 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-fence.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-fence.c
+@@ -2306,7 +2306,7 @@ fence_context_sync_lookup_failed:
+     nv_drm_gem_object_unreference_unlocked(&nv_fence_context->base);
+ 
+ done:
+-    return 0;
++    return ret;
+ }
+ 
+ int nv_drm_semsurf_fence_attach_ioctl(struct drm_device *dev,
+@@ -2440,17 +2440,20 @@ int nv_drm_semsurf_export_to_syncobj_point_ioctl(struct drm_device *dev,
+         goto done;
+     }
+ 
++    /* Point 0 is a binary syncobj: its fence is replaced, not chained */
++    if (p->syncobj_point != 0) {
+ #if defined(NV_DMA_FENCE_CHAIN_ALLOC_PRESENT)
+-    chain = dma_fence_chain_alloc();
++        chain = dma_fence_chain_alloc();
+ #else
+-    chain = kzalloc(sizeof(struct dma_fence_chain), GFP_KERNEL);
++        chain = kzalloc(sizeof(struct dma_fence_chain), GFP_KERNEL);
+ #endif
+-    if (!chain) {
+-        ret = -ENOMEM;
+-        NV_DRM_DEV_LOG_ERR(
+-            nv_dev,
+-            "Failed to allocate dmabuf chain");
+-        goto done;
++        if (!chain) {
++            ret = -ENOMEM;
++            NV_DRM_DEV_LOG_ERR(
++                nv_dev,
++                "Failed to allocate dmabuf chain");
++            goto done;
++        }
+     }
+ 
+     /* Create a fence for the semsurf timeline point */
+@@ -2462,6 +2465,7 @@ int nv_drm_semsurf_export_to_syncobj_point_ioctl(struct drm_device *dev,
+ 
+     if (IS_ERR(fence)) {
+         ret = PTR_ERR(fence);
++        fence = NULL;
+         NV_DRM_DEV_LOG_ERR(
+             nv_dev,
+             "Failed to create fence for wait_value: %llu",
+@@ -2469,12 +2473,26 @@ int nv_drm_semsurf_export_to_syncobj_point_ioctl(struct drm_device *dev,
+         goto done;
+     }
+ 
+-    /* Replace the syncobj timeline point with our fence */
+-    drm_syncobj_add_point(syncobj, chain, fence, p->syncobj_point);
++    if (chain) {
++        /* Replace the syncobj timeline point with our fence */
++        drm_syncobj_add_point(syncobj, chain, fence, p->syncobj_point);
++        /* The syncobj owns the chain now */
++        chain = NULL;
++    } else {
++        drm_syncobj_replace_fence(syncobj, fence);
++    }
+ 
+     ret = 0;
+ 
+ done:
++    if (chain) {
++#if defined(NV_DMA_FENCE_CHAIN_ALLOC_PRESENT)
++        dma_fence_chain_free(chain);
++#else
++        kfree(chain);
++#endif
++    }
++
+     if (syncobj) {
+         drm_syncobj_put(syncobj);
+     }

@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 28 Oct 2026 11:47:29 +0100
+Subject: [PATCH] nvidia-drm: fix color pipeline state handling
+
+Three problems in the plane COLOR_PIPELINE support:
+
+- The FMT_CTM blob of the plane state was neither duplicated nor released,
+  so every commit with a non-bypassed FMT_CTM colorop took a blob
+  reference that was never dropped. Duplicate and release it like the
+  other matrices.
+
+- With DRM_CLIENT_CAP_PLANE_COLOR_PIPELINE set and COLOR_PIPELINE at 0,
+  which is what compositors do for planes that need no color operations,
+  every commit cleared the vendor color state and marked the degamma and
+  TMO state changed. That made NVKMS reprogram the ILUT and TMO on every
+  flip, and rebuild the ILUT surface in software each flip when a CRTC
+  DEGAMMA_LUT is set. Only mark them changed when there is something to
+  clear; CTM changes are already detected by comparing the matrices.
+
+- The CRTC DEGAMMA_LUT and CTM are implemented with the per-plane ILUT
+  and CSC11, which an active color pipeline owns: the CTM was silently
+  replaced by the pipeline's BLEND_CTM (identity when unset), and the
+  DEGAMMA_LUT was applied only when the pipeline's ILUT colorops were all
+  bypassed. Reject a plane color pipeline together with either property,
+  like amdgpu does for DEGAMMA_LUT.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../nvidia-drm/nvidia-drm-color-pipeline.c    | 45 +++++++++++++++----
+ kernel-open/nvidia-drm/nvidia-drm-crtc.c      |  6 +++
+ 2 files changed, 43 insertions(+), 8 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-color-pipeline.c b/kernel-open/nvidia-drm/nvidia-drm-color-pipeline.c
+index 635ab3ac..5071540b 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-color-pipeline.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-color-pipeline.c
+@@ -587,6 +587,12 @@ int nv_drm_plane_process_color_mgmt_state(struct drm_plane *plane,
+         clear_state = true;
+     }
+ 
++    /*
++     * Only flag the LUTs as changed when there is something to clear, so
++     * commits that keep COLOR_PIPELINE at 0 don't make NVKMS reprogram the
++     * ILUT and TMO on every flip. CTM changes are detected by comparing the
++     * matrices in plane_req_config_update().
++     */
+     if (clear_state) {
+         drm_property_blob_put(nv_plane_state->fmt_ctm);
+         nv_plane_state->fmt_ctm = NULL;
+@@ -603,19 +609,42 @@ int nv_drm_plane_process_color_mgmt_state(struct drm_plane *plane,
+         drm_property_blob_put(nv_plane_state->blend_ctm);
+         nv_plane_state->blend_ctm = NULL;
+ 
+-        nv_plane_state->degamma_tf = NV_DRM_TRANSFER_FUNCTION_DEFAULT;
+-        drm_property_blob_put(nv_plane_state->degamma_lut);
+-        nv_plane_state->degamma_lut = NULL;
+-        nv_plane_state->degamma_multiplier = NV_DRM_S31_32_ONE;
+-        nv_plane_state->degamma_changed = true;
++        if ((nv_plane_state->degamma_tf != NV_DRM_TRANSFER_FUNCTION_DEFAULT) ||
++            (nv_plane_state->degamma_lut != NULL) ||
++            (nv_plane_state->degamma_multiplier != NV_DRM_S31_32_ONE)) {
++            nv_plane_state->degamma_tf = NV_DRM_TRANSFER_FUNCTION_DEFAULT;
++            drm_property_blob_put(nv_plane_state->degamma_lut);
++            nv_plane_state->degamma_lut = NULL;
++            nv_plane_state->degamma_multiplier = NV_DRM_S31_32_ONE;
++            nv_plane_state->degamma_changed = true;
++        }
+ 
+-        drm_property_blob_put(nv_plane_state->tmo_lut);
+-        nv_plane_state->tmo_lut = NULL;
+-        nv_plane_state->tmo_changed = true;
++        if (nv_plane_state->tmo_lut != NULL) {
++            drm_property_blob_put(nv_plane_state->tmo_lut);
++            nv_plane_state->tmo_lut = NULL;
++            nv_plane_state->tmo_changed = true;
++        }
+     }
+ 
+     /* If color pipeline is active, translate colorop state to nv_plane_state */
+     if (plane_state->color_pipeline && plane_state->state->plane_color_pipeline) {
++        struct drm_crtc_state *crtc_state =
++            drm_atomic_get_new_crtc_state(plane_state->state, plane_state->crtc);
++
++        /*
++         * The CRTC DEGAMMA_LUT and CTM are implemented with the per-plane
++         * ILUT and CSC11, which the color pipeline owns: the pipeline would
++         * silently drop the CTM and apply the DEGAMMA_LUT only when its own
++         * ILUT colorops are bypassed. Reject the combination, like amdgpu
++         * does for DEGAMMA_LUT.
++         */
++        if ((crtc_state != NULL) &&
++            ((crtc_state->degamma_lut != NULL) || (crtc_state->ctm != NULL))) {
++            NV_DRM_DEV_DEBUG_DRIVER(to_nv_device(plane->dev),
++                "COLOR_PIPELINE can't be combined with the CRTC DEGAMMA_LUT or CTM");
++            return -EINVAL;
++        }
++
+         /*
+          * To prevent NVKMS from implicitly configuring CSC matrices in ways the
+          * client may not expect, force all CTMs to default to the identity if
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+index 5d1b1067..5ef21b4c 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -2275,6 +2275,11 @@ nv_drm_plane_atomic_duplicate_state(struct drm_plane *plane)
+     }
+ #endif
+ 
++    nv_plane_state->fmt_ctm = nv_old_plane_state->fmt_ctm;
++    if (nv_plane_state->fmt_ctm) {
++        drm_property_blob_get(nv_plane_state->fmt_ctm);
++    }
++
+     nv_plane_state->lms_ctm = nv_old_plane_state->lms_ctm;
+     if (nv_plane_state->lms_ctm) {
+         drm_property_blob_get(nv_plane_state->lms_ctm);
+@@ -2339,6 +2344,7 @@ static inline void __nv_drm_plane_atomic_destroy_state(
+ #if defined(NV_DRM_HAS_HDR_OUTPUT_METADATA)
+     drm_property_blob_put(nv_drm_plane_state->hdr_output_metadata);
+ #endif
++    drm_property_blob_put(nv_drm_plane_state->fmt_ctm);
+     drm_property_blob_put(nv_drm_plane_state->lms_ctm);
+     drm_property_blob_put(nv_drm_plane_state->lms_to_itp_ctm);
+     drm_property_blob_put(nv_drm_plane_state->itp_to_lms_ctm);

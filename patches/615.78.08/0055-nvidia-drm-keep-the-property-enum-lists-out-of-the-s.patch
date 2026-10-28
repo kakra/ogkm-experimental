@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Wed, 28 Oct 2026 18:24:28 +0100
+Subject: [PATCH] nvidia-drm: keep the property enum lists out of the stack
+ frame
+
+nv_drm_create_properties() builds its enum lists for
+drm_property_create_enum() as automatic arrays, so they are copied to
+the stack on every call. The function is inlined into
+nv_drm_dev_load(), and with the Broadcast RGB list added that frame
+grows to 1072 bytes, past the 1024 byte -Wframe-larger-than limit.
+
+drm_property_create_enum() only reads the lists while creating the
+property, so make them static const.
+
+Fixes: 76d3b11502fd ("nvidia-drm: add the Broadcast RGB connector property")
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-drv.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index ff99ada9..932e625e 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -476,7 +476,7 @@ static void nv_drm_enumerate_encoders_and_connectors
+  */
+ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+ {
+-    const struct drm_prop_enum_list colorspace_enum_list[] = {
++    static const struct drm_prop_enum_list colorspace_enum_list[] = {
+         { .type = NV_DRM_INPUT_COLOR_SPACE_NONE,
+           .name = "None" },
+         { .type = NV_DRM_INPUT_COLOR_SPACE_SCRGB_LINEAR,
+@@ -485,7 +485,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "BT.2100 PQ" },
+     };
+ 
+-    const struct drm_prop_enum_list tf_enum_list[] = {
++    static const struct drm_prop_enum_list tf_enum_list[] = {
+         { .type = NV_DRM_TRANSFER_FUNCTION_LINEAR,
+           .name = "Linear" },
+         { .type = NV_DRM_TRANSFER_FUNCTION_PQ,
+@@ -494,7 +494,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "Default" },
+     };
+ 
+-    const struct drm_prop_enum_list dithering_mode_enum_list[] = {
++    static const struct drm_prop_enum_list dithering_mode_enum_list[] = {
+         { .type = NV_DRM_DITHERING_MODE_AUTO,
+           .name = "auto" },
+         { .type = NV_DRM_DITHERING_MODE_OFF,
+@@ -509,7 +509,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "on" },
+     };
+ 
+-    const struct drm_prop_enum_list broadcast_rgb_enum_list[] = {
++    static const struct drm_prop_enum_list broadcast_rgb_enum_list[] = {
+         { .type = NV_DRM_BROADCAST_RGB_AUTO,
+           .name = "Automatic" },
+         { .type = NV_DRM_BROADCAST_RGB_FULL,
+@@ -518,7 +518,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "Limited 16:235" },
+     };
+ 
+-    const struct drm_prop_enum_list hdcp_level_enum_list[] = {
++    static const struct drm_prop_enum_list hdcp_level_enum_list[] = {
+         { .type = NVKMS_CONTENT_PROTECTION_OFF,
+           .name = "HDCP_OFF" },
+         { .type = NVKMS_CONTENT_PROTECTION_HDCP1X_ON,

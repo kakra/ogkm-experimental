@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 08:51:57 +0100
+Subject: [PATCH] nvidia: free uncached and write-combined sysmem from a worker
+
+Uncached and write-combined system memory is switched back to write-back
+before it is freed: set_pages_array_wb() per allocation, a page attribute
+change with a TLB shootdown IPI to every CPU. Measured ~200 us per free
+regardless of size (cached frees ~2 us). nv_free_pages() runs under the
+RM API lock, in write mode when a client is torn down, so a GL/Vulkan
+client exit spent 2.6-2.9 ms of API write lock in these conversions
+(15-33 of them), blocking every other RM client including the compositor.
+
+Queue such allocations on a lockless list and let a worker on
+system_unbound_wq do the conversion and the free (into the sysmem page
+pool as before). The pages are not reused until the worker has freed
+them. Allocations with unencrypted (CC) or coherent memory keep the
+synchronous path. The worker is flushed before the page pools are torn
+down at module unload.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nv-linux.h |  2 ++
+ kernel-open/nvidia/nv.c           | 45 +++++++++++++++++++++++++++++++
+ 2 files changed, 47 insertions(+)
+
+diff --git a/kernel-open/common/inc/nv-linux.h b/kernel-open/common/inc/nv-linux.h
+index 8e432dee..696eb716 100644
+--- a/kernel-open/common/inc/nv-linux.h
++++ b/kernel-open/common/inc/nv-linux.h
+@@ -170,6 +170,7 @@
+ #include <linux/memory.h>
+ 
+ #include <linux/workqueue.h>        /* workqueue                        */
++#include <linux/llist.h>            /* llist                            */
+ #include "nv-kthread-q.h"           /* kthread based queue              */
+ #include <linux/efi.h>              /* efi_enabled                      */
+ #include <linux/fb.h>               /* fb_info struct                   */
+@@ -943,6 +944,7 @@ typedef struct nv_alloc_s {
+     struct sg_table *import_sgt;
+     dma_addr_t     dma_handle;          /* dma handle used by dma_alloc_coherent(), dma_free_coherent() */
+     nv_linux_mm_free_work_t *accounting_mm_work;
++    struct llist_node deferred_free_node; /* nv_free_pages() worker list */
+ } nv_alloc_t;
+ 
+ /**
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index 0632c1ac..002ba62a 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -493,6 +493,47 @@ int nvos_free_alloc(
+     return 0;
+ }
+ 
++/*
++ * Uncached and write-combined system memory is switched back to write-back
++ * before it is freed. Each switch is a page attribute change with a TLB
++ * shootdown on every CPU (~200 us per allocation), and nv_free_pages() runs
++ * under the RM API lock, often in write mode when a client exits. Hand these
++ * frees to a worker instead.
++ */
++static LLIST_HEAD(nv_deferred_free_list);
++
++static void nv_deferred_free_worker(struct work_struct *work)
++{
++    struct llist_node *list = llist_del_all(&nv_deferred_free_list);
++    nv_alloc_t *at, *next;
++
++    llist_for_each_entry_safe(at, next, list, deferred_free_node)
++    {
++        if (at->flags.contig)
++            nv_free_contig_pages(at);
++        else
++            nv_free_system_pages(at);
++
++        nvos_free_alloc(at);
++    }
++}
++
++static DECLARE_WORK(nv_deferred_free_work, nv_deferred_free_worker);
++
++static NvBool nv_defer_free_pages(nv_alloc_t *at)
++{
++    if (at->cache_type == NV_MEMORY_CACHED ||
++        at->flags.unencrypted || at->flags.coherent)
++    {
++        return NV_FALSE;
++    }
++
++    if (llist_add(&at->deferred_free_node, &nv_deferred_free_list))
++        queue_work(system_unbound_wq, &nv_deferred_free_work);
++
++    return NV_TRUE;
++}
++
+ static void
+ nv_module_resources_exit(nv_stack_t *sp)
+ {
+@@ -585,6 +626,7 @@ nv_module_state_exit(nv_stack_t *sp)
+     nv_kthread_q_stop(&nv_deferred_close_kthread_q);
+     nv_kthread_q_stop(&nv_kthread_q);
+ 
++    flush_work(&nv_deferred_free_work);
+     nv_destroy_page_pools();
+ 
+     nv_lock_destroy_locks(sp, nv);
+@@ -4236,6 +4278,9 @@ NV_STATUS NV_API_CALL nv_free_pages(
+ 
+     if (!at->flags.guest && !at->import_sgt)
+     {
++        if (nv_defer_free_pages(at))
++            return rmStatus;
++
+         if (at->flags.contig)
+             nv_free_contig_pages(at);
+         else

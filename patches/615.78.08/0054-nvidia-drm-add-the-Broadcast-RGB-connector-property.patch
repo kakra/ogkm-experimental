@@ -1,0 +1,309 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 28 Oct 2026 09:23:26 +0100
+Subject: [PATCH] nvidia-drm: add the Broadcast RGB connector property
+
+Add the "Broadcast RGB" connector property ("Automatic", "Full",
+"Limited 16:235") that i915 and the DRM HDMI state helpers expose, so DRM
+compositors can choose the output RGB range. Until now the only control
+was nvidia-settings under X11, whose choice stays in nvidia-modeset and
+carries over into later Wayland sessions.
+
+"Automatic" is NVKMS's default, full range. The range applies only when
+the color format allows a choice: YCbCr output stays limited and 6 bpc
+RGB stays full, as before.
+
+A change forces a modeset, as on the drivers using the HDMI state
+helpers. On commit, KAPI stores the range on the displays through
+NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_RANGE before the modeset, the same
+per-display setting nvidia-settings changes, so the modeset uses it and
+flips that re-pick the range (HDR signaling) keep it. It isn't passed as
+NvKmsSetModeOneHeadRequest.colorRange, because a specified range that the
+color format overrides fails the whole modeset, and adding a field to
+that request would change the NVKMS ioctl ABI used by the X driver.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nvkms-kapi.h           |  7 +++
+ kernel-open/nvidia-drm/nvidia-drm-connector.c | 37 +++++++++++++
+ kernel-open/nvidia-drm/nvidia-drm-connector.h |  1 +
+ kernel-open/nvidia-drm/nvidia-drm-drv.c       | 19 +++++++
+ kernel-open/nvidia-drm/nvidia-drm-priv.h      |  9 ++++
+ .../kapi/interface/nvkms-kapi.h               |  7 +++
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 54 +++++++++++++++++++
+ 7 files changed, 134 insertions(+)
+
+diff --git a/kernel-open/common/inc/nvkms-kapi.h b/kernel-open/common/inc/nvkms-kapi.h
+index 28a58d78..4d6d5b3c 100644
+--- a/kernel-open/common/inc/nvkms-kapi.h
++++ b/kernel-open/common/inc/nvkms-kapi.h
+@@ -419,6 +419,12 @@ struct NvKmsKapiHeadModeSetConfig {
+         enum NvKmsDpyAttributeRequestedDitheringModeValue mode;
+     } dithering;
+ 
++    /*
++     * Requested output color range of the displays, full if false. NVKMS uses
++     * it when the color format allows a choice (RGB above 6 bpc).
++     */
++    NvBool limitedColorRange;
++
+     NvBool postcompColorPassthrough;
+ };
+ 
+@@ -433,6 +439,7 @@ struct NvKmsKapiHeadRequestedConfig {
+         NvBool olutChanged                     : 1;
+         NvBool olutFpNormScaleChanged          : 1;
+         NvBool ditheringChanged                : 1;
++        NvBool colorRangeChanged               : 1;
+         NvBool hdmiVsifMetadataChanged         : 1;
+         NvBool postcompColorPassthroughChanged : 1;
+     } flags;
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index 335b1161..b4af216a 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -340,6 +340,7 @@ static struct drm_connector_state* nv_drm_connector_atomic_duplicate_state(struc
+     __drm_atomic_helper_connector_duplicate_state(connector, &nv_drm_new_connector_state->base);
+ 
+     nv_drm_new_connector_state->dithering_mode = nv_drm_old_connector_state->dithering_mode;
++    nv_drm_new_connector_state->broadcast_rgb = nv_drm_old_connector_state->broadcast_rgb;
+     nv_drm_new_connector_state->hdcp_topology_blob = nv_drm_old_connector_state->hdcp_topology_blob;
+     if (nv_drm_new_connector_state->hdcp_topology_blob) {
+         drm_property_blob_get(nv_drm_new_connector_state->hdcp_topology_blob);
+@@ -396,6 +397,12 @@ static int nv_drm_connector_atomic_set_property(
+         }
+         nv_connector_state->dithering_mode = val;
+         return 0;
++    } else if (property == nv_dev->nv_connector_broadcast_rgb_property) {
++        if (val >= NV_DRM_BROADCAST_RGB_MAX) {
++            return -EINVAL;
++        }
++        nv_connector_state->broadcast_rgb = val;
++        return 0;
+     } else if (property == nv_dev->nv_hdcp_level_property) {
+         // nv_hdcp_level_property is read only
+         return -EINVAL;
+@@ -429,6 +436,9 @@ static int nv_drm_connector_atomic_get_property(
+     if (property == nv_dev->nv_connector_dithering_mode_property) {
+         *val = nv_connector_state->dithering_mode;
+         return 0;
++    } else if (property == nv_dev->nv_connector_broadcast_rgb_property) {
++        *val = nv_connector_state->broadcast_rgb;
++        return 0;
+     } else if (property == nv_dev->nv_hdcp_level_property) {
+         *val = nv_conn->cp;
+         return 0;
+@@ -623,6 +633,20 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
+         req_config->modeSetConfig.dithering.mode = mode;
+     }
+ 
++    /*
++     * Handle Broadcast RGB changes. The output color range is only applied by
++     * a modeset, like on the drivers using the DRM HDMI state helpers.
++     * "Automatic" is the NVKMS default, full range.
++     */
++    if (nv_old_connector_state->broadcast_rgb !=
++        nv_new_connector_state->broadcast_rgb) {
++        req_config->modeSetConfig.limitedColorRange =
++            (nv_new_connector_state->broadcast_rgb ==
++             NV_DRM_BROADCAST_RGB_LIMITED);
++        req_config->flags.colorRangeChanged = NV_TRUE;
++        crtc_state->mode_changed = true;
++    }
++
+     /* Handle HDMI VSIF metadata changes */
+     req_config->flags.hdmiVsifMetadataChanged =
+         !nv_drm_blobs_equal(nv_old_connector_state->hdmi_vsif_metadata,
+@@ -855,6 +879,19 @@ nv_drm_connector_new(struct drm_device *dev,
+     }
+ #endif /* defined(NV_DRM_CONNECTOR_ATTACH_HDR_OUTPUT_METADATA_PROPERTY_PRESENT) */
+ 
++#if defined(NV_DRM_CONNECTOR_ATTACH_HDR_OUTPUT_METADATA_PROPERTY_PRESENT)
++    /* Applied in connector atomic_check, so only on the kernels that have it */
++    if ((nv_connector->type == NVKMS_CONNECTOR_TYPE_DP) ||
++        (nv_connector->type == NVKMS_CONNECTOR_TYPE_HDMI) ||
++        (nv_connector->type == NVKMS_CONNECTOR_TYPE_DVI_D) ||
++        (nv_connector->type == NVKMS_CONNECTOR_TYPE_DVI_I) ||
++        (nv_connector->type == NVKMS_CONNECTOR_TYPE_USBC)) {
++        drm_object_attach_property(&nv_connector->base.base,
++                                   nv_dev->nv_connector_broadcast_rgb_property,
++                                   NV_DRM_BROADCAST_RGB_AUTO);
++    }
++#endif
++
+     /* Attach dithering mode property */
+     if (nv_dev->nv_connector_dithering_mode_property) {
+         drm_object_attach_property(&nv_connector->base.base,
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.h b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+index 787d3a50..e8413012 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+@@ -80,6 +80,7 @@ static inline struct nv_drm_connector *to_nv_connector(
+ struct nv_drm_connector_state {
+        struct drm_connector_state base;
+        enum nv_drm_dithering_mode dithering_mode;
++       enum nv_drm_broadcast_rgb broadcast_rgb;
+        struct drm_property_blob *hdcp_topology_blob;
+        struct drm_property_blob *hdmi_vsif_metadata;
+ };
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index 39ec5514..ff99ada9 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -509,6 +509,15 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "on" },
+     };
+ 
++    const struct drm_prop_enum_list broadcast_rgb_enum_list[] = {
++        { .type = NV_DRM_BROADCAST_RGB_AUTO,
++          .name = "Automatic" },
++        { .type = NV_DRM_BROADCAST_RGB_FULL,
++          .name = "Full" },
++        { .type = NV_DRM_BROADCAST_RGB_LIMITED,
++          .name = "Limited 16:235" },
++    };
++
+     const struct drm_prop_enum_list hdcp_level_enum_list[] = {
+         { .type = NVKMS_CONTENT_PROTECTION_OFF,
+           .name = "HDCP_OFF" },
+@@ -672,6 +681,16 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+         return -ENOMEM;
+     }
+ 
++    nv_dev->nv_connector_broadcast_rgb_property =
++        drm_property_create_enum(nv_dev->dev, 0,
++                                 "Broadcast RGB",
++                                 broadcast_rgb_enum_list,
++                                 ARRAY_SIZE(broadcast_rgb_enum_list));
++    if (nv_dev->nv_connector_broadcast_rgb_property == NULL) {
++        NV_DRM_LOG_ERR("Failed to create Broadcast RGB property");
++        return -ENOMEM;
++    }
++
+     // Color Pipeline Passthrough Properties
+     nv_dev->nv_plane_color_passthrough_property =
+         drm_property_create_bool(nv_dev->dev, 0,
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-priv.h b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+index b268a476..fd3bc313 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-priv.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+@@ -121,6 +121,14 @@ enum nv_drm_dithering_mode {
+     NV_DRM_DITHERING_MODE_MAX
+ };
+ 
++/* Values match the "Broadcast RGB" property of the other DRM drivers */
++enum nv_drm_broadcast_rgb {
++    NV_DRM_BROADCAST_RGB_AUTO = 0,
++    NV_DRM_BROADCAST_RGB_FULL,
++    NV_DRM_BROADCAST_RGB_LIMITED,
++    NV_DRM_BROADCAST_RGB_MAX
++};
++
+ struct nv_drm_fence_context;
+ 
+ #if defined(NV_DMA_FENCE_OPS_HAS_SET_DEADLINE)
+@@ -273,6 +281,7 @@ struct nv_drm_device {
+     struct drm_property *nv_crtc_color_passthrough_property;
+ 
+     struct drm_property *nv_connector_dithering_mode_property;
++    struct drm_property *nv_connector_broadcast_rgb_property;
+ 
+     struct drm_property *nv_connector_hdmi_vsif_metadata_property;
+ 
+diff --git a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+index 28a58d78..4d6d5b3c 100644
+--- a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
++++ b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+@@ -419,6 +419,12 @@ struct NvKmsKapiHeadModeSetConfig {
+         enum NvKmsDpyAttributeRequestedDitheringModeValue mode;
+     } dithering;
+ 
++    /*
++     * Requested output color range of the displays, full if false. NVKMS uses
++     * it when the color format allows a choice (RGB above 6 bpc).
++     */
++    NvBool limitedColorRange;
++
+     NvBool postcompColorPassthrough;
+ };
+ 
+@@ -433,6 +439,7 @@ struct NvKmsKapiHeadRequestedConfig {
+         NvBool olutChanged                     : 1;
+         NvBool olutFpNormScaleChanged          : 1;
+         NvBool ditheringChanged                : 1;
++        NvBool colorRangeChanged               : 1;
+         NvBool hdmiVsifMetadataChanged         : 1;
+         NvBool postcompColorPassthroughChanged : 1;
+     } flags;
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index 1ee61e69..f5c8316f 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -3598,6 +3598,55 @@ static NvBool NvKmsKapiRequestedModeSetConfigToKms(
+     return NV_TRUE;
+ }
+ 
++/*
++ * Store the requested output color range on the displays, the same way
++ * nvidia-settings does. The modeset that follows picks it up for RGB output,
++ * and flips that change the colorimetry keep using it.
++ */
++static void SetRequestedColorRange(
++    struct NvKmsKapiDevice *device,
++    const struct NvKmsKapiRequestedModeSetConfig *requestedConfig)
++{
++    NvU32 head;
++
++    for (head = 0;
++         head < ARRAY_LEN(requestedConfig->headRequestedConfig); head++) {
++
++        const struct NvKmsKapiHeadRequestedConfig *headRequestedConfig =
++            &requestedConfig->headRequestedConfig[head];
++        const struct NvKmsKapiHeadModeSetConfig *headModeSetConfig =
++            &headRequestedConfig->modeSetConfig;
++        NvU32 i;
++
++        if ((requestedConfig->headsMask & (1 << head)) == 0x0 ||
++            !headRequestedConfig->flags.colorRangeChanged) {
++            continue;
++        }
++
++        for (i = 0; i < headModeSetConfig->numDisplays; i++) {
++            struct NvKmsSetDpyAttributeParams params = { };
++
++            params.request.deviceHandle = device->hKmsDevice;
++            params.request.dispHandle = device->hKmsDisp;
++            params.request.dpyId =
++                nvNvU32ToDpyId(headModeSetConfig->displays[i]);
++            params.request.attribute =
++                NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_RANGE;
++            params.request.value = headModeSetConfig->limitedColorRange ?
++                NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_LIMITED :
++                NV_KMS_DPY_ATTRIBUTE_COLOR_RANGE_FULL;
++
++            if (!nvkms_ioctl_from_kapi_try_pmlock(device->pKmsOpen,
++                                                  NVKMS_IOCTL_SET_DPY_ATTRIBUTE,
++                                                  &params, sizeof(params))) {
++                nvKmsKapiLogDeviceDebug(
++                    device,
++                    "Failed to set the color range of display 0x%08x",
++                    headModeSetConfig->displays[i]);
++            }
++        }
++    }
++}
+ 
+ static NvBool KmsSetMode(
+     struct NvKmsKapiDevice *device,
+@@ -3621,6 +3670,11 @@ static NvBool KmsSetMode(
+         goto done;
+     }
+ 
++    /* The range can't make a modeset fail, so a TEST_ONLY check skips it */
++    if (commit) {
++        SetRequestedColorRange(device, requestedConfig);
++    }
++
+     status = nvkms_ioctl_from_kapi_try_pmlock(device->pKmsOpen,
+                                               NVKMS_IOCTL_SET_MODE,
+                                               params, sizeof(*params));

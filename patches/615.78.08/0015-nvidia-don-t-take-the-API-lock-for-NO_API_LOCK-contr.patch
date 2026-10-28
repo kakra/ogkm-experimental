@@ -20,76 +20,16 @@ sysmem, and CPU-side waiter lists and notifications, so it doesn't need the
 GPU awake. Skip the GPU access reference (and with it the API lock) for
 controls flagged NO_API_LOCK.
 
-nvidia.lockless_ctrl_no_power_ref=0 (module parameter, writable at runtime)
-restores the old behaviour.
-
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- kernel-open/common/inc/os-interface.h         |  1 +
- kernel-open/nvidia/os-interface.c             | 11 ++++++++
- .../arch/nvalloc/unix/include/os-interface.h  |  1 +
- src/nvidia/src/kernel/rmapi/control.c         | 25 ++++++++++++++++---
- 4 files changed, 34 insertions(+), 4 deletions(-)
+ src/nvidia/src/kernel/rmapi/control.c | 23 +++++++++++++++++++----
+ 1 file changed, 19 insertions(+), 4 deletions(-)
 
-diff --git a/kernel-open/common/inc/os-interface.h b/kernel-open/common/inc/os-interface.h
-index e981f657..9970042b 100644
---- a/kernel-open/common/inc/os-interface.h
-+++ b/kernel-open/common/inc/os-interface.h
-@@ -169,6 +169,7 @@ void        NV_API_CALL  os_dump_stack                    (void);
- NvBool      NV_API_CALL  os_is_efi_enabled                (void);
- NvBool      NV_API_CALL  os_is_xen_dom0                   (void);
- NvBool      NV_API_CALL  os_is_vgx_hyper                  (void);
-+NvBool      NV_API_CALL  os_lockless_ctrl_no_power_ref    (void);
- NV_STATUS   NV_API_CALL  os_inject_vgx_msi                (NvU16, NvU64, NvU32);
- NvBool      NV_API_CALL  os_is_grid_supported             (void);
- NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
-diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
-index 9fa7a1ae..eef72ec3 100644
---- a/kernel-open/nvidia/os-interface.c
-+++ b/kernel-open/nvidia/os-interface.c
-@@ -1523,6 +1523,17 @@ NvBool NV_API_CALL os_is_vgx_hyper(void)
- #endif
- }
- 
-+static bool lockless_ctrl_no_power_ref = true;
-+module_param(lockless_ctrl_no_power_ref, bool, 0644);
-+MODULE_PARM_DESC(lockless_ctrl_no_power_ref,
-+                 "Don't take the dynamic power management GPU reference (and with it the RM API lock) "
-+                 "around RM controls flagged NO_API_LOCK (semaphore surface REGISTER_WAITER).");
-+
-+NvBool NV_API_CALL os_lockless_ctrl_no_power_ref(void)
-+{
-+    return READ_ONCE(lockless_ctrl_no_power_ref);
-+}
-+
- NV_STATUS NV_API_CALL os_inject_vgx_msi(NvU16 guestID, NvU64 msiAddr, NvU32 msiData)
- {
- #if defined(NV_VGX_HYPER) && defined(NV_DOM0_KERNEL_PRESENT) && \
-diff --git a/src/nvidia/arch/nvalloc/unix/include/os-interface.h b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
-index 03de89a2..f5d6e728 100644
---- a/src/nvidia/arch/nvalloc/unix/include/os-interface.h
-+++ b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
-@@ -165,6 +165,7 @@ void        NV_API_CALL  os_dump_stack                    (void);
- NvBool      NV_API_CALL  os_is_efi_enabled                (void);
- NvBool      NV_API_CALL  os_is_xen_dom0                   (void);
- NvBool      NV_API_CALL  os_is_vgx_hyper                  (void);
-+NvBool      NV_API_CALL  os_lockless_ctrl_no_power_ref    (void);
- NV_STATUS   NV_API_CALL  os_inject_vgx_msi                (NvU16, NvU64, NvU32);
- NvBool      NV_API_CALL  os_is_grid_supported             (void);
- NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
 diff --git a/src/nvidia/src/kernel/rmapi/control.c b/src/nvidia/src/kernel/rmapi/control.c
-index 39c9614d..f4004505 100644
+index 39c9614d..faa75611 100644
 --- a/src/nvidia/src/kernel/rmapi/control.c
 +++ b/src/nvidia/src/kernel/rmapi/control.c
-@@ -42,6 +42,7 @@
- #include "ctrl/ctrl0000/ctrl0000gpuacct.h" // NV0000_CTRL_CMD_GPUACCT_*
- #include "ctrl/ctrl2080/ctrl2080tmr.h" // NV2080_CTRL_CMD_TIMER_SCHEDULE
- #include "ctrl/ctrl2080/ctrl2080fb.h" // NV2080_CTRL_CMD_FB_GET_MEM_ALIGNMENT
-+#include "os-interface.h" // os_lockless_ctrl_no_power_ref
- 
- static NV_STATUS
- releaseDeferRmCtrlBuffer(RmCtrlDeferredCmd* pRmCtrlDeferredCmd)
-@@ -595,10 +596,25 @@ _rmapiRmControl(NvHandle hClient, NvHandle hObject, NvU32 cmd, NvP64 pUserParams
+@@ -595,10 +595,24 @@ _rmapiRmControl(NvHandle hClient, NvHandle hObject, NvU32 cmd, NvP64 pUserParams
              }
          }
  
@@ -103,8 +43,7 @@ index 39c9614d..f4004505 100644
 +        // reference for it.
 +        //
 +        const NvBool bSkipGpuAccessRef = (getCtrlInfoStatus == NV_OK) &&
-+                                         ((ctrlFlags & RMCTRL_FLAGS_NO_API_LOCK) != 0) &&
-+                                         os_lockless_ctrl_no_power_ref();
++                                         ((ctrlFlags & RMCTRL_FLAGS_NO_API_LOCK) != 0);
          RM_API_CONTEXT rmApiContext = {0};
 -        rmStatus = rmapiPrologue(pRmApi, &rmApiContext);
 -        if (rmStatus != NV_OK)
@@ -118,7 +57,7 @@ index 39c9614d..f4004505 100644
  
          //
          // If this is an internal request within the same RM instance, make
-@@ -634,7 +650,8 @@ _rmapiRmControl(NvHandle hClient, NvHandle hObject, NvU32 cmd, NvP64 pUserParams
+@@ -634,7 +648,8 @@ _rmapiRmControl(NvHandle hClient, NvHandle hObject, NvU32 cmd, NvP64 pUserParams
          rmStatus = serverControl(&g_resServ, &rmCtrlParams);
  
  epilogue:

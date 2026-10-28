@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 28 Oct 2026 14:38:07 +0100
+Subject: [PATCH] nvidia: stop using the deprecated system workqueues
+
+Linux 7.x marks system_wq and system_unbound_wq __WQ_DEPRECATED and warns
+once per boot when work is queued on them:
+
+  workqueue: work func ... enqueued on deprecated workqueue.
+  Use system_{percpu|dfl}_wq instead.
+
+nvidia.ko hits this at boot with the deferred page free work, which is
+queued on system_unbound_wq. The RSS accounting work in nv-vm.c and the
+Tegra devfreq boost work use schedule_work()/schedule_delayed_work(), which
+go to system_wq on older kernels; queue them explicitly too, so the driver
+keeps building once the old queues are removed.
+
+Add nv_percpu_wq and nv_dfl_wq to nv-linux.h, which map to system_percpu_wq
+and system_dfl_wq when the kernel exports them and to the old queues
+otherwise (the same conftest checks nvidia-drm already uses), and queue
+each item on the replacement of the queue it used before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nv-linux.h | 17 +++++++++++++++++
+ kernel-open/nvidia/nv-pci.c       |  4 ++--
+ kernel-open/nvidia/nv-vm.c        |  2 +-
+ kernel-open/nvidia/nv.c           |  2 +-
+ kernel-open/nvidia/nvidia.Kbuild  |  2 ++
+ 5 files changed, 23 insertions(+), 4 deletions(-)
+
+diff --git a/kernel-open/common/inc/nv-linux.h b/kernel-open/common/inc/nv-linux.h
+index 696eb716..ca4dbdae 100644
+--- a/kernel-open/common/inc/nv-linux.h
++++ b/kernel-open/common/inc/nv-linux.h
+@@ -170,6 +170,23 @@
+ #include <linux/memory.h>
+ 
+ #include <linux/workqueue.h>        /* workqueue                        */
++
++/*
++ * system_wq and system_unbound_wq are deprecated in favour of
++ * system_percpu_wq and system_dfl_wq where those exist.
++ */
++#if NV_IS_EXPORT_SYMBOL_PRESENT_system_percpu_wq
++#define nv_percpu_wq system_percpu_wq
++#else
++#define nv_percpu_wq system_wq
++#endif
++
++#if NV_IS_EXPORT_SYMBOL_PRESENT_system_dfl_wq
++#define nv_dfl_wq system_dfl_wq
++#else
++#define nv_dfl_wq system_unbound_wq
++#endif
++
+ #include <linux/llist.h>            /* llist                            */
+ #include "nv-kthread-q.h"           /* kthread based queue              */
+ #include <linux/efi.h>              /* efi_enabled                      */
+diff --git a/kernel-open/nvidia/nv-pci.c b/kernel-open/nvidia/nv-pci.c
+index 29f240d8..43ea2526 100644
+--- a/kernel-open/nvidia/nv-pci.c
++++ b/kernel-open/nvidia/nv-pci.c
+@@ -1774,7 +1774,7 @@ nv_pci_gb10b_devfreq_enable_boost(struct device *dev, unsigned int duration, int
+         if (duration != 0)
+         {
+             INIT_DELAYED_WORK(&tdev->boost_disable, nv_pci_devfreq_disable_boost);
+-            schedule_delayed_work(&tdev->boost_disable, delay);
++            queue_delayed_work(nv_percpu_wq, &tdev->boost_disable, delay);
+         }
+     }
+ 
+@@ -1786,7 +1786,7 @@ nv_pci_gb10b_devfreq_enable_boost(struct device *dev, unsigned int duration, int
+         if (duration != 0)
+         {
+             INIT_DELAYED_WORK(&tdev->boost_disable, nv_pci_devfreq_disable_boost);
+-            schedule_delayed_work(&tdev->boost_disable, delay);
++            queue_delayed_work(nv_percpu_wq, &tdev->boost_disable, delay);
+         }
+     }
+ 
+diff --git a/kernel-open/nvidia/nv-vm.c b/kernel-open/nvidia/nv-vm.c
+index 15e5f74c..2f0043ee 100644
+--- a/kernel-open/nvidia/nv-vm.c
++++ b/kernel-open/nvidia/nv-vm.c
+@@ -1227,7 +1227,7 @@ static void nv_account_mm_free(nv_linux_mm_free_work_t *mm_work)
+     atomic_long_add_return(-mm_work->num_pages, &mm_work->mm->rss_stat.count[MM_SHMEMPAGES]);
+ #endif
+ 
+-    schedule_work(&mm_work->task);
++    queue_work(nv_percpu_wq, &mm_work->task);
+ }
+ 
+ void
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index 002ba62a..ae29b047 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -529,7 +529,7 @@ static NvBool nv_defer_free_pages(nv_alloc_t *at)
+     }
+ 
+     if (llist_add(&at->deferred_free_node, &nv_deferred_free_list))
+-        queue_work(system_unbound_wq, &nv_deferred_free_work);
++        queue_work(nv_dfl_wq, &nv_deferred_free_work);
+ 
+     return NV_TRUE;
+ }
+diff --git a/kernel-open/nvidia/nvidia.Kbuild b/kernel-open/nvidia/nvidia.Kbuild
+index 7e16d68a..c0c6b83e 100644
+--- a/kernel-open/nvidia/nvidia.Kbuild
++++ b/kernel-open/nvidia/nvidia.Kbuild
+@@ -291,3 +291,5 @@ NV_CONFTEST_GENERIC_COMPILE_TESTS += memory_failure_mf_sw_simulated_defined
+ NV_CONFTEST_GENERIC_COMPILE_TESTS += device_vm_build
+ NV_CONFTEST_GENERIC_COMPILE_TESTS += pcie_reset_flr
+ NV_CONFTEST_GENERIC_COMPILE_TESTS += module_import_ns_takes_constant
++NV_CONFTEST_GENERIC_COMPILE_TESTS += is_export_symbol_present_system_percpu_wq
++NV_CONFTEST_GENERIC_COMPILE_TESTS += is_export_symbol_present_system_dfl_wq

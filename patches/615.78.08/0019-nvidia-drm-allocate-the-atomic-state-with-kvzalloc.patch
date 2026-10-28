@@ -7,14 +7,11 @@ struct nv_drm_atomic_state embeds NvKmsKapiRequestedModeSetConfig and is
 ~16.7 KB, so the kzalloc in nv_drm_atomic_state_alloc() is an order-3
 page allocation on every atomic commit. Under memory fragmentation that
 GFP_KERNEL request invokes the OOM killer from the compositor's commit
-path while plenty of memory is still free.
+path while plenty of memory is still free (upstream issue 1254).
 
 The state is only accessed by the CPU, so use kvzalloc()/kvfree(), which
 tries the contiguous allocation without retrying hard and falls back to
 vmalloc.
-
-References:
-- NVIDIA/open-gpu-kernel-modules issue 1254
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

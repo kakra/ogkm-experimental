@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tom Englund <tomenglund26@gmail.com>
-Date: Sun, 18 Oct 2026 23:36:28 +0200
+Date: Mon, 26 Oct 2026 09:59:07 +0100
 Subject: [PATCH] nvidia: request non-CUDA PERF_BOOST boosts asynchronously
 
 NV2080_CTRL_CMD_PERF_BOOST without _ASYNC makes GSP-RM wait for the
@@ -17,76 +17,16 @@ requests: the RPC returns in under 1 ms and GSP-RM applies the boost
 right after it. CUDA boosts (refcounted, paired with the CUDA limit)
 and clears are passed through unchanged.
 
-nvidia.async_perf_boost=0 (module parameter, also writable at runtime)
-restores the caller's flags.
-
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- kernel-open/common/inc/os-interface.h         |  1 +
- kernel-open/nvidia/os-interface.c             | 11 +++++++++++
- .../arch/nvalloc/unix/include/os-interface.h  |  1 +
- .../src/kernel/gpu/perf/kern_perf_boost.c     | 19 +++++++++++++++++++
- 4 files changed, 32 insertions(+)
+ .../src/kernel/gpu/perf/kern_perf_boost.c       | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
 
-diff --git a/kernel-open/common/inc/os-interface.h b/kernel-open/common/inc/os-interface.h
-index 1b0cdc4b..5db83781 100644
---- a/kernel-open/common/inc/os-interface.h
-+++ b/kernel-open/common/inc/os-interface.h
-@@ -171,6 +171,7 @@ NvBool      NV_API_CALL  os_is_xen_dom0                   (void);
- NvBool      NV_API_CALL  os_is_vgx_hyper                  (void);
- NvBool      NV_API_CALL  os_lockless_ctrl_no_power_ref    (void);
- NvBool      NV_API_CALL  os_readonly_get_surface_info     (void);
-+NvBool      NV_API_CALL  os_async_perf_boost              (void);
- NV_STATUS   NV_API_CALL  os_inject_vgx_msi                (NvU16, NvU64, NvU32);
- NvBool      NV_API_CALL  os_is_grid_supported             (void);
- NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
-diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
-index 3364a62f..ea908c4a 100644
---- a/kernel-open/nvidia/os-interface.c
-+++ b/kernel-open/nvidia/os-interface.c
-@@ -1545,6 +1545,17 @@ NvBool NV_API_CALL os_readonly_get_surface_info(void)
-     return READ_ONCE(readonly_get_surface_info);
- }
- 
-+static bool async_perf_boost = true;
-+module_param(async_perf_boost, bool, 0644);
-+MODULE_PARM_DESC(async_perf_boost,
-+                 "Request non-CUDA NV2080_CTRL_CMD_PERF_BOOST boosts asynchronously, so the "
-+                 "control returns without waiting for the P-state change (with the GPU lock held).");
-+
-+NvBool NV_API_CALL os_async_perf_boost(void)
-+{
-+    return READ_ONCE(async_perf_boost);
-+}
-+
- NV_STATUS NV_API_CALL os_inject_vgx_msi(NvU16 guestID, NvU64 msiAddr, NvU32 msiData)
- {
- #if defined(NV_VGX_HYPER) && defined(NV_DOM0_KERNEL_PRESENT) && \
-diff --git a/src/nvidia/arch/nvalloc/unix/include/os-interface.h b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
-index c710e4e6..bfcb0443 100644
---- a/src/nvidia/arch/nvalloc/unix/include/os-interface.h
-+++ b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
-@@ -167,6 +167,7 @@ NvBool      NV_API_CALL  os_is_xen_dom0                   (void);
- NvBool      NV_API_CALL  os_is_vgx_hyper                  (void);
- NvBool      NV_API_CALL  os_lockless_ctrl_no_power_ref    (void);
- NvBool      NV_API_CALL  os_readonly_get_surface_info     (void);
-+NvBool      NV_API_CALL  os_async_perf_boost              (void);
- NV_STATUS   NV_API_CALL  os_inject_vgx_msi                (NvU16, NvU64, NvU32);
- NvBool      NV_API_CALL  os_is_grid_supported             (void);
- NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
 diff --git a/src/nvidia/src/kernel/gpu/perf/kern_perf_boost.c b/src/nvidia/src/kernel/gpu/perf/kern_perf_boost.c
-index c6e2834d..d0981192 100644
+index c6e2834d..2092c8d0 100644
 --- a/src/nvidia/src/kernel/gpu/perf/kern_perf_boost.c
 +++ b/src/nvidia/src/kernel/gpu/perf/kern_perf_boost.c
-@@ -30,6 +30,7 @@
- #include "resserv/rs_client.h"
- #include "vgpu/rpc.h"
- #include "ctrl/ctrl2080/ctrl2080perf.h"
-+#include "os-interface.h" // os_async_perf_boost
- 
- /* ------------------------ Global Variables ------------------------------- */
- /* ------------------------ Static Function Prototypes --------------------- */
-@@ -112,6 +113,24 @@ kperfBoostSet_IMPL
+@@ -112,6 +112,23 @@ kperfBoostSet_IMPL
      boostParams2x.flags    = pBoostParams->flags;
      boostParams2x.duration = pBoostParams->duration;
  
@@ -100,8 +40,7 @@ index c6e2834d..d0981192 100644
 +    // CUDA boosts (refcounted, paired with the CUDA limit) and clears are
 +    // passed through unchanged.
 +    //
-+    if (os_async_perf_boost() &&
-+        !FLD_TEST_DRF(2080, _CTRL_PERF_BOOST_FLAGS, _CMD, _CLEAR, boostParams2x.flags) &&
++    if (!FLD_TEST_DRF(2080, _CTRL_PERF_BOOST_FLAGS, _CMD, _CLEAR, boostParams2x.flags) &&
 +        FLD_TEST_DRF(2080, _CTRL_PERF_BOOST_FLAGS, _CUDA, _NO, boostParams2x.flags))
 +    {
 +        boostParams2x.flags = FLD_SET_DRF(2080, _CTRL_PERF_BOOST_FLAGS, _ASYNC, _YES,

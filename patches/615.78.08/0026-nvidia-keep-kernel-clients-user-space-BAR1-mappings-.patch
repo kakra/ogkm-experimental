@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tom Englund <tomenglund26@gmail.com>
-Date: Tue, 20 Oct 2026 17:49:55 +0200
+Date: Mon, 26 Oct 2026 10:02:02 +0100
 Subject: [PATCH] nvidia: keep kernel clients' user-space BAR1 mappings
  contiguous
 
@@ -26,79 +26,18 @@ Only allow discontiguous mappings for clients below kernel privilege.
 Kernel clients now get a single range or a clean NV_ERR_NO_MEMORY, which
 nvidia-drm already handles ("Failed to map NvKmsKapiMemory", -ENOMEM).
 
-nvidia.kernel_user_map_bar1_contig=0 (module parameter, also writable at
-runtime) restores the old behaviour.
-
-References:
-- NVIDIA/open-gpu-kernel-modules issue 1134
+Upstream issue 1134.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- kernel-open/common/inc/os-interface.h            |  1 +
- kernel-open/nvidia/os-interface.c                | 11 +++++++++++
- .../arch/nvalloc/unix/include/os-interface.h     |  1 +
- src/nvidia/src/kernel/rmapi/mapping_cpu.c        | 16 +++++++++++++++-
- 4 files changed, 28 insertions(+), 1 deletion(-)
+ src/nvidia/src/kernel/rmapi/mapping_cpu.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
 
-diff --git a/kernel-open/common/inc/os-interface.h b/kernel-open/common/inc/os-interface.h
-index cad8d398..8b3190f3 100644
---- a/kernel-open/common/inc/os-interface.h
-+++ b/kernel-open/common/inc/os-interface.h
-@@ -179,6 +179,7 @@ NvBool      NV_API_CALL  os_is_grid_supported             (void);
- NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
- void        NV_API_CALL  os_bug_check                     (NvU32, const char *);
- NvBool      NV_API_CALL  os_isr_single_nonstall_scan      (void);
-+NvBool      NV_API_CALL  os_kernel_user_map_bar1_contig   (void);
- NV_STATUS   NV_API_CALL  os_lock_user_pages               (void *, NvU64, void **, NvU32);
- NV_STATUS   NV_API_CALL  os_lookup_user_io_memory         (void *, NvU64, NvU64 **);
- NV_STATUS   NV_API_CALL  os_unlock_user_pages             (NvU64, void *, NvU32);
-diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
-index 6d9cea8e..93de5b69 100644
---- a/kernel-open/nvidia/os-interface.c
-+++ b/kernel-open/nvidia/os-interface.c
-@@ -1631,6 +1631,17 @@ NvBool NV_API_CALL os_isr_single_nonstall_scan(void)
-     return READ_ONCE(isr_single_nonstall_scan);
- }
- 
-+static bool kernel_user_map_bar1_contig = true;
-+module_param(kernel_user_map_bar1_contig, bool, 0644);
-+MODULE_PARM_DESC(kernel_user_map_bar1_contig,
-+                 "Require a single contiguous BAR1 range for user-space-type CPU mappings "
-+                 "made by kernel clients (nvidia-drm), which use only the first range.");
-+
-+NvBool NV_API_CALL os_kernel_user_map_bar1_contig(void)
-+{
-+    return READ_ONCE(kernel_user_map_bar1_contig);
-+}
-+
- NV_STATUS NV_API_CALL os_get_euid(NvU32 *pSecToken)
- {
-     *pSecToken = NV_CURRENT_EUID();
-diff --git a/src/nvidia/arch/nvalloc/unix/include/os-interface.h b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
-index 1048cf6f..1f89ed65 100644
---- a/src/nvidia/arch/nvalloc/unix/include/os-interface.h
-+++ b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
-@@ -175,6 +175,7 @@ NvBool      NV_API_CALL  os_is_grid_supported             (void);
- NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
- void        NV_API_CALL  os_bug_check                     (NvU32, const char *);
- NvBool      NV_API_CALL  os_isr_single_nonstall_scan      (void);
-+NvBool      NV_API_CALL  os_kernel_user_map_bar1_contig   (void);
- NV_STATUS   NV_API_CALL  os_lock_user_pages               (void *, NvU64, void **, NvU32);
- NV_STATUS   NV_API_CALL  os_lookup_user_io_memory         (void *, NvU64, NvU64 **);
- NV_STATUS   NV_API_CALL  os_unlock_user_pages             (NvU64, void *, NvU32);
 diff --git a/src/nvidia/src/kernel/rmapi/mapping_cpu.c b/src/nvidia/src/kernel/rmapi/mapping_cpu.c
-index df87be98..4d53cfa9 100644
+index df87be98..69d76615 100644
 --- a/src/nvidia/src/kernel/rmapi/mapping_cpu.c
 +++ b/src/nvidia/src/kernel/rmapi/mapping_cpu.c
-@@ -48,6 +48,7 @@
- static void RmUnmapBusAperture (OBJGPU *, NvP64, NvU64, NvBool, NvP64);
- 
- #include "gpu/conf_compute/conf_compute.h"
-+#include "os-interface.h" // os_kernel_user_map_bar1_contig
- 
- typedef struct RS_CPU_MAP_PARAMS RmMapParams;
- typedef struct RS_CPU_UNMAP_PARAMS RmUnmapParams;
-@@ -484,7 +485,20 @@ memMap_IMPL
+@@ -484,7 +484,19 @@ memMap_IMPL
                  // Below, we only map one GPU's address for CPU access, so we can use UNICAST here
                  NvU32 busMapFbFlags = BUS_MAP_FB_FLAGS_MAP_UNICAST;
  #if defined(NV_UNIX)
@@ -112,8 +51,7 @@ index df87be98..4d53cfa9 100644
 +                // makes them access other BAR1 mappings or run past BAR1.
 +                //
 +                if (!pMapParams->bKernel &&
-+                    !(os_kernel_user_map_bar1_contig() &&
-+                      (rmclientGetCachedPrivilege(pClient) >= RS_PRIV_LEVEL_KERNEL)))
++                    (rmclientGetCachedPrivilege(pClient) < RS_PRIV_LEVEL_KERNEL))
 +                {
 +                    busMapFbFlags |= BUS_MAP_FB_FLAGS_ALLOW_DISCONTIG;
 +                }

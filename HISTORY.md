@@ -5,7 +5,38 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 615.78.08
 
-Fork branch `ogkm/615.78.08`, 45 patches on the upstream tag `615.78.08`.
+Fork branch `ogkm/615.78.08`, 73 patches on the upstream tag `615.78.08`.
+
+### 2026-10-28: Tom Englund's set of 2026-10-28 (patches 1 to 63)
+
+Built against 6.18.58 and installed on 2026-10-28. In a short session of
+Guardians of the Galaxy without `no_upload_hvv` there was no crash. The
+known "can't update VA space" blocks (`gpu_vaspace.c:4502`, cause in the
+user space driver, `analysis/2026-10-28-vaspace-overlap.md`) appeared four
+times in about 20 minutes, as before. One 20 MB scanout GEM allocation
+failed in fragmented VRAM and fell back to system memory through patch 65
+and the upstream fallback. Not measured yet: `set_pages_array_uc` latency
+with the uncached pool (patch 44).
+
+- 1 to 32: new versions of Tom's patches. They drop the A/B module
+  parameters (`lazy_ctxdma_bind`, `unlocked_surface_rm`, `deadline_boost_stats`
+  and others) and keep the former defaults. `deadline_boost=0` remains.
+- 33 to 53, 56 to 63: new from Tom: dma-buf and PRIME fixes, BAR1
+  bookkeeping fixes, fewer RM API lock waits (UNREGISTER_WAITER, DMA map and
+  unmap), cursor framebuffer lifetime, per-flip work, upstream PRs
+  [#1286][pr-1286] and [#1498][pr-1498], `nvidia_drm.vblank` on by default,
+  and the connector and plane properties Broadcast RGB, max bpc, cursor
+  SIZE_HINTS and zpos. Left out: the hwmon device, fdinfo usage stats and the
+  speculation barrier change.
+- 43, 44: free non-cached sysmem from a worker, and keep it uncached in a
+  pool, so neither allocation nor free changes PAT for pooled pages (finding 3
+  of `analysis/2026-10-26-lock-stalls.md`). They replace our kthread free
+  (old patch 44). The pool's failure path frees partly allocated pages as
+  cached, which also covers the PAT memtype flood, so our fix for it (old
+  patch 33) is dropped.
+- 55: own fix for 54: static enum lists, the stack frame of
+  `nv_drm_dev_load()` exceeded 1024 bytes.
+- 59 replaces our infoframe newline fix (old patch 41).
 
 ### 2026-10-27: fixes next to what they fix
 
@@ -69,6 +100,7 @@ no longer logged as errors.
   fragmented, return `-ENOMEM` instead of `-EINVAL`.
 
 [pr-1278]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1278
+[pr-1286]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1286
 [pr-1368]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368
 [pr-1383]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1383
 [pr-1424]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1424
@@ -76,3 +108,4 @@ no longer logged as errors.
 [pr-1432]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1432
 [pr-1466]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1466
 [pr-1483]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1483
+[pr-1498]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1498

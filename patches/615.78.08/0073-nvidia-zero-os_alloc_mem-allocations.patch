@@ -34,10 +34,10 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
  2 files changed, 27 insertions(+), 4 deletions(-)
 
 diff --git a/kernel-open/common/inc/nv-linux.h b/kernel-open/common/inc/nv-linux.h
-index 636215a5..c90679b4 100644
+index ea095bc5..35fe0abc 100644
 --- a/kernel-open/common/inc/nv-linux.h
 +++ b/kernel-open/common/inc/nv-linux.h
-@@ -451,6 +451,24 @@ static NvBool nv_numa_node_has_memory(int node_id)
+@@ -469,6 +469,24 @@ static NvBool nv_numa_node_has_memory(int node_id)
          NV_MEMDBG_ADD(ptr, size);              \
      }
  
@@ -63,7 +63,7 @@ index 636215a5..c90679b4 100644
      { \
          NV_MEMDBG_REMOVE(ptr, size); \
 diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
-index 73a609f1..673f3632 100644
+index 3520d9e3..7864871f 100644
 --- a/kernel-open/nvidia/os-interface.c
 +++ b/kernel-open/nvidia/os-interface.c
 @@ -642,16 +642,21 @@ NV_STATUS NV_API_CALL os_alloc_mem(

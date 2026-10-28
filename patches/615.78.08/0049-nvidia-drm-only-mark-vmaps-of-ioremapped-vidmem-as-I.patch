@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 09:42:22 +0100
+Subject: [PATCH] nvidia-drm: only mark vmaps of ioremapped vidmem as I/O
+ memory
+
+nv_drm_gem_vmap() set iosys_map.is_iomem for every mapping, also for
+system memory mapped with vmap(), so importers used the slower I/O
+accessors on plain memory. Add a prime_vmap_is_iomem op; only an
+nvkms-memory object whose vmap returns its ioremap_wc() BAR mapping
+reports I/O memory.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c | 12 ++++++++++++
+ kernel-open/nvidia-drm/nvidia-drm-gem.c              |  5 ++++-
+ kernel-open/nvidia-drm/nvidia-drm-gem.h              |  2 ++
+ 3 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
+index 0785dddf..2e36323b 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
+@@ -338,6 +338,17 @@ static void *__nv_drm_gem_nvkms_prime_vmap(
+     return ERR_PTR(-ENOMEM);
+ }
+ 
++static bool __nv_drm_gem_nvkms_prime_vmap_is_iomem(
++    struct nv_drm_gem_object *nv_gem)
++{
++    struct nv_drm_gem_nvkms_memory *nv_nvkms_memory =
++        to_nv_nvkms_memory(nv_gem);
++
++    /* Only the ioremap_wc() mapping of vidmem, see __nv_drm_gem_nvkms_prime_vmap() */
++    return nv_nvkms_memory->physically_mapped &&
++           nv_nvkms_memory->pWriteCombinedIORemapAddress != NULL;
++}
++
+ static void __nv_drm_gem_nvkms_prime_vunmap(
+     struct nv_drm_gem_object *nv_gem,
+     void *address)
+@@ -395,6 +406,7 @@ const struct nv_drm_gem_object_funcs nv_gem_nvkms_memory_ops = {
+     .free = __nv_drm_gem_nvkms_memory_free,
+     .prime_dup = __nv_drm_gem_nvkms_prime_dup,
+     .prime_vmap = __nv_drm_gem_nvkms_prime_vmap,
++    .prime_vmap_is_iomem = __nv_drm_gem_nvkms_prime_vmap_is_iomem,
+     .prime_vunmap = __nv_drm_gem_nvkms_prime_vunmap,
+     .mmap = __nv_drm_gem_nvkms_mmap,
+     .handle_vma_fault = __nv_drm_gem_nvkms_handle_vma_fault,
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-gem.c b/kernel-open/nvidia-drm/nvidia-drm-gem.c
+index 65477cd0..9bfeb429 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-gem.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-gem.c
+@@ -74,14 +74,17 @@ typedef struct dma_buf_map nv_sysio_map_t;
+ static int nv_drm_gem_vmap(struct drm_gem_object *gem,
+                            nv_sysio_map_t *map)
+ {
++    struct nv_drm_gem_object *nv_gem = to_nv_gem_object(gem);
+     void *vaddr = nv_drm_gem_prime_vmap(gem);
+     if (vaddr == NULL) {
+         return -ENOMEM;
+     } else if (IS_ERR(vaddr)) {
+         return PTR_ERR(vaddr);
+     }
++    /* vmap()ed system memory is not I/O memory, an ioremap()ed BAR is */
+     map->vaddr = vaddr;
+-    map->is_iomem = true;
++    map->is_iomem = nv_gem->ops->prime_vmap_is_iomem != NULL &&
++                    nv_gem->ops->prime_vmap_is_iomem(nv_gem);
+     return 0;
+ }
+ 
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-gem.h b/kernel-open/nvidia-drm/nvidia-drm-gem.h
+index efb590ec..446c34f7 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-gem.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-gem.h
+@@ -48,6 +48,8 @@ struct nv_drm_gem_object_funcs {
+     void (*free)(struct nv_drm_gem_object *nv_gem);
+     struct sg_table *(*prime_get_sg_table)(struct nv_drm_gem_object *nv_gem);
+     void *(*prime_vmap)(struct nv_drm_gem_object *nv_gem);
++    /* Whether prime_vmap() returns I/O memory, false if NULL */
++    bool (*prime_vmap_is_iomem)(struct nv_drm_gem_object *nv_gem);
+     void (*prime_vunmap)(struct nv_drm_gem_object *nv_gem, void *address);
+     struct drm_gem_object *(*prime_dup)(struct drm_device *dev,
+                                         const struct nv_drm_gem_object *nv_gem_src);

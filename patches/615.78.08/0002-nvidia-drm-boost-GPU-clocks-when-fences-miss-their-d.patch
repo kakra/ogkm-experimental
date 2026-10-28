@@ -7,25 +7,24 @@ Implement dma_fence_ops.set_deadline for prime and semaphore-surface fences
 and request a 1 s ASYNC PERF_BOOST (via a new NVKMS KAPI call) when
 deadlines keep being missed with the GPU busy, or when fences keep
 signaling with little of their deadline lead to spare (tight frames).
-Tunable via the deadline_boost* module parameters; statistics in
-deadline_boost_stats.
+Disable with nvidia_drm.deadline_boost=0.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  kernel-open/common/inc/nvkms-kapi.h           |  18 +
  kernel-open/conftest.sh                       |  16 +
  kernel-open/nvidia-drm/nvidia-drm-drv.c       |   3 +
- kernel-open/nvidia-drm/nvidia-drm-fence.c     | 730 ++++++++++++++++++
- kernel-open/nvidia-drm/nvidia-drm-fence.h     |  10 +
- kernel-open/nvidia-drm/nvidia-drm-linux.c     |  76 ++
- .../nvidia-drm/nvidia-drm-os-interface.c      |   8 +
- .../nvidia-drm/nvidia-drm-os-interface.h      |  16 +
- kernel-open/nvidia-drm/nvidia-drm-priv.h      |  77 ++
+ kernel-open/nvidia-drm/nvidia-drm-fence.c     | 586 ++++++++++++++++++
+ kernel-open/nvidia-drm/nvidia-drm-fence.h     |   9 +
+ kernel-open/nvidia-drm/nvidia-drm-linux.c     |   8 +
+ .../nvidia-drm/nvidia-drm-os-interface.c      |   1 +
+ .../nvidia-drm/nvidia-drm-os-interface.h      |   2 +
+ kernel-open/nvidia-drm/nvidia-drm-priv.h      |  76 +++
  kernel-open/nvidia-drm/nvidia-drm-sources.mk  |   2 +
  .../kapi/include/nvkms-kapi-internal.h        |   8 +
  .../kapi/interface/nvkms-kapi.h               |  18 +
- src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 109 +++
- 13 files changed, 1091 insertions(+)
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 109 ++++
+ 13 files changed, 856 insertions(+)
 
 diff --git a/kernel-open/common/inc/nvkms-kapi.h b/kernel-open/common/inc/nvkms-kapi.h
 index f958cf85..28a58d78 100644
@@ -105,7 +104,7 @@ index 64df8c04..52b7e83f 100644
  
      WARN_ON(nv_dev->subOwnershipGranted);
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-fence.c b/kernel-open/nvidia-drm/nvidia-drm-fence.c
-index 8252e351..72561c88 100644
+index 8252e351..2a0aac5f 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-fence.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-fence.c
 @@ -36,6 +36,10 @@
@@ -119,7 +118,7 @@ index 8252e351..72561c88 100644
  #if defined(NV_DRM_SYNCOBJ_FEATURES_PRESENT)
  #include <drm/drm_syncobj.h>
  #endif
-@@ -59,6 +63,670 @@ struct nv_drm_fence_context {
+@@ -59,6 +63,526 @@ struct nv_drm_fence_context {
      NvU64 fenceSemIndex; /* Index into semaphore surface */
  };
  
@@ -153,15 +152,15 @@ index 8252e351..72561c88 100644
 + *
 + * A boost takes effect tens to hundreds of milliseconds after it is
 + * requested, so it cannot rescue the frame that missed; it only helps if
-+ * misses keep happening. Boost once deadline_boost_misses deadlines have been
-+ * missed within NV_DRM_DEADLINE_MISS_WINDOW_MS.
++ * misses keep happening. Boost once NV_DRM_DEADLINE_MISSES deadlines have
++ * been missed within NV_DRM_DEADLINE_MISS_WINDOW_MS.
 + *
-+ * Also boost before misses pile up. Each checked deadline is classed as easy
-+ * (its fence signaled with more than (100 - NV_DRM_DEADLINE_TIGHT_PCT)% of the
-+ * time between setting the deadline and the deadline to spare), tight
-+ * (signaled later, or missed while the GPU was still busy) or neither (missed
-+ * only because signaling was late). deadline_boost_onset_frames tight frames
-+ * within deadline_boost_onset_window_ms boost, however many easy frames come
++ * Also boost before misses pile up. A checked deadline is tight if its fence
++ * signaled with less than (100 - NV_DRM_DEADLINE_TIGHT_PCT)% of the time
++ * between setting the deadline and the deadline to spare, or missed while the
++ * GPU was still busy (not if it missed only because signaling was late).
++ * NV_DRM_DEADLINE_ONSET_FRAMES tight frames within
++ * NV_DRM_DEADLINE_ONSET_WINDOW_MS boost, however many other frames come
 + * between them: at low clocks tight frames show up one at a time, about a
 + * second apart, among hundreds of easy ones. The governor only raises clocks
 + * on sustained utilization, which compositing at low clocks doesn't reach.
@@ -174,113 +173,26 @@ index 8252e351..72561c88 100644
 + * Light rendering at the lowest P-state misses deadlines every few seconds
 + * indefinitely: the governor never raises clocks for it, so the triggers
 + * keep firing and the GPU would stay boosted whenever anything is on screen.
-+ * Back off instead: each boost triggered before deadline_boost_backoff_reset_ms
++ * Back off instead: each boost triggered before NV_DRM_DEADLINE_BACKOFF_RESET_MS
 + * have passed without a trigger doubles the wait before the next one, up to
-+ * deadline_boost_backoff_max_ms. Such workloads then mostly run at low
++ * NV_DRM_DEADLINE_BACKOFF_MAX_MS. Such workloads then mostly run at low
 + * clocks and accept the occasional miss.
 + */
-+#define NV_DRM_DEADLINE_BOOST_DURATION_S 1
-+#define NV_DRM_DEADLINE_BOOST_REARM_MS   750
-+#define NV_DRM_DEADLINE_MISS_WINDOW_MS   1000
-+#define NV_DRM_DEADLINE_TIGHT_PCT        75
-+
-+enum nv_drm_deadline_frame {
-+    NV_DRM_DEADLINE_FRAME_NEUTRAL,
-+    NV_DRM_DEADLINE_FRAME_EASY,
-+    NV_DRM_DEADLINE_FRAME_TIGHT,
-+};
-+
-+/*
-+ * Statistics, exposed through the deadline_boost_stats module parameter.
-+ * Deadlines are bucketed by how far ahead of "now" they were when set:
-+ * <0, 0-1, 1-2, 2-4, 4-8 and >=8 ms.
-+ */
-+#define NV_DRM_DEADLINE_LEAD_BUCKETS 6
-+
-+static atomic64_t nv_drm_deadline_set_count[NV_DRM_DEADLINE_LEAD_BUCKETS];
-+static atomic64_t nv_drm_deadline_miss_count[NV_DRM_DEADLINE_LEAD_BUCKETS];
-+static atomic64_t nv_drm_deadline_gpu_done_count[NV_DRM_DEADLINE_LEAD_BUCKETS];
-+static atomic64_t nv_drm_deadline_untracked_count;
-+static atomic64_t nv_drm_deadline_signaled_early_count;
-+static atomic64_t nv_drm_deadline_checked_count;
-+static atomic64_t nv_drm_deadline_check_delay_us;
-+static atomic64_t nv_drm_deadline_boost_count;
-+static atomic64_t nv_drm_deadline_onset_boost_count;
-+static atomic64_t nv_drm_deadline_easy_count;
-+static atomic64_t nv_drm_deadline_tight_count;
-+static atomic64_t nv_drm_deadline_boost_interval_ms;
++#define NV_DRM_DEADLINE_BOOST_DURATION_S  1
++#define NV_DRM_DEADLINE_BOOST_REARM_MS    750
++#define NV_DRM_DEADLINE_MISS_WINDOW_MS    1000
++#define NV_DRM_DEADLINE_MISSES            3
++#define NV_DRM_DEADLINE_TIGHT_PCT         75
++#define NV_DRM_DEADLINE_ONSET_FRAMES      2
++#define NV_DRM_DEADLINE_ONSET_WINDOW_MS   2500
++#define NV_DRM_DEADLINE_BACKOFF_MAX_MS    16000
++#define NV_DRM_DEADLINE_BACKOFF_RESET_MS  10000
++/* Deadlines set closer than this could not have been met */
++#define NV_DRM_DEADLINE_MIN_LEAD_US       1000
 +
 +static bool __nv_drm_fence_gpu_done(struct dma_fence *fence,
 +                                    struct nv_drm_fence_context *fctx,
 +                                    bool semsurf);
-+
-+static int __nv_drm_deadline_lead_bucket(s64 lead_us)
-+{
-+    if (lead_us < 0) {
-+        return 0;
-+    } else if (lead_us < 1000) {
-+        return 1;
-+    } else if (lead_us < 2000) {
-+        return 2;
-+    } else if (lead_us < 4000) {
-+        return 3;
-+    } else if (lead_us < 8000) {
-+        return 4;
-+    }
-+    return 5;
-+}
-+
-+static int __nv_drm_deadline_stats_buckets(char *buf, size_t size,
-+                                           const char *name,
-+                                           atomic64_t *counts)
-+{
-+    int len = scnprintf(buf, size, " %s:", name);
-+    int i;
-+
-+    for (i = 0; i < NV_DRM_DEADLINE_LEAD_BUCKETS; i++) {
-+        len += scnprintf(buf + len, size - len, " %lld",
-+                         (long long)atomic64_read(&counts[i]));
-+    }
-+
-+    return len;
-+}
-+
-+int nv_drm_fence_deadline_stats(char *buf, size_t size)
-+{
-+    long long checked = atomic64_read(&nv_drm_deadline_checked_count);
-+    int len;
-+
-+    len = scnprintf(buf, size, "lead(<0,0-1,1-2,2-4,4-8,8+ms)");
-+    len += __nv_drm_deadline_stats_buckets(buf + len, size - len, "set",
-+                                           nv_drm_deadline_set_count);
-+    len += __nv_drm_deadline_stats_buckets(buf + len, size - len, "missed",
-+                                           nv_drm_deadline_miss_count);
-+    len += __nv_drm_deadline_stats_buckets(buf + len, size - len,
-+                                           "missed_gpu_done",
-+                                           nv_drm_deadline_gpu_done_count);
-+    len += scnprintf(buf + len, size - len,
-+                     " untracked: %lld signaled_early: %lld"
-+                     " checked: %lld avg_check_delay_us: %lld boosts: %lld"
-+                     " onset_boosts: %lld easy: %lld tight: %lld"
-+                     " boost_interval_ms: %lld\n",
-+                     (long long)atomic64_read(&nv_drm_deadline_untracked_count),
-+                     (long long)atomic64_read(&nv_drm_deadline_signaled_early_count),
-+                     checked,
-+                     checked ? (long long)atomic64_read(&nv_drm_deadline_check_delay_us) / checked : 0,
-+                     (long long)atomic64_read(&nv_drm_deadline_boost_count),
-+                     (long long)atomic64_read(&nv_drm_deadline_onset_boost_count),
-+                     (long long)atomic64_read(&nv_drm_deadline_easy_count),
-+                     (long long)atomic64_read(&nv_drm_deadline_tight_count),
-+                     (long long)atomic64_read(&nv_drm_deadline_boost_interval_ms));
-+
-+    return len;
-+}
-+
-+static ktime_t __nv_drm_deadline_trigger(const struct nv_drm_deadline_slot *slot)
-+{
-+    return ktime_sub_us(slot->deadline,
-+                        nv_drm_deadline_boost_margin_us_module_param);
-+}
 +
 +/*
 + * Arm the timer for an armed slot's deadline, or queue the check right away
@@ -289,10 +201,8 @@ index 8252e351..72561c88 100644
 +static void __nv_drm_deadline_arm(struct nv_drm_deadline_slot *slot,
 +                                  ktime_t now)
 +{
-+    const ktime_t trigger = __nv_drm_deadline_trigger(slot);
-+
-+    if (ktime_before(now, trigger)) {
-+        hrtimer_start(&slot->timer, trigger, HRTIMER_MODE_ABS);
++    if (ktime_before(now, slot->deadline)) {
++        hrtimer_start(&slot->timer, slot->deadline, HRTIMER_MODE_ABS);
 +    } else {
 +        queue_work(system_highpri_wq, &slot->nv_dev->deadline.work);
 +    }
@@ -333,8 +243,6 @@ index 8252e351..72561c88 100644
 +/* Request a boost unless one was requested recently. Returns true if it did. */
 +static bool __nv_drm_deadline_request_boost(struct nv_drm_device *nv_dev)
 +{
-+    const unsigned int max_ms =
-+        nv_drm_deadline_boost_backoff_max_ms_module_param;
 +    const unsigned long now = jiffies;
 +
 +    if (!nv_drm_deadline_boost_module_param) {
@@ -342,10 +250,10 @@ index 8252e351..72561c88 100644
 +    }
 +
 +    /* A trigger after a calm period starts over at the shortest wait */
-+    if (nv_dev->deadline.last_trigger == 0 || max_ms == 0 ||
++    if (nv_dev->deadline.last_trigger == 0 ||
 +        time_after(now,
 +                   nv_dev->deadline.last_trigger +
-+                   msecs_to_jiffies(nv_drm_deadline_boost_backoff_reset_ms_module_param))) {
++                   msecs_to_jiffies(NV_DRM_DEADLINE_BACKOFF_RESET_MS))) {
 +        nv_dev->deadline.boost_interval_ms = NV_DRM_DEADLINE_BOOST_REARM_MS;
 +    }
 +
@@ -360,16 +268,10 @@ index 8252e351..72561c88 100644
 +
 +    nv_dev->deadline.last_boost = now;
 +
-+    if (max_ms != 0) {
-+        nv_dev->deadline.boost_interval_ms =
-+            max(min(nv_dev->deadline.boost_interval_ms * 2, max_ms),
-+                (unsigned int)NV_DRM_DEADLINE_BOOST_REARM_MS);
-+    }
++    nv_dev->deadline.boost_interval_ms =
++        min(nv_dev->deadline.boost_interval_ms * 2,
++            (unsigned int)NV_DRM_DEADLINE_BACKOFF_MAX_MS);
 +
-+    atomic64_set(&nv_drm_deadline_boost_interval_ms,
-+                 nv_dev->deadline.boost_interval_ms);
-+
-+    atomic64_inc(&nv_drm_deadline_boost_count);
 +    queue_work(system_unbound_wq, &nv_dev->deadline.boost_work);
 +
 +    return true;
@@ -386,8 +288,7 @@ index 8252e351..72561c88 100644
 +        nv_dev->deadline.miss_count = 0;
 +    }
 +
-+    if (++nv_dev->deadline.miss_count <
-+        nv_drm_deadline_boost_misses_module_param) {
++    if (++nv_dev->deadline.miss_count < NV_DRM_DEADLINE_MISSES) {
 +        return;
 +    }
 +
@@ -397,63 +298,37 @@ index 8252e351..72561c88 100644
 +}
 +
 +/*
-+ * Class a deadline whose fence signaled at signal_time by how much of the
-+ * time between setting the deadline and the deadline was used.
++ * Whether a deadline whose fence signaled at signal_time used at least
++ * NV_DRM_DEADLINE_TIGHT_PCT% of the time between setting the deadline and the
++ * deadline.
 + */
-+static enum nv_drm_deadline_frame
-+__nv_drm_deadline_classify(const struct nv_drm_deadline_slot *slot,
-+                           ktime_t signal_time)
++static bool __nv_drm_deadline_tight(const struct nv_drm_deadline_slot *slot,
++                                    ktime_t signal_time)
 +{
 +    const s64 lead_ns = ktime_to_ns(ktime_sub(slot->deadline, slot->set_time));
 +    const s64 used_ns = ktime_to_ns(ktime_sub(signal_time, slot->set_time));
 +
-+    if (lead_ns <= 0) {
-+        return NV_DRM_DEADLINE_FRAME_NEUTRAL;
-+    }
-+
-+    return (used_ns * 100 >= lead_ns * NV_DRM_DEADLINE_TIGHT_PCT) ?
-+           NV_DRM_DEADLINE_FRAME_TIGHT : NV_DRM_DEADLINE_FRAME_EASY;
++    return (lead_ns > 0) &&
++           (used_ns * 100 >= lead_ns * NV_DRM_DEADLINE_TIGHT_PCT);
 +}
 +
-+/* Count tight frames, and boost if they keep coming. */
-+static void __nv_drm_deadline_onset(struct nv_drm_device *nv_dev,
-+                                    enum nv_drm_deadline_frame frame,
-+                                    ktime_t now)
++/* Count a tight frame, and boost if they keep coming. */
++static void __nv_drm_deadline_onset(struct nv_drm_device *nv_dev, ktime_t now)
 +{
-+    const unsigned int onset_frames =
-+        nv_drm_deadline_boost_onset_frames_module_param;
-+
-+    if (frame == NV_DRM_DEADLINE_FRAME_EASY) {
-+        atomic64_inc(&nv_drm_deadline_easy_count);
-+        return;
-+    }
-+
-+    if (frame != NV_DRM_DEADLINE_FRAME_TIGHT) {
-+        return;
-+    }
-+
-+    atomic64_inc(&nv_drm_deadline_tight_count);
-+
-+    if (onset_frames == 0) {
-+        return;
-+    }
-+
 +    if (nv_dev->deadline.tight_count == 0 ||
 +        ktime_ms_delta(now, nv_dev->deadline.tight_window_start) >=
-+        nv_drm_deadline_boost_onset_window_ms_module_param) {
++        NV_DRM_DEADLINE_ONSET_WINDOW_MS) {
 +        nv_dev->deadline.tight_window_start = now;
 +        nv_dev->deadline.tight_count = 0;
 +    }
 +
-+    if (++nv_dev->deadline.tight_count < onset_frames) {
++    if (++nv_dev->deadline.tight_count < NV_DRM_DEADLINE_ONSET_FRAMES) {
 +        return;
 +    }
 +
 +    nv_dev->deadline.tight_count = 0;
 +
-+    if (__nv_drm_deadline_request_boost(nv_dev)) {
-+        atomic64_inc(&nv_drm_deadline_onset_boost_count);
-+    }
++    __nv_drm_deadline_request_boost(nv_dev);
 +}
 +
 +/*
@@ -464,10 +339,8 @@ index 8252e351..72561c88 100644
 +                                         ktime_t now)
 +{
 +    struct nv_drm_device *nv_dev = slot->nv_dev;
-+    const ktime_t trigger = __nv_drm_deadline_trigger(slot);
-+    const int bucket = slot->bucket;
-+    enum nv_drm_deadline_frame frame = NV_DRM_DEADLINE_FRAME_NEUTRAL;
-+    bool signaled, gpu_done;
++    const ktime_t deadline = slot->deadline;
++    bool signaled, gpu_done, tight = false;
 +
 +    /*
 +     * Read the semaphore before the signaled bit, so a fence that is still
@@ -482,33 +355,24 @@ index 8252e351..72561c88 100644
 +            test_bit(DMA_FENCE_FLAG_TIMESTAMP_BIT, &slot->fence->flags) ?
 +            slot->fence->timestamp : now;
 +
-+        frame = __nv_drm_deadline_classify(slot, signal_time);
++        tight = __nv_drm_deadline_tight(slot, signal_time);
 +    } else if (!gpu_done) {
-+        frame = NV_DRM_DEADLINE_FRAME_TIGHT;
++        tight = true;
 +    }
 +
 +    __nv_drm_deadline_release_slot(slot);
 +
-+    __nv_drm_deadline_onset(nv_dev, frame, now);
-+
-+    if (ktime_before(now, trigger)) {
-+        /* Picked up early only because the fence signaled */
-+        atomic64_inc(&nv_drm_deadline_signaled_early_count);
-+        return;
++    if (tight) {
++        __nv_drm_deadline_onset(nv_dev, now);
 +    }
 +
-+    atomic64_inc(&nv_drm_deadline_checked_count);
-+    atomic64_add(ktime_us_delta(now, trigger), &nv_drm_deadline_check_delay_us);
-+
-+    if (signaled) {
++    /* Picked up early only because the fence signaled */
++    if (ktime_before(now, deadline) || signaled) {
 +        return;
 +    }
-+
-+    atomic64_inc(&nv_drm_deadline_miss_count[bucket]);
 +
 +    if (gpu_done) {
 +        /* Only signaling was late; boosting clocks would not help */
-+        atomic64_inc(&nv_drm_deadline_gpu_done_count[bucket]);
 +        return;
 +    }
 +
@@ -535,7 +399,7 @@ index 8252e351..72561c88 100644
 +        struct nv_drm_deadline_slot *slot = &nv_dev->deadline.slots[i];
 +
 +        if (slot->state != NV_DRM_DEADLINE_SLOT_ARMED ||
-+            (ktime_before(now, __nv_drm_deadline_trigger(slot)) &&
++            (ktime_before(now, slot->deadline) &&
 +             !test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &slot->fence->flags))) {
 +            continue;
 +        }
@@ -584,8 +448,6 @@ index 8252e351..72561c88 100644
 +    struct nv_drm_deadline_slot *slot = NULL;
 +    unsigned long flags, fence_flags;
 +    ktime_t now;
-+    s64 lead_us;
-+    int bucket;
 +    bool added;
 +    unsigned int i;
 +
@@ -595,13 +457,9 @@ index 8252e351..72561c88 100644
 +    }
 +
 +    now = ktime_get();
-+    lead_us = ktime_us_delta(deadline, now);
-+    bucket = __nv_drm_deadline_lead_bucket(lead_us);
-+
-+    atomic64_inc(&nv_drm_deadline_set_count[bucket]);
 +
 +    /* Not achievable when set, so missing it says nothing about clocks */
-+    if (lead_us < (s64)nv_drm_deadline_boost_min_lead_us_module_param) {
++    if (ktime_us_delta(deadline, now) < NV_DRM_DEADLINE_MIN_LEAD_US) {
 +        return;
 +    }
 +
@@ -636,7 +494,6 @@ index 8252e351..72561c88 100644
 +            if (s->state != NV_DRM_DEADLINE_SLOT_BUSY &&
 +                ktime_before(deadline, s->deadline)) {
 +                s->deadline = deadline;
-+                s->bucket = bucket;
 +                if (s->state == NV_DRM_DEADLINE_SLOT_ARMED) {
 +                    __nv_drm_deadline_arm(s, now);
 +                }
@@ -647,7 +504,6 @@ index 8252e351..72561c88 100644
 +    }
 +
 +    if (slot == NULL) {
-+        atomic64_inc(&nv_drm_deadline_untracked_count);
 +        goto unlock_device;
 +    }
 +
@@ -666,7 +522,6 @@ index 8252e351..72561c88 100644
 +    slot->semsurf = semsurf;
 +    slot->deadline = deadline;
 +    slot->set_time = now;
-+    slot->bucket = bucket;
 +
 +unlock_device:
 +    spin_unlock(&nv_dev->deadline.lock);
@@ -790,7 +645,7 @@ index 8252e351..72561c88 100644
  struct nv_drm_prime_fence_context {
      struct nv_drm_fence_context base;
  
-@@ -87,6 +755,7 @@ struct nv_drm_prime_fence {
+@@ -87,6 +611,7 @@ struct nv_drm_prime_fence {
      struct list_head list_entry;
      struct dma_fence base;
      spinlock_t lock;
@@ -798,7 +653,7 @@ index 8252e351..72561c88 100644
  };
  
  static inline
-@@ -138,12 +807,27 @@ nv_drm_gem_prime_fence_op_wait(struct dma_fence *fence,
+@@ -138,12 +663,27 @@ nv_drm_gem_prime_fence_op_wait(struct dma_fence *fence,
                                    msecs_to_jiffies(96) : timeout);
  }
  
@@ -826,7 +681,7 @@ index 8252e351..72561c88 100644
  };
  
  static inline void
-@@ -371,6 +1055,8 @@ static struct dma_fence *__nv_drm_prime_fence_context_create_fence(
+@@ -371,6 +911,8 @@ static struct dma_fence *__nv_drm_prime_fence_context_create_fence(
  
      spin_lock_init(&nv_fence->lock);
  
@@ -835,7 +690,7 @@ index 8252e351..72561c88 100644
      dma_fence_init(&nv_fence->base, &nv_drm_gem_prime_fence_ops,
                     &nv_fence->lock, nv_prime_fence_context->base.context,
                     seqno);
-@@ -619,6 +1305,8 @@ struct nv_drm_semsurf_fence {
+@@ -619,6 +1161,8 @@ struct nv_drm_semsurf_fence {
       * when this fence times out.
       */
      unsigned long timeout;
@@ -844,7 +699,7 @@ index 8252e351..72561c88 100644
  };
  
  struct nv_drm_semsurf_fence_callback {
-@@ -1370,6 +2058,18 @@ __nv_drm_semsurf_fence_op_release(struct dma_fence *fence)
+@@ -1370,6 +1914,18 @@ __nv_drm_semsurf_fence_op_release(struct dma_fence *fence)
      nv_drm_free(nv_fence);
  }
  
@@ -863,7 +718,7 @@ index 8252e351..72561c88 100644
  static const struct dma_fence_ops nv_drm_semsurf_fence_ops = {
      .get_driver_name = nv_drm_gem_fence_op_get_driver_name,
      .get_timeline_name = __nv_drm_semsurf_fence_op_get_timeline_name,
-@@ -1379,6 +2079,9 @@ static const struct dma_fence_ops nv_drm_semsurf_fence_ops = {
+@@ -1379,6 +1935,9 @@ static const struct dma_fence_ops nv_drm_semsurf_fence_ops = {
  #if defined(NV_DMA_FENCE_OPS_HAS_USE_64BIT_SEQNO)
      .use_64bit_seqno = true,
  #endif
@@ -873,7 +728,7 @@ index 8252e351..72561c88 100644
  };
  
  /*
-@@ -1459,6 +2162,7 @@ static struct dma_fence *__nv_drm_semsurf_fence_ctx_create_fence(
+@@ -1459,6 +2018,7 @@ static struct dma_fence *__nv_drm_semsurf_fence_ctx_create_fence(
  #if !defined(NV_DMA_FENCE_OPS_HAS_USE_64BIT_SEQNO)
      nv_fence->wait_value = wait_value;
  #endif
@@ -881,7 +736,7 @@ index 8252e351..72561c88 100644
  
      /* Initializes the fence with one reference (for the caller) */
      dma_fence_init(fence, &nv_drm_semsurf_fence_ops,
-@@ -2002,4 +2706,30 @@ done:
+@@ -2002,4 +2562,30 @@ done:
  #endif /* NV_DRM_SYNCOBJ_FEATURES_PRESENT */
  }
  
@@ -913,10 +768,10 @@ index 8252e351..72561c88 100644
 +
  #endif /* NV_DRM_AVAILABLE */
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-fence.h b/kernel-open/nvidia-drm/nvidia-drm-fence.h
-index f862d8ef..aed4ea1d 100644
+index f862d8ef..0636e74b 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-fence.h
 +++ b/kernel-open/nvidia-drm/nvidia-drm-fence.h
-@@ -29,6 +29,16 @@
+@@ -29,6 +29,15 @@
  
  struct drm_file;
  struct drm_device;
@@ -925,7 +780,6 @@ index f862d8ef..aed4ea1d 100644
 +#if defined(NV_DMA_FENCE_OPS_HAS_SET_DEADLINE)
 +void nv_drm_fence_deadline_init(struct nv_drm_device *nv_dev);
 +void nv_drm_fence_deadline_fini(struct nv_drm_device *nv_dev);
-+int nv_drm_fence_deadline_stats(char *buf, size_t size);
 +#else
 +static inline void nv_drm_fence_deadline_init(struct nv_drm_device *nv_dev) { }
 +static inline void nv_drm_fence_deadline_fini(struct nv_drm_device *nv_dev) { }
@@ -934,18 +788,10 @@ index f862d8ef..aed4ea1d 100644
  int nv_drm_fence_supported_ioctl(struct drm_device *dev,
                                   void *data, struct drm_file *filep);
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-linux.c b/kernel-open/nvidia-drm/nvidia-drm-linux.c
-index aaa2fbd1..829a885a 100644
+index aaa2fbd1..d0b435fa 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-linux.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-linux.c
-@@ -24,6 +24,7 @@
- 
- #include "nvidia-drm-os-interface.h"
- #include "nvidia-drm.h"
-+#include "nvidia-drm-fence.h"
- 
- #include "nvidia-drm-conftest.h"
- 
-@@ -53,6 +54,81 @@ MODULE_PARM_DESC(
+@@ -53,6 +53,14 @@ MODULE_PARM_DESC(
  module_param_named(color_pipeline, nv_drm_color_pipeline_module_param, bool, 0444);
  #endif
  
@@ -955,126 +801,38 @@ index aaa2fbd1..829a885a 100644
 +    "Boost GPU clocks when a fence is about to miss a deadline set by a waiter, "
 +    "e.g. a compositor's page flip (1 = enable (default), 0 = disable)");
 +module_param_named(deadline_boost, nv_drm_deadline_boost_module_param, bool, 0644);
-+
-+MODULE_PARM_DESC(
-+    deadline_boost_margin_us,
-+    "Count a deadline as missed if its fence is still pending this many "
-+    "microseconds before the deadline (default 0)");
-+module_param_named(deadline_boost_margin_us,
-+                   nv_drm_deadline_boost_margin_us_module_param, uint, 0644);
-+
-+MODULE_PARM_DESC(
-+    deadline_boost_min_lead_us,
-+    "Ignore deadlines set less than this many microseconds in the future, "
-+    "as they could not have been met (default 1000)");
-+module_param_named(deadline_boost_min_lead_us,
-+                   nv_drm_deadline_boost_min_lead_us_module_param, uint, 0644);
-+
-+MODULE_PARM_DESC(
-+    deadline_boost_misses,
-+    "Boost after this many deadline misses within one second (default 3)");
-+module_param_named(deadline_boost_misses,
-+                   nv_drm_deadline_boost_misses_module_param, uint, 0644);
-+
-+MODULE_PARM_DESC(
-+    deadline_boost_onset_frames,
-+    "Boost after this many tight frames (fences that signaled with less than "
-+    "25% of their deadline lead to spare) within deadline_boost_onset_window_ms; "
-+    "0 disables (default 2)");
-+module_param_named(deadline_boost_onset_frames,
-+                   nv_drm_deadline_boost_onset_frames_module_param, uint, 0644);
-+
-+MODULE_PARM_DESC(
-+    deadline_boost_onset_window_ms,
-+    "Window in milliseconds for deadline_boost_onset_frames (default 2500)");
-+module_param_named(deadline_boost_onset_window_ms,
-+                   nv_drm_deadline_boost_onset_window_ms_module_param, uint, 0644);
-+
-+MODULE_PARM_DESC(
-+    deadline_boost_backoff_max_ms,
-+    "Each boost triggered without deadline_boost_backoff_reset_ms of calm "
-+    "since the previous trigger doubles the wait before the next boost, up to "
-+    "this many milliseconds; 0 disables the backoff (default 16000)");
-+module_param_named(deadline_boost_backoff_max_ms,
-+                   nv_drm_deadline_boost_backoff_max_ms_module_param, uint, 0644);
-+
-+MODULE_PARM_DESC(
-+    deadline_boost_backoff_reset_ms,
-+    "Reset the boost backoff after this many milliseconds without a boost "
-+    "trigger (default 10000)");
-+module_param_named(deadline_boost_backoff_reset_ms,
-+                   nv_drm_deadline_boost_backoff_reset_ms_module_param, uint, 0644);
-+
-+static int nv_drm_deadline_boost_stats_get(char *buf,
-+                                           const struct kernel_param *kp)
-+{
-+    return nv_drm_fence_deadline_stats(buf, PAGE_SIZE);
-+}
-+
-+static const struct kernel_param_ops nv_drm_deadline_boost_stats_ops = {
-+    .get = nv_drm_deadline_boost_stats_get,
-+};
-+
-+MODULE_PARM_DESC(
-+    deadline_boost_stats,
-+    "Fence deadline statistics: deadlines set and missed, bucketed by how far "
-+    "in the future they were set, deadlines untracked (no free slot), "
-+    "signaled early, checked at their deadline, and boosts requested");
-+module_param_cb(deadline_boost_stats, &nv_drm_deadline_boost_stats_ops,
-+                NULL, 0444);
 +#endif
 +
  #endif /* NV_DRM_AVAILABLE */
  
  /*************************************************************************
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-os-interface.c b/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
-index 2cd576e4..d4e5fad7 100644
+index 2cd576e4..fcf29441 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
-@@ -46,6 +46,14 @@ bool nv_drm_modeset_module_param = true;
+@@ -46,6 +46,7 @@ bool nv_drm_modeset_module_param = true;
  bool nv_drm_fbdev_module_param = true;
  bool nv_drm_vblank_module_param = false;
  bool nv_drm_color_pipeline_module_param = true;
 +bool nv_drm_deadline_boost_module_param = true;
-+unsigned int nv_drm_deadline_boost_margin_us_module_param = 0;
-+unsigned int nv_drm_deadline_boost_min_lead_us_module_param = 1000;
-+unsigned int nv_drm_deadline_boost_misses_module_param = 3;
-+unsigned int nv_drm_deadline_boost_onset_frames_module_param = 2;
-+unsigned int nv_drm_deadline_boost_onset_window_ms_module_param = 2500;
-+unsigned int nv_drm_deadline_boost_backoff_max_ms_module_param = 16000;
-+unsigned int nv_drm_deadline_boost_backoff_reset_ms_module_param = 10000;
  
  void *nv_drm_calloc(size_t nmemb, size_t size)
  {
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-os-interface.h b/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
-index 1a630ce2..31077680 100644
+index 1a630ce2..12e4ebeb 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
 +++ b/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
-@@ -70,6 +70,22 @@ extern bool nv_drm_vblank_module_param;
+@@ -70,6 +70,8 @@ extern bool nv_drm_vblank_module_param;
  /* Set to true when DRM color pipeline support is enabled. */
  extern bool nv_drm_color_pipeline_module_param;
  #endif
 +/* Set to true when fence deadlines may boost GPU clocks. */
 +extern bool nv_drm_deadline_boost_module_param;
-+/* How long before a fence deadline to count a miss if it is still pending. */
-+extern unsigned int nv_drm_deadline_boost_margin_us_module_param;
-+/* Ignore deadlines set less than this far in the future. */
-+extern unsigned int nv_drm_deadline_boost_min_lead_us_module_param;
-+/* Number of deadline misses within a second that triggers a boost. */
-+extern unsigned int nv_drm_deadline_boost_misses_module_param;
-+/* Number of tight frames within the onset window that triggers a boost. */
-+extern unsigned int nv_drm_deadline_boost_onset_frames_module_param;
-+/* Length of the onset window in milliseconds. */
-+extern unsigned int nv_drm_deadline_boost_onset_window_ms_module_param;
-+/* Longest wait between boosts that follow each other; 0 disables backoff. */
-+extern unsigned int nv_drm_deadline_boost_backoff_max_ms_module_param;
-+/* Time without a boost trigger after which the backoff starts over. */
-+extern unsigned int nv_drm_deadline_boost_backoff_reset_ms_module_param;
  
  void *nv_drm_calloc(size_t nmemb, size_t size);
  
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-priv.h b/kernel-open/nvidia-drm/nvidia-drm-priv.h
-index 982c9efe..dad6208a 100644
+index 982c9efe..a15c59af 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-priv.h
 +++ b/kernel-open/nvidia-drm/nvidia-drm-priv.h
 @@ -35,6 +35,12 @@
@@ -1090,7 +848,7 @@ index 982c9efe..dad6208a 100644
  #include "nvidia-drm-os-interface.h"
  
  #include "nvkms-kapi.h"
-@@ -98,6 +104,45 @@ enum nv_drm_dithering_mode {
+@@ -98,6 +104,44 @@ enum nv_drm_dithering_mode {
      NV_DRM_DITHERING_MODE_MAX
  };
  
@@ -1125,7 +883,6 @@ index 982c9efe..dad6208a 100644
 +
 +    ktime_t deadline;
 +    ktime_t set_time; /* When the deadline was first set */
-+    int bucket; /* Statistics bucket of the deadline */
 +
 +    /* Both queue the deadline work: at the deadline and when it signals */
 +    struct hrtimer timer;
@@ -1136,7 +893,7 @@ index 982c9efe..dad6208a 100644
  struct nv_drm_device {
      nv_gpu_info_t gpu_info;
      MIGDeviceId gpu_mig_device;
-@@ -210,6 +255,38 @@ struct nv_drm_device {
+@@ -210,6 +254,38 @@ struct nv_drm_device {
  
      struct mutex drm_lut_surface_pool_mutex;
      struct list_head drm_lut_surface_pool;

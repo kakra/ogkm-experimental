@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tom Englund <tomenglund26@gmail.com>
-Date: Thu, 22 Oct 2026 11:28:44 +0200
+Date: Mon, 26 Oct 2026 10:06:32 +0100
 Subject: [PATCH] nvkms: don't yield after wrapping a display push buffer
 
 nvEvoMakeRoom() waits for space in a display channel's push buffer
@@ -26,75 +26,16 @@ with PUT at 0: either GET is back at 0 and the whole buffer is free, or the
 space up to GET is checked as before, so it can't wrap again and only
 yields if the channel really has to make progress first.
 
-nvidia_modeset.pushbuf_wrap_no_yield=0 (module parameter, writable at
-runtime) restores the old behaviour.
-
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- kernel-open/nvidia-modeset/nvidia-modeset-linux.c    | 11 +++++++++++
- .../nvidia-modeset/nvidia-modeset-os-interface.h     |  1 +
- .../include/nvidia-modeset-os-interface.h            |  1 +
- src/nvidia-modeset/src/nvkms-dma.c                   | 12 ++++++++++++
- 4 files changed, 25 insertions(+)
+ src/nvidia-modeset/src/nvkms-dma.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
 
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-index b65f927e..190791ad 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-@@ -174,6 +174,12 @@ MODULE_PARM_DESC(kapi_sysmem_semaphores,
- static bool kapi_sysmem_semaphores = true;
- module_param_named(kapi_sysmem_semaphores, kapi_sysmem_semaphores, bool, 0444);
- 
-+MODULE_PARM_DESC(pushbuf_wrap_no_yield,
-+                 "When a display channel push buffer wraps around, check for room again right away "
-+                 "instead of yielding the CPU first (with the NVKMS lock held).");
-+static bool pushbuf_wrap_no_yield = true;
-+module_param_named(pushbuf_wrap_no_yield, pushbuf_wrap_no_yield, bool, 0644);
-+
- /* Fail allocating the RM core channel for NVKMS using the i-th method (see
-  * FailAllocCoreChannelMethod). Failures not using the i-th method are ignored. */
- MODULE_PARM_DESC(fail_alloc_core_channel, "Control testing for hardware core channel allocation failure");
-@@ -275,6 +281,11 @@ NvBool nvkms_kapi_sysmem_semaphores(void)
-     return kapi_sysmem_semaphores;
- }
- 
-+NvBool nvkms_pushbuf_wrap_no_yield(void)
-+{
-+    return READ_ONCE(pushbuf_wrap_no_yield);
-+}
-+
- NvBool nvkms_conceal_vrr_caps(void)
- {
-     return conceal_vrr_caps;
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-index 3103e42e..3e3d8e96 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-@@ -135,6 +135,7 @@ NvBool nvkms_enable_overlay_layers(void);
- NvBool nvkms_debug_logging(void);
- NvBool nvkms_dp_sst_edid_recovery_fix(void);
- NvBool nvkms_kapi_sysmem_semaphores(void);
-+NvBool nvkms_pushbuf_wrap_no_yield(void);
- void nvkms_extcon_report_hdmi(NvBool state);
- void nvkms_extcon_report_hdmi_audio(NvBool state);
- 
-diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-index 3103e42e..3e3d8e96 100644
---- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-+++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-@@ -135,6 +135,7 @@ NvBool nvkms_enable_overlay_layers(void);
- NvBool nvkms_debug_logging(void);
- NvBool nvkms_dp_sst_edid_recovery_fix(void);
- NvBool nvkms_kapi_sysmem_semaphores(void);
-+NvBool nvkms_pushbuf_wrap_no_yield(void);
- void nvkms_extcon_report_hdmi(NvBool state);
- void nvkms_extcon_report_hdmi_audio(NvBool state);
- 
 diff --git a/src/nvidia-modeset/src/nvkms-dma.c b/src/nvidia-modeset/src/nvkms-dma.c
-index 75e2046c..3f4b4bf3 100644
+index 75e2046c..fed80fde 100644
 --- a/src/nvidia-modeset/src/nvkms-dma.c
 +++ b/src/nvidia-modeset/src/nvkms-dma.c
-@@ -123,6 +123,18 @@ void nvEvoMakeRoom(NVEvoChannelPtr pChannel, NvU32 count)
+@@ -123,6 +123,16 @@ void nvEvoMakeRoom(NVEvoChannelPtr pChannel, NvU32 count)
                      push_buffer->buffer = push_buffer->base;
                      nvDmaKickoffEvo(pChannel);
                      putOffset = 0;
@@ -107,9 +48,7 @@ index 75e2046c..3f4b4bf3 100644
 +                     * once per lap of the push buffer, with the NVKMS lock
 +                     * held. With PUT at 0, the next pass can't wrap again.
 +                     */
-+                    if (nvkms_pushbuf_wrap_no_yield()) {
-+                        continue;
-+                    }
++                    continue;
                  }
                  else if (putOffset != push_buffer->put_offset) {
                      nvDmaKickoffEvo(pChannel);

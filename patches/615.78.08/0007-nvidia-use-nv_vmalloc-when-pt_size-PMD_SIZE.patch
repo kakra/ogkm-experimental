@@ -6,8 +6,7 @@ Subject: [PATCH] nvidia: use nv_vmalloc when pt_size >= PMD_SIZE
 Avoid kvmalloc() trying a huge page (and direct compaction) under the RM
 API lock when registering large system memory allocations.
 
-References:
-- NVIDIA/open-gpu-kernel-modules PR 1383
+Upstream PR: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1383
 ---
  kernel-open/nvidia/nv.c | 10 +++++++---
  1 file changed, 7 insertions(+), 3 deletions(-)

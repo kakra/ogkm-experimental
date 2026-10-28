@@ -21,74 +21,15 @@ Edid::swap().
 
 DP regkeys come from the NVKMS registry keys a client passes at device
 allocation; nvidia-drm passes none, so the fix can't be enabled there.
-When the key isn't set, take its value from the new
-nvidia_modeset.dp_sst_edid_recovery_fix module parameter (default on).
-dp_sst_edid_recovery_fix=0 restores the old behaviour.
+Enable it when the key isn't set.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- kernel-open/nvidia-modeset/nvidia-modeset-linux.c | 12 ++++++++++++
- .../nvidia-modeset/nvidia-modeset-os-interface.h  |  1 +
- .../include/nvidia-modeset-os-interface.h         |  1 +
- src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp  | 15 +++++++++++++--
- 4 files changed, 27 insertions(+), 2 deletions(-)
+ src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
 
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-index d8787738..6608c919 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-@@ -160,6 +160,13 @@ MODULE_PARM_DESC(enhanced_pcon_support,
- static bool enhanced_pcon_support = false;
- module_param_named(enhanced_pcon_support, enhanced_pcon_support, bool, 0444);
- 
-+MODULE_PARM_DESC(dp_sst_edid_recovery_fix,
-+                 "Default for the DP_ENABLE_SST_EDID_RECOVERY_FIX DisplayPort regkey: re-read a "
-+                 "single-stream (e.g. eDP) EDID after a corrupted block instead of reporting a "
-+                 "fallback EDID. Read once when the first DisplayPort connector is set up.");
-+static bool dp_sst_edid_recovery_fix = true;
-+module_param_named(dp_sst_edid_recovery_fix, dp_sst_edid_recovery_fix, bool, 0444);
-+
- /* Fail allocating the RM core channel for NVKMS using the i-th method (see
-  * FailAllocCoreChannelMethod). Failures not using the i-th method are ignored. */
- MODULE_PARM_DESC(fail_alloc_core_channel, "Control testing for hardware core channel allocation failure");
-@@ -251,6 +258,11 @@ enum NvKmsFrlRateForce nvkms_force_frl_rate(void)
-     return NVKMS_FRL_RATE_FORCE_NONE;
- }
- 
-+NvBool nvkms_dp_sst_edid_recovery_fix(void)
-+{
-+    return dp_sst_edid_recovery_fix;
-+}
-+
- NvBool nvkms_conceal_vrr_caps(void)
- {
-     return conceal_vrr_caps;
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-index abe27af8..78a79804 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-@@ -133,6 +133,7 @@ NvBool nvkms_opportunistic_display_sync(void);
- enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void);
- NvBool nvkms_enable_overlay_layers(void);
- NvBool nvkms_debug_logging(void);
-+NvBool nvkms_dp_sst_edid_recovery_fix(void);
- void nvkms_extcon_report_hdmi(NvBool state);
- void nvkms_extcon_report_hdmi_audio(NvBool state);
- 
-diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-index abe27af8..78a79804 100644
---- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-+++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-@@ -133,6 +133,7 @@ NvBool nvkms_opportunistic_display_sync(void);
- enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void);
- NvBool nvkms_enable_overlay_layers(void);
- NvBool nvkms_debug_logging(void);
-+NvBool nvkms_dp_sst_edid_recovery_fix(void);
- void nvkms_extcon_report_hdmi(NvBool state);
- void nvkms_extcon_report_hdmi_audio(NvBool state);
- 
 diff --git a/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp b/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
-index fa7e823b..bca55e26 100644
+index fa7e823b..ac1ae177 100644
 --- a/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
 +++ b/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
 @@ -80,9 +80,20 @@ NvU32 EvoInterface::getRegkeyValue(const char *key)
@@ -107,7 +48,7 @@ index fa7e823b..bca55e26 100644
 +    // and the DP library reports its fallback EDID instead of the panel's.
 +    //
 +    if (nvkms_strcmp(key, "DP_ENABLE_SST_EDID_RECOVERY_FIX") == 0) {
-+        return nvkms_dp_sst_edid_recovery_fix();
++        return 1;
 +    }
 +
 +    return 0;

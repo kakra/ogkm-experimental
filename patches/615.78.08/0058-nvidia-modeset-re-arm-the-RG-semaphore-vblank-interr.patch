@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 28 Oct 2026 11:47:29 +0100
+Subject: [PATCH] nvidia-modeset: re-arm the RG semaphore vblank interrupt on
+ unchanged heads
+
+A modeset disables the RG semaphore vblank interrupt on every head
+(DisableVBlankRgSemaphoreInterruptsForModeset()), but only re-arms it in
+ApplyProposedModeSetStateOneApiHeadPreUpdate() for heads whose
+configuration changes. Heads the modeset doesn't touch return early and
+stay disabled, so nvidia-drm stops getting vblank callbacks for them:
+their DRM vblank counter and timestamp freeze while flips keep
+completing. With nvidia_drm.vblank=1, enabling HDR on one display froze
+vblank on the other, and KWin paced that display from the stale
+timestamps at about 18 fps. It only recovers when DRM turns vblank off
+and on again, which never happens while a compositor keeps flipping.
+
+Re-arm the interrupt for unchanged active heads too. It goes into the
+modeset UPDATE like for the changed heads, and the head's timings are
+unchanged, so SetupVBlankRgSemaphoreForApiHead() programs the same
+configuration as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/nvkms-modeset.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/nvidia-modeset/src/nvkms-modeset.c b/src/nvidia-modeset/src/nvkms-modeset.c
+index e385b795..e948d16e 100644
+--- a/src/nvidia-modeset/src/nvkms-modeset.c
++++ b/src/nvidia-modeset/src/nvkms-modeset.c
+@@ -3163,9 +3163,17 @@ ApplyProposedModeSetStateOneApiHeadPreUpdate(
+ 
+     /*
+      * If nothing changed about this head's configuration, then there
+-     * is nothing to do.
++     * is nothing to do, except re-arming the RG semaphore vblank interrupt:
++     * DisableVBlankRgSemaphoreInterruptsForModeset() disabled it on every
++     * head, including the ones this modeset doesn't touch, which would
++     * otherwise stop getting vblank callbacks.
+      */
+     if (!pProposedApiHead->changed) {
++        if (proposedPrimaryHead != NV_INVALID_HEAD) {
++            EnableVBlankRgSemaphoreInterruptOneApiHead(pDispEvo, apiHead,
++                                                       proposedPrimaryHead,
++                                                       updateState);
++        }
+         return;
+     }
+ 

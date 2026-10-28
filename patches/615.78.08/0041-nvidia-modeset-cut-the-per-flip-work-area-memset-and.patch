@@ -1,0 +1,202 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 10:09:40 +0100
+Subject: [PATCH] nvidia-modeset: cut the per-flip work area memset and flip
+ request vmalloc
+
+Every nvFlipEvo() call (nvidia-drm runs one for the atomic check and
+another for the commit, so two per frame) did two avoidable things:
+
+- InitNvKmsFlipWorkArea() zeroed all of struct NvKmsFlipWorkArea,
+  345,600 bytes, sized for NVKMS_MAX_SUBDEVICES (8). Only the sd[] and
+  disp[] entries below numSubDevices are ever used (flip requests are
+  validated against numSubDevices, nDispEvo == numSubDevices), i.e. 1/8
+  of it on a single GPU. In a function_graph trace (eDP-1 at 240 Hz) the
+  memset was 34 of the 67 us of nv_drm_atomic_check, ~521 times/s.
+- KAPI KmsFlip() nvKmsKapiCalloc()ed the 23 KB flip request; nvkms_alloc
+  uses vmalloc above PAGE_SIZE, so every check and commit did a
+  vmalloc + vfree (~8 us in the same trace).
+
+Zero only the used work area entries plus updateState, and give each
+KAPI device a preallocated flip request taken with a new
+nvkms_sema_trydown(); a commit on another head while it's in use falls
+back to allocating its own, so heads don't serialize on it.
+
+Measured (eDP-1 240 Hz, function_graph): check
+p50/p99 19/42 -> 13/20 us, commit 26/57 -> 20/30 us.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../nvidia-modeset/nvidia-modeset-linux.c     |  5 +++
+ .../nvidia-modeset-os-interface.h             |  2 ++
+ .../kapi/include/nvkms-kapi-internal.h        |  9 +++++
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 36 +++++++++++++++++--
+ .../include/nvidia-modeset-os-interface.h     |  2 ++
+ src/nvidia-modeset/src/nvkms-flip.c           | 13 ++++++-
+ 6 files changed, 63 insertions(+), 4 deletions(-)
+
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+index c8558efe..2a220083 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+@@ -1690,6 +1690,11 @@ void nvkms_sema_up(nvkms_sema_handle_t *sema)
+     up(&sema->os_sema);
+ }
+ 
++NvBool nvkms_sema_trydown(nvkms_sema_handle_t *sema)
++{
++    return down_trylock(&sema->os_sema) == 0;
++}
++
+ /*************************************************************************
+  * Procfs files support code.
+  *************************************************************************/
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+index 64e92e2b..a0524edc 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+@@ -388,6 +388,8 @@ nvkms_sema_handle_t*
+ void nvkms_sema_free     (nvkms_sema_handle_t *sema);
+ void nvkms_sema_down     (nvkms_sema_handle_t *sema);
+ void nvkms_sema_up       (nvkms_sema_handle_t *sema);
++/* Returns NV_TRUE if the semaphore was taken */
++NvBool nvkms_sema_trydown(nvkms_sema_handle_t *sema);
+ 
+ /*!
+  * APIs to register/unregister backlight device.
+diff --git a/src/nvidia-modeset/kapi/include/nvkms-kapi-internal.h b/src/nvidia-modeset/kapi/include/nvkms-kapi-internal.h
+index 469b916d..2d3bc33c 100644
+--- a/src/nvidia-modeset/kapi/include/nvkms-kapi-internal.h
++++ b/src/nvidia-modeset/kapi/include/nvkms-kapi-internal.h
+@@ -84,6 +84,15 @@ struct NvKmsKapiDevice {
+ 
+     nvkms_sema_handle_t *pSema;
+ 
++    /*
++     * Preallocated flip request reused by KmsFlip() (about 23 KB, which
++     * nvkms_alloc() would vmalloc on every flip validation and commit).
++     * Taken with pFlipParamsSema; commits on another head while it's in
++     * use allocate their own. NULL if it couldn't be allocated.
++     */
++    struct NvKmsFlipParams *pFlipParams;
++    nvkms_sema_handle_t *pFlipParamsSema;
++
+     /* RM handles */
+ 
+     NvU32 hRmClient;
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index c90c525c..1ee61e69 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -691,6 +691,13 @@ done:
+     return ret;
+ }
+ 
++/* KmsFlip() request: the params plus one flip head per possible head */
++static size_t KmsFlipParamsSize(void)
++{
++    return sizeof(struct NvKmsFlipParams) +
++           sizeof(struct NvKmsFlipRequestOneHead) * NVKMS_KAPI_MAX_HEADS;
++}
++
+ static void FreeDevice(struct NvKmsKapiDevice *device)
+ {
+     /* Free NVKMS objects allocated for NvKmsKapiDevice */
+@@ -709,6 +716,12 @@ static void FreeDevice(struct NvKmsKapiDevice *device)
+         nvkms_sema_free(device->pSema);
+     }
+ 
++    if (device->pFlipParamsSema != NULL) {
++        nvkms_sema_free(device->pFlipParamsSema);
++    }
++
++    nvKmsKapiFree(device->pFlipParams);
++
+     nvKmsKapiFree(device);
+ }
+ 
+@@ -1014,6 +1027,12 @@ static struct NvKmsKapiDevice* AllocateDevice
+         goto failed;
+     }
+ 
++    /* Optional: KmsFlip() allocates per call without it */
++    device->pFlipParamsSema = nvkms_sema_alloc();
++    if (device->pFlipParamsSema != NULL) {
++        device->pFlipParams = nvKmsKapiCalloc(1, KmsFlipParamsSize());
++    }
++
+     /* Raise the reference count of gpu. */
+ 
+     if (!nvkms_open_gpu(params->gpuId, NV_TRUE /* reset_aware */)) {
+@@ -3683,12 +3702,19 @@ static NvBool KmsFlip(
+     struct NvKmsFlipParams *params = NULL;
+     struct NvKmsFlipRequestOneHead *pFlipHead = NULL;
+     NvBool status = NV_TRUE;
++    NvBool preallocatedParams = NV_FALSE;
+     NvU32 i, head;
+ 
+     /* Allocate space for the params structure, plus space for each possible
+      * head. */
+-    params = nvKmsKapiCalloc(1,
+-            sizeof(*params) + sizeof(pFlipHead[0]) * NVKMS_KAPI_MAX_HEADS);
++    if (device->pFlipParams != NULL &&
++        nvkms_sema_trydown(device->pFlipParamsSema)) {
++        params = device->pFlipParams;
++        nvkms_memset(params, 0, KmsFlipParamsSize());
++        preallocatedParams = NV_TRUE;
++    } else {
++        params = nvKmsKapiCalloc(1, KmsFlipParamsSize());
++    }
+ 
+     if (params == NULL) {
+         return NV_FALSE;
+@@ -3889,7 +3915,11 @@ static NvBool KmsFlip(
+ 
+ done:
+ 
+-    nvKmsKapiFree(params);
++    if (preallocatedParams) {
++        nvkms_sema_up(device->pFlipParamsSema);
++    } else {
++        nvKmsKapiFree(params);
++    }
+ 
+     return status;
+ }
+diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+index 64e92e2b..a0524edc 100644
+--- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
++++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+@@ -388,6 +388,8 @@ nvkms_sema_handle_t*
+ void nvkms_sema_free     (nvkms_sema_handle_t *sema);
+ void nvkms_sema_down     (nvkms_sema_handle_t *sema);
+ void nvkms_sema_up       (nvkms_sema_handle_t *sema);
++/* Returns NV_TRUE if the semaphore was taken */
++NvBool nvkms_sema_trydown(nvkms_sema_handle_t *sema);
+ 
+ /*!
+  * APIs to register/unregister backlight device.
+diff --git a/src/nvidia-modeset/src/nvkms-flip.c b/src/nvidia-modeset/src/nvkms-flip.c
+index 4f1a7a7a..7b48c312 100644
+--- a/src/nvidia-modeset/src/nvkms-flip.c
++++ b/src/nvidia-modeset/src/nvkms-flip.c
+@@ -299,7 +299,18 @@ static void InitNvKmsFlipWorkArea(const NVDevEvoRec *pDevEvo,
+     const NVDispEvoRec *pDispEvo;
+     NvU32 sd, head, apiHead;
+ 
+-    nvkms_memset(pWorkArea, 0, sizeof(*pWorkArea));
++    /*
++     * The work area is sized for NVKMS_MAX_SUBDEVICES, but only the entries
++     * of existing subdevices are used (flip requests are validated against
++     * numSubDevices). Zeroing all of it costs more than the rest of a flip
++     * validation on a single GPU.
++     */
++    nvkms_memset(pWorkArea->sd, 0,
++                 sizeof(pWorkArea->sd[0]) * pDevEvo->numSubDevices);
++    nvkms_memset(pWorkArea->disp, 0,
++                 sizeof(pWorkArea->disp[0]) * pDevEvo->numSubDevices);
++    nvkms_memset(&pWorkArea->updateState, 0,
++                 sizeof(pWorkArea->updateState));
+ 
+     /*
+      * Initialize the work area. Note we take two snapshots of the

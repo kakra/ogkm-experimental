@@ -1,0 +1,143 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sun, 25 Oct 2026 12:47:19 +0100
+Subject: [PATCH] nvidia: don't tear the driver down at shutdown while
+ suspended for hibernation
+
+Since 595, nv_pci_shutdown() calls nv_pci_remove_helper(). Hibernation
+with /sys/power/disk = shutdown or reboot powers off through
+device_shutdown() while the GPU is still suspended for hibernation, and
+the teardown never finishes, so the machine never powers off:
+
+- With the PM notifier (or procfs suspend), PM_HIBERNATION_PREPARE ->
+  nv_set_system_power_state() -> nvkms_suspend(0) holds nvkms_pm_lock for
+  writing until PM_POST_HIBERNATION, which doesn't come on the power-off
+  path. nv_drm_dev_unload() -> ReleaseOwnership() ->
+  nvkms_ioctl_from_kapi() -> down_read(nvkms_pm_lock) deadlocks.
+- Without the notifier, nv_pmops_freeze() suspends the GPU and
+  nv_pmops_thaw() is a no-op, so every GSP RPC of the teardown fails with
+  NV_ERR_GPU_NOT_FULL_POWER and it spins in a TLB invalidate poll.
+
+Reported upstream (NVIDIA open-gpu-kernel-modules issue 1486, CachyOS,
+RTX 4050 Laptop, 615.78.08). Normal shutdown and platform-mode
+hibernation are not affected.
+
+Skip nv_pci_remove_helper() in nv_pci_shutdown() when a system PM
+transition entered through the notifier/procfs hasn't been resumed
+(new nv_system_pm_transition_pending(), under
+nv_system_power_state_lock) or the device has NV_FLAG_SUSPENDED, and only
+clear bus mastering, as drivers before 595 did. The GPU is already shut
+down, power is about to be cut, and resume goes through
+nv_pmops_restore().
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nv-proto.h |  1 +
+ kernel-open/nvidia/nv-pci.c       | 46 ++++++++++++++++++++++++++++---
+ kernel-open/nvidia/nv.c           | 16 +++++++++++
+ 3 files changed, 59 insertions(+), 4 deletions(-)
+
+diff --git a/kernel-open/common/inc/nv-proto.h b/kernel-open/common/inc/nv-proto.h
+index 943f3318..5b7484ba 100644
+--- a/kernel-open/common/inc/nv-proto.h
++++ b/kernel-open/common/inc/nv-proto.h
+@@ -77,6 +77,7 @@ int         nvidia_dev_unblock_gc6      (const NvU8 *, nvidia_stack_t *);
+ 
+ #if defined(CONFIG_PM)
+ NV_STATUS     nv_set_system_power_state (nv_power_state_t, nv_pm_action_depth_t);
++NvBool        nv_system_pm_transition_pending(void);
+ #endif
+ 
+ void          nvidia_modeset_suspend           (NvU32 gpuId);
+diff --git a/kernel-open/nvidia/nv-pci.c b/kernel-open/nvidia/nv-pci.c
+index 96b02f6b..29f240d8 100644
+--- a/kernel-open/nvidia/nv-pci.c
++++ b/kernel-open/nvidia/nv-pci.c
+@@ -2988,6 +2988,26 @@ nv_pci_remove(struct pci_dev *pci_dev)
+     nv_pci_remove_helper(pci_dev, true);
+ }
+ 
++static NvBool
++nv_pci_shutdown_while_suspended(nv_linux_state_t *nvl)
++{
++    NvBool suspended;
++
++#if defined(CONFIG_PM)
++    if (nv_system_pm_transition_pending())
++    {
++        return NV_TRUE;
++    }
++#endif
++
++    /* Suspended by nv_pmops_freeze() without the PM notifier */
++    down(&nvl->ldata_lock);
++    suspended = (nvl->nv_state.flags & NV_FLAG_SUSPENDED) != 0;
++    up(&nvl->ldata_lock);
++
++    return suspended;
++}
++
+ static void
+ nv_pci_shutdown(struct pci_dev *pci_dev)
+ {
+@@ -3008,11 +3028,29 @@ nv_pci_shutdown(struct pci_dev *pci_dev)
+     nv_pci_tegra_unregister_devfreq(pci_dev);
+ #endif
+ 
+-    nv_pci_remove_helper(pci_dev, false);
+-
+-    if (pci_get_drvdata(pci_dev) != NULL)
++    /*
++     * Hibernation in the shutdown and reboot modes powers off through
++     * device_shutdown() while the GPU is still suspended for hibernation:
++     * the PM notifier or procfs suspend holds nvkms_pm_lock for writing
++     * until a resume that never comes, and nv_pmops_thaw() leaves the GPU
++     * suspended. Tearing the driver down then deadlocks or waits forever on
++     * the GPU. The GPU is already shut down, power is about to be cut and
++     * resume goes through nv_pmops_restore(), so only disable bus mastering,
++     * as drivers before 595 did.
++     */
++    if (nv_pci_shutdown_while_suspended(nvl))
+     {
+-        nvl->nv_state.is_shutdown = NV_TRUE;
++        nv_printf(NV_DBG_INFO,
++                  "NVRM: GPU suspended for hibernation, skipping teardown at shutdown\n");
++    }
++    else
++    {
++        nv_pci_remove_helper(pci_dev, false);
++
++        if (pci_get_drvdata(pci_dev) != NULL)
++        {
++            nvl->nv_state.is_shutdown = NV_TRUE;
++        }
+     }
+ 
+     /* pci_clear_master is not defined for !CONFIG_PCI */
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index 12044106..0632c1ac 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -5240,6 +5240,22 @@ done:
+     return status;
+ }
+ 
++/*
++ * Whether a system suspend or hibernation entered through the PM notifier or
++ * the procfs suspend interface hasn't been resumed from yet.
++ */
++NvBool
++nv_system_pm_transition_pending(void)
++{
++    NvBool pending;
++
++    down(&nv_system_power_state_lock);
++    pending = (nv_system_power_state != NV_POWER_STATE_RUNNING);
++    up(&nv_system_power_state_lock);
++
++    return pending;
++}
++
+ int nv_pmops_suspend(
+     struct device *dev
+ )

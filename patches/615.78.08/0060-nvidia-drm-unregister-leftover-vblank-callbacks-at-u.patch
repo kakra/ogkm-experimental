@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 28 Oct 2026 14:38:07 +0100
+Subject: [PATCH] nvidia-drm: unregister leftover vblank callbacks at unload
+
+nv_drm_crtc_destroy() frees the CRTC without unregistering its NVKMS vblank
+interrupt callback; only the disable_vblank work does that. Before unload
+the callback is normally gone because the fbdev shutdown commit
+(drm_atomic_helper_shutdown) calls drm_crtc_vblank_off() for every active
+CRTC, which queues that work while the vblank worker still runs.
+
+Without fbdev (nvidia-drm.fbdev=0) there is no such commit: the CRTCs stay
+active with vblank enabled, the DRM vblank disable timer can no longer queue
+the work once nv_drm_workthread_shutdown() has run, and drm_mode_config_cleanup()
+frees the CRTCs while NVKMS still holds callbacks pointing at them. A vblank
+before nvKms->freeDevice() then runs nv_drm_crtc_vblank_callback() on freed
+memory.
+
+After stopping the vblank worker, run the disable work directly for every
+CRTC: it unregisters a callback that is still registered and completes any
+flip events waiting for a vblank. Stopping the worker first ensures no queued
+enable registers the callback again afterwards. The unregister ioctl takes
+nvkms_lock under nv_dev->lock, as declareEventInterest() already does here;
+NVKMS delivers events and vblank callbacks without taking nv_dev->lock.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-crtc.c | 13 +++++++++++++
+ kernel-open/nvidia-drm/nvidia-drm-crtc.h |  2 ++
+ kernel-open/nvidia-drm/nvidia-drm-drv.c  |  6 ++++++
+ 3 files changed, 21 insertions(+)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+index 5ef21b4c..89e87239 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -3775,6 +3775,19 @@ static void nv_drm_vblank_disable_fn(void *t)
+     mutex_unlock(&nv_crtc->vblank_q_lock);
+ }
+ 
++/*
++ * Unregister the NVKMS vblank callback if it is still registered at device
++ * teardown. Only the fbdev shutdown commit turns vblank off before unload,
++ * and once the vblank worker is stopped the disable work can't be queued
++ * anymore, so without this the callback would outlive the CRTC it points
++ * to. Call after the vblank worker is stopped and before the CRTCs are
++ * destroyed.
++ */
++void nv_drm_crtc_vblank_teardown(struct nv_drm_crtc *nv_crtc)
++{
++    nv_drm_vblank_disable_fn(nv_crtc);
++}
++
+ /*
+  * Add drm crtc for given head and supported enum NvKmsSurfaceMemoryFormats.
+  */
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.h b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
+index b3e07e24..1ae83a12 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
+@@ -397,6 +397,8 @@ bool nv_drm_crtc_defer_flip_to_pending(struct nv_drm_crtc *nv_crtc,
+ void nv_drm_crtc_set_vblank_duration(struct nv_drm_crtc *nv_crtc,
+                                      const struct drm_crtc_state *crtc_state);
+ 
++void nv_drm_crtc_vblank_teardown(struct nv_drm_crtc *nv_crtc);
++
+ /*
+  * CRTCs are static objects, list does not change once after initialization and
+  * before teardown of device. Initialization/teardown paths are single
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index 932e625e..d50a29f7 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -983,7 +983,13 @@ static void nv_drm_dev_unload(struct drm_device *dev)
+     drm_kms_helper_poll_fini(dev);
+ 
+     if (nv_drm_vblank_module_param) {
++        struct drm_crtc *crtc;
++
+         nv_drm_workthread_shutdown(&nv_dev->vblank_worker);
++
++        nv_drm_for_each_crtc(crtc, dev) {
++            nv_drm_crtc_vblank_teardown(to_nv_crtc(crtc));
++        }
+     }
+ 
+     nv_drm_held_fbs_fini(nv_dev);

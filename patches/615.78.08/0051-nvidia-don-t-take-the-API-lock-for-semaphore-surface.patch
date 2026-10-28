@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 13:04:19 +0100
+Subject: [PATCH] nvidia: don't take the API lock for semaphore surface
+ UNREGISTER_WAITER
+
+NV_SEMAPHORE_SURFACE_CTRL_CMD_UNREGISTER_WAITER is exported with
+API_LOCK_READONLY, while its counterpart REGISTER_WAITER is NO_API_LOCK.
+nvidia-drm calls it through KAPI when it re-arms a semaphore surface fence
+callback (DRM_NVIDIA_SEMSURF_FENCE_CREATE, from the compositor's main thread
+for explicit-sync client buffers), so it waits for every API lock writer.
+Measured with a CUDA client (nvidia-vaapi-driver under ffmpeg) starting and
+exiting: KWin's main thread blocked in the ioctl up to 16.8 ms, 53 ms total
+over 6 cycles, behind UVM_REGISTER/UNREGISTER_CHANNEL and RM frees holding
+the API lock for write.
+
+Like REGISTER_WAITER, UNREGISTER_WAITER only touches the semaphore surface's
+shared waiter map under its spinlock; the surface itself is protected by the
+client lock, which is still taken. The notifier walk detaches signaled waiters
+under the same spinlock before delivering them, so an unregister racing with
+it just doesn't find the waiter and fails, which KAPI already handles (it
+then leaves the callback to run). Export it with the same flags as
+REGISTER_WAITER (NO_API_LOCK | NON_PRIVILEGED | NO_GPUS_LOCK); the
+NO_API_LOCK path in _rmapiRmControl also skips the GPU access reference.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/generated/g_sem_surf_nvoc.c | 10 +++++-----
+ src/nvidia/src/kernel/rmapi/control.c  |  8 ++++----
+ 2 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/src/nvidia/generated/g_sem_surf_nvoc.c b/src/nvidia/generated/g_sem_surf_nvoc.c
+index e18191a4..02866b1f 100644
+--- a/src/nvidia/generated/g_sem_surf_nvoc.c
++++ b/src/nvidia/generated/g_sem_surf_nvoc.c
+@@ -157,11 +157,11 @@ static NV_STATUS semsurfCtrlCmdSetValue__EXPORT(void *pSemaphoreSurf, void *pPar
+ }
+ #endif // !NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x00000109u)
+ 
+-#if !NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x00000109u)
++#if !NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x00400009u)
+ static NV_STATUS semsurfCtrlCmdUnregisterWaiter__EXPORT(void *pSemaphoreSurf, void *pParams) {
+     return semsurfCtrlCmdUnregisterWaiter_IMPL(pSemaphoreSurf, pParams);
+ }
+-#endif // !NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x00000109u)
++#endif // !NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x00400009u)
+ 
+ // Exported method array
+ static const struct NVOC_EXPORTED_METHOD_DEF __nvoc_exported_method_def_SemaphoreSurface[] = 
+@@ -227,12 +227,12 @@ static const struct NVOC_EXPORTED_METHOD_DEF __nvoc_exported_method_def_Semaphor
+ #endif
+     },
+     {               /*  [4] */
+-#if NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x109u)
++#if NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x400009u)
+         /*pFunc=*/      (void (*)(void)) NULL,
+ #else
+         /*pFunc=*/      (void (*)(void)) &semsurfCtrlCmdUnregisterWaiter__EXPORT,
+-#endif // NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x109u)
+-        /*flags=*/      0x109u,
++#endif // NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x400009u)
++        /*flags=*/      0x400009u,
+         /*accessRight=*/0x0u,
+         /*methodId=*/   0xda0005u,
+         /*paramSize=*/  sizeof(NV_SEMAPHORE_SURFACE_CTRL_UNREGISTER_WAITER_PARAMS),
+diff --git a/src/nvidia/src/kernel/rmapi/control.c b/src/nvidia/src/kernel/rmapi/control.c
+index 2305cded..852ef571 100644
+--- a/src/nvidia/src/kernel/rmapi/control.c
++++ b/src/nvidia/src/kernel/rmapi/control.c
+@@ -600,10 +600,10 @@ _rmapiRmControl(NvHandle hClient, NvHandle hObject, NvU32 cmd, NvP64 pUserParams
+         // With dynamic power management, rmapiPrologue() and rmapiEpilogue()
+         // take the API lock (READ) to reference/unreference the GPUs, so even
+         // a NO_API_LOCK control waits for every API lock writer (e.g. another
+-        // process freeing a device, tens of ms). The only NO_API_LOCK control,
+-        // the semaphore surface REGISTER_WAITER, works on sysmem semaphores and
+-        // CPU-side waiter lists and doesn't need the GPU awake: skip the
+-        // reference for it.
++        // process freeing a device, tens of ms). The only NO_API_LOCK controls,
++        // the semaphore surface REGISTER_WAITER and UNREGISTER_WAITER, work on
++        // sysmem semaphores and CPU-side waiter lists and don't need the GPU
++        // awake: skip the reference for them.
+         //
+         const NvBool bSkipGpuAccessRef = (getCtrlInfoStatus == NV_OK) &&
+                                          ((ctrlFlags & RMCTRL_FLAGS_NO_API_LOCK) != 0);

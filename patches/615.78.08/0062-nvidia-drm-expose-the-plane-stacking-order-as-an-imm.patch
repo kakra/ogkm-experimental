@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 28 Oct 2026 16:20:21 +0100
+Subject: [PATCH] nvidia-drm: expose the plane stacking order as an immutable
+ zpos
+
+Compositors read the plane zpos property to know which planes are above
+which. KWin uses it to order its output layers; without it, it has to
+assume an order for the overlay planes.
+
+NVKMS stacks the layers of a head in a fixed order: the main layer is at
+the bottom (the hardware requires it to have the greatest composition
+depth), each overlay layer is above the lower-numbered ones (the default
+depth NVKMS_MAX_LAYERS_PER_HEAD - layer, which nvidia-drm never sets
+explicitly), and the cursor is above all layers.
+
+Add an immutable zpos to every plane describing exactly that: the layer
+index for the primary and overlay planes, and the number of layers of the
+head for the cursor plane. A conftest checks for
+drm_plane_create_zpos_immutable_property().
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/conftest.sh                      | 17 +++++++++++++++++
+ kernel-open/nvidia-drm/nvidia-drm-crtc.c     | 13 +++++++++++++
+ kernel-open/nvidia-drm/nvidia-drm-sources.mk |  1 +
+ 3 files changed, 31 insertions(+)
+
+diff --git a/kernel-open/conftest.sh b/kernel-open/conftest.sh
+index 94ea0f82..d913c48c 100755
+--- a/kernel-open/conftest.sh
++++ b/kernel-open/conftest.sh
+@@ -1695,6 +1695,23 @@ compile_test() {
+             compile_check_conftest "$CODE" "NV_DRM_PLANE_CREATE_COLOR_PROPERTIES_PRESENT" "" "functions"
+         ;;
+ 
++        drm_plane_create_zpos_immutable_property)
++            #
++            # Determine if the function drm_plane_create_zpos_immutable_property()
++            # is present.
++            #
++            # Added by commit 44d1240d006c ("drm: add generic zpos property")
++            # in v4.9.
++            #
++            CODE="
++            #include <drm/drm_blend.h>
++            void conftest_drm_plane_create_zpos_immutable_property(void) {
++                drm_plane_create_zpos_immutable_property();
++            }"
++
++            compile_check_conftest "$CODE" "NV_DRM_PLANE_CREATE_ZPOS_IMMUTABLE_PROPERTY_PRESENT" "" "functions"
++        ;;
++
+         drm_format_info_has_is_yuv)
+             #
+             # Determine if struct drm_format_info has .is_yuv member.
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+index 89e87239..1a197318 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -3243,6 +3243,19 @@ nv_drm_plane_create(struct drm_device *dev,
+             plane,
+             validLayerRRTransforms);
+ 
++#if defined(NV_DRM_PLANE_CREATE_ZPOS_IMMUTABLE_PROPERTY_PRESENT)
++    /*
++     * NVKMS stacks the layers of a head in a fixed order: the main layer at
++     * the bottom, each higher layer index above the lower ones (the default
++     * composition depth NVKMS_MAX_LAYERS_PER_HEAD - layer, which nvidia-drm
++     * never overrides), and the cursor above all layers.
++     */
++    drm_plane_create_zpos_immutable_property(
++        plane,
++        (plane_type == DRM_PLANE_TYPE_CURSOR) ?
++            pResInfo->numLayers[head] : layer_idx);
++#endif
++
+ #if defined(NV_DRM_PLANE_ADD_SIZE_HINTS_PROPERTY_PRESENT)
+     if (plane_type == DRM_PLANE_TYPE_CURSOR) {
+         __nv_drm_cursor_plane_create_size_hints_property(nv_dev, plane, pResInfo);
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-sources.mk b/kernel-open/nvidia-drm/nvidia-drm-sources.mk
+index a0409798..04e98c38 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-sources.mk
++++ b/kernel-open/nvidia-drm/nvidia-drm-sources.mk
+@@ -63,6 +63,7 @@ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_fbdev_ttm_setup
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_client_setup
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_connector_attach_hdr_output_metadata_property
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_plane_create_color_properties
++NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_plane_create_zpos_immutable_property
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_atomic_helper_legacy_gamma_set
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += vmf_insert_mixed
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_gem_prime_mmap

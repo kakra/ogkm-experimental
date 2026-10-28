@@ -1,0 +1,182 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Saeid Nourian <president@runiter.com>
+Date: Sun, 25 Oct 2026 13:14:37 +0100
+Subject: [PATCH] nvkms: don't hang the display when the DIFR prefetch GPFIFO
+ fills up
+
+Upstream PR 1286 (Saeid Nourian), both commits squashed. Not merged
+upstream: NVIDIA's own fix in 595.99.02 / 615.71.09 (free DIFR state on
+suspend, reallocate on resume) only covers hangs after resume. A 615.78.08
+ThinkPad P1 Gen 6 (RTX 4090 Laptop, external monitor on the dGPU) still
+hung hours after its last resume: nvidia-modeset kthread spinning in
+nvWriteGpEntry() <- PrefetchHelperSurfaceEvo() <- nvDIFRPrefetchSurfaces(),
+holding the NVKMS lock, display frozen, no lockup warning.
+
+nvidia-push: bound the wait for a free GPFIFO entry
+
+nvWriteGpEntry() waits for the GPU to consume a GPFIFO entry in a loop
+whose only exit is nvPushCheckChannelError(), which reports an error only
+once RM has written 0xFFFF into the channel's error notifier. A channel
+that stalls without faulting leaves the notifier clean, so the loop never
+terminates; it is a busy spin with no yield. Give it a deadline using the
+same idiom as IdleChannel(), honouring the existing noTimeout opt-out, and
+yield between polls as the notifier wait already does. On expiry return
+FALSE, which Kickoff() already handles by leaving putOffset unchanged.
+
+nvkms-difr: reset the prefetch channel after a CE fault
+
+When PrefetchSingleSurface() gives up waiting for the prefetch semaphore
+it returns FAIL_CE_HW_ERROR, but the GPFIFO entries it already wrote stay
+queued on a channel the copy engine never drained, so the channel
+permanently loses one kickoff's worth of its ring. The DIFR channel's
+pushbuffer is 1024 bytes, giving only 16 GPFIFO entries, so a handful of
+such faults exhausts it. Reset the channel on that status. If it cannot be
+reallocated, report FAIL_INSUFFICIENT_L2_SIZE from then on, which stops RM
+requesting further prefetches.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/unix/nvidia-push/src/nvidia-push.c | 25 ++++++++-
+ src/nvidia-modeset/src/nvkms-difr.c           | 54 +++++++++++++++++++
+ 2 files changed, 77 insertions(+), 2 deletions(-)
+
+diff --git a/src/common/unix/nvidia-push/src/nvidia-push.c b/src/common/unix/nvidia-push/src/nvidia-push.c
+index df58d210..346eb66d 100644
+--- a/src/common/unix/nvidia-push/src/nvidia-push.c
++++ b/src/common/unix/nvidia-push/src/nvidia-push.c
+@@ -349,6 +349,7 @@ static NvBool nvWriteGpEntry(
+     NvU32 *gpPointer;
+     const NvU32 entriesNeeded = NV_PUSH_NUM_GPFIFO_ENTRIES_PER_KICKOFF;
+     NvPushDevicePtr pDevice = push_buffer->pDevice;
++    NvU64 baseTime, currentTime;
+ 
+     FillGpEntry(&push_buffer->main, putOffset, &gpEntry0, &gpEntry1);
+ 
+@@ -358,12 +359,32 @@ static NvBool nvWriteGpEntry(
+ 
+     nvAssert((nextGpPut % 2) == 0);
+ 
+-    // Wait for a free entry in the buffer
+-    while (nextGpPut == ReadGpGetOffset(push_buffer)) {
++    /*
++     * Wait for a free entry in the buffer.
++     *
++     * Bail out if the channel faults, but also if GET simply stops
++     * advancing: a channel that is never serviced does not necessarily
++     * raise an error notifier, and without a deadline this loop would spin
++     * in kernel context indefinitely.
++     */
++    for (baseTime = currentTime = nvPushImportGetMilliSeconds(pDevice);
++         nextGpPut == ReadGpGetOffset(push_buffer);
++         currentTime = nvPushImportGetMilliSeconds(pDevice)) {
++
+         if (nvPushCheckChannelError(push_buffer)) {
+             nvAssert(!"A channel error occurred in nvWriteGpEntry()");
+             return FALSE;
+         }
++
++        if (!push_buffer->noTimeout &&
++            (currentTime > (baseTime + NV_PUSH_NOTIFIER_SHORT_TIMEOUT))) {
++            nvPushImportLogError(pDevice,
++                "Timed out waiting for a free GPFIFO entry.");
++            nvAssert(!"Timed out waiting for a free GPFIFO entry");
++            return FALSE;
++        }
++
++        nvPushImportYield(pDevice);
+     }
+     gpPointer[0] = gpEntry0;
+     gpPointer[1] = gpEntry1;
+diff --git a/src/nvidia-modeset/src/nvkms-difr.c b/src/nvidia-modeset/src/nvkms-difr.c
+index 3dd81a1f..6fadbebd 100644
+--- a/src/nvidia-modeset/src/nvkms-difr.c
++++ b/src/nvidia-modeset/src/nvkms-difr.c
+@@ -145,6 +145,9 @@ typedef struct _NVDIFRStateEvoRec {
+     /* Copy engine instance for DIFR prefetches. */
+     NvU32 prefetchEngine;
+ 
++    /* Set if the prefetch channel could not be reallocated after a fault. */
++    NvBool channelBroken;
++
+     /* For tracking which surfaces have been prefetched already. */
+     NvU32 prefetchPass;
+ } NVDIFRStateEvoRec;
+@@ -163,6 +166,7 @@ static NvBool AllocDIFRPushChannel(NVDIFRStateEvoPtr pDifr);
+ static void FreeDIFRPushChannel(NVDIFRStateEvoPtr pDifr);
+ static NvBool AllocDIFRCopyEngine(NVDIFRStateEvoPtr pDifr);
+ static void FreeDIFRCopyEngine(NVDIFRStateEvoPtr pDifr);
++static NvBool ResetDIFRPushChannel(NVDIFRStateEvoPtr pDifr);
+ 
+ static NvU32 PrefetchSingleSurface(NVDIFRStateEvoPtr pDifr,
+                                    NVDIFRPrefetchParams *pParams,
+@@ -299,6 +303,15 @@ NvU32 nvDIFRPrefetchSurfaces(NVDIFRStateEvoPtr pDifr, size_t l2CacheSize)
+         return NV2080_CTRL_LPWR_DIFR_PREFETCH_FAIL_OS_FLIPS_ENABLED;
+     }
+ 
++    /*
++     * We no longer have a usable prefetch channel. As above, despite its
++     * wording this is the code that tells RM (and further PMU) to stop
++     * requesting prefetches until the next modeset.
++     */
++    if (pDifr->channelBroken) {
++        return NV2080_CTRL_LPWR_DIFR_PREFETCH_FAIL_INSUFFICIENT_L2_SIZE;
++    }
++
+     status = NV2080_CTRL_LPWR_DIFR_PREFETCH_SUCCESS;
+ 
+     pSubDev = &pDevEvo->gpus[0];
+@@ -373,6 +386,22 @@ NvU32 nvDIFRPrefetchSurfaces(NVDIFRStateEvoPtr pDifr, size_t l2CacheSize)
+     }
+ 
+ out:
++    /*
++     * A CE error means we kicked off a prefetch that was never consumed,
++     * leaving GPFIFO entries queued on the channel for good. Reset the
++     * channel so that the failure doesn't cost us ring space permanently:
++     * otherwise repeated failures eventually exhaust the GPFIFO and the
++     * next kickoff has nothing left to wait for.
++     */
++    if (status == NV2080_CTRL_LPWR_DIFR_PREFETCH_FAIL_CE_HW_ERROR) {
++        if (!ResetDIFRPushChannel(pDifr)) {
++            pDifr->channelBroken = TRUE;
++
++            nvEvoLogDev(pDevEvo, EVO_LOG_WARN,
++                        "Failed to reset the DIFR prefetch channel.");
++        }
++    }
++
+     return status;
+ }
+ 
+@@ -438,6 +467,31 @@ static NvBool AllocDIFRPushChannel(NVDIFRStateEvoPtr pDifr)
+     return TRUE;
+ }
+ 
++/*
++ * Tear down and reallocate the prefetch channel.
++ *
++ * A prefetch that fails with a CE error has already written GPFIFO entries
++ * that the copy engine never consumed. Nothing else reclaims them, so GET
++ * stays where it is and the channel permanently loses that much of its
++ * (small) GPFIFO ring. Reallocating the channel puts GET and PUT back in
++ * sync so a later prefetch can start from a clean slate.
++ */
++static NvBool ResetDIFRPushChannel(NVDIFRStateEvoPtr pDifr)
++{
++    FreeDIFRCopyEngine(pDifr);
++    FreeDIFRPushChannel(pDifr);
++
++    if (!AllocDIFRPushChannel(pDifr) ||
++        !AllocDIFRCopyEngine(pDifr)) {
++        FreeDIFRCopyEngine(pDifr);
++        FreeDIFRPushChannel(pDifr);
++
++        return FALSE;
++    }
++
++    return TRUE;
++}
++
+ static void FreeDIFRPushChannel(NVDIFRStateEvoPtr pDifr)
+ {
+     NVDevEvoPtr pDevEvo = pDifr->pDevEvo;

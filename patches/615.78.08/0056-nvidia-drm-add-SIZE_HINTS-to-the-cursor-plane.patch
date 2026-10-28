@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 28 Oct 2026 09:47:05 +0100
+Subject: [PATCH] nvidia-drm: add SIZE_HINTS to the cursor plane
+
+The cursor only takes square 32, 64, 128 and 256 pixel images, but the
+only size compositors could learn was DRM_CAP_CURSOR_WIDTH/HEIGHT, the
+maximum. KWin, for example, then uses a 256x256 buffer for every cursor
+image and copies all 256 KiB into a dumb buffer on each cursor change.
+
+Attach the SIZE_HINTS plane property to the cursor plane with the
+supported sizes up to the maximum, smallest first, so compositors pick
+the smallest size that fits, usually 64x64 (16 KiB).
+
+32x32 is listed only when framebuffer pitches are 256 byte aligned,
+because the hardware reads a 32x32 image with a 256 byte pitch. That's
+the alignment nvidia-drm uses for dumb buffers whenever a display is
+present.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/conftest.sh                      | 14 +++++++
+ kernel-open/nvidia-drm/nvidia-drm-crtc.c     | 44 ++++++++++++++++++++
+ kernel-open/nvidia-drm/nvidia-drm-sources.mk |  1 +
+ 3 files changed, 59 insertions(+)
+
+diff --git a/kernel-open/conftest.sh b/kernel-open/conftest.sh
+index c863ca13..94ea0f82 100755
+--- a/kernel-open/conftest.sh
++++ b/kernel-open/conftest.sh
+@@ -1493,6 +1493,20 @@ compile_test() {
+             compile_check_conftest "$CODE" "NV_DRM_HDCP_UPDATE_CONTENT_PROTECTION_PRESENT" "" "functions"
+         ;;
+ 
++        drm_plane_add_size_hints_property)
++            #
++            # Determine if drm_plane_add_size_hints_property() is present.
++            #
++            # Added with the plane SIZE_HINTS property.
++            #
++            CODE="
++            #include <drm/drm_plane.h>
++            void conftest_drm_plane_add_size_hints_property(void) {
++                drm_plane_add_size_hints_property();
++            }"
++            compile_check_conftest "$CODE" "NV_DRM_PLANE_ADD_SIZE_HINTS_PROPERTY_PRESENT" "" "functions"
++        ;;
++
+         pde_data)
+             #
+             # Determine if the pde_data() function is present.
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+index edf0602f..5d1b1067 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -3080,6 +3080,44 @@ __nv_drm_plane_create_rotation_property(struct drm_plane *plane,
+     }
+ }
+ 
++#if defined(NV_DRM_PLANE_ADD_SIZE_HINTS_PROPERTY_PRESENT)
++/*
++ * The cursor only takes square 32, 64, 128 and 256 pixel images (see
++ * nvEvoGetHeadSetControlCursorValueC3). List them smallest first, so
++ * compositors use the smallest buffer that fits instead of always the
++ * maximum from DRM_CAP_CURSOR_WIDTH.
++ */
++static void
++__nv_drm_cursor_plane_create_size_hints_property(
++    struct nv_drm_device *nv_dev,
++    struct drm_plane *plane,
++    const struct NvKmsKapiDeviceResourcesInfo *pResInfo)
++{
++    struct drm_plane_size_hint hints[4];
++    int num_hints = 0;
++    NvU32 size;
++
++    for (size = 32; size <= pResInfo->caps.maxCursorSizeInPixels; size *= 2) {
++        /* The hardware reads a 32x32 image with a 256 byte pitch */
++        if ((size == 32) && (nv_dev->pitchAlignment < 256)) {
++            continue;
++        }
++
++        if (WARN_ON(num_hints >= ARRAY_SIZE(hints))) {
++            break;
++        }
++
++        hints[num_hints].width = size;
++        hints[num_hints].height = size;
++        num_hints++;
++    }
++
++    if (num_hints > 0) {
++        drm_plane_add_size_hints_property(plane, hints, num_hints);
++    }
++}
++#endif
++
+ static struct drm_plane*
+ nv_drm_plane_create(struct drm_device *dev,
+                     enum drm_plane_type plane_type,
+@@ -3199,6 +3237,12 @@ nv_drm_plane_create(struct drm_device *dev,
+             plane,
+             validLayerRRTransforms);
+ 
++#if defined(NV_DRM_PLANE_ADD_SIZE_HINTS_PROPERTY_PRESENT)
++    if (plane_type == DRM_PLANE_TYPE_CURSOR) {
++        __nv_drm_cursor_plane_create_size_hints_property(nv_dev, plane, pResInfo);
++    }
++#endif
++
+     nv_drm_free(formats);
+ 
+     return plane;
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-sources.mk b/kernel-open/nvidia-drm/nvidia-drm-sources.mk
+index 061d6919..a0409798 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-sources.mk
++++ b/kernel-open/nvidia-drm/nvidia-drm-sources.mk
+@@ -70,6 +70,7 @@ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_sysfs_connector_property_event
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_sysfs_connector_status_event
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_connector_attach_content_protection_property
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_hdcp_update_content_protection
++NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_plane_add_size_hints_property
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += pfn_is_map_memory
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += vm_flags_set
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += dma_fence_chain_alloc

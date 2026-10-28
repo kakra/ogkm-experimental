@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sun, 25 Oct 2026 09:00:09 +0100
+Subject: [PATCH] bus: don't free a caller-owned range array on static BAR1
+ fallback
+
+kbusGetStaticFbAperture_TU102() frees pMemArea->pRanges whenever
+kbusIncreaseStaticBar1Refcount() fails, including the NV_ERR_IN_USE and
+NV_ERR_NOT_SUPPORTED cases that just fall back to a dynamic mapping. With
+BUS_MAP_FB_FLAGS_UNMANAGED_MEM_AREA the array is not allocated here: it
+belongs to the caller, and kbusMapFbApertureSingle() passes a MemoryRange on
+its stack. A kernel-internal BAR1 mapping (memdescMap, context DMA, kernel
+mappings of virtual memory, USERD) of FB memory with a non-default kind and
+sub-2MB pages, a CPU-cached memdesc, or a kind that conflicts with an existing
+static reference therefore frees a stack address and then continues with the
+dynamic mapping into that same array.
+
+Only free the array when this function allocated it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../gpu/bus/arch/turing/kern_bus_tu102.c      | 24 +++++++++++++------
+ 1 file changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/src/nvidia/src/kernel/gpu/bus/arch/turing/kern_bus_tu102.c b/src/nvidia/src/kernel/gpu/bus/arch/turing/kern_bus_tu102.c
+index da0700c3..61bc4302 100644
+--- a/src/nvidia/src/kernel/gpu/bus/arch/turing/kern_bus_tu102.c
++++ b/src/nvidia/src/kernel/gpu/bus/arch/turing/kern_bus_tu102.c
+@@ -1189,18 +1189,28 @@ kbusGetStaticFbAperture_TU102
+ 
+     status = kbusIncreaseStaticBar1Refcount_HAL(pGpu, pKernelBus, pMemDesc, busMapFlags);
+ 
+-    if (status == NV_ERR_IN_USE || status == NV_ERR_NOT_SUPPORTED)
++    if (status != NV_OK)
+     {
++        //
++        // An unmanaged range array belongs to the caller (it is on the
++        // stack in kbusMapFbApertureSingle), only free what was allocated
++        // above.
++        //
++        if (!bUnmanagedRange)
++        {
++            portMemFree(pMemArea->pRanges);
++            pMemArea->pRanges = NULL;
++        }
++
+         //
+         // This mapping is already in use or not supported,
+         // and we need to make a dynamic mapping instead
+         //
+-        portMemFree(pMemArea->pRanges);
+-        return NV_ERR_NOT_SUPPORTED;
+-    }
+-    else if (status != NV_OK)
+-    {
+-        portMemFree(pMemArea->pRanges);
++        if (status == NV_ERR_IN_USE || status == NV_ERR_NOT_SUPPORTED)
++        {
++            return NV_ERR_NOT_SUPPORTED;
++        }
++
+         return status;
+     }
+ 

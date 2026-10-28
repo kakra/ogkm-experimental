@@ -42,13 +42,13 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
  7 files changed, 21 insertions(+), 3 deletions(-)
 
 diff --git a/kernel-open/common/inc/nv-linux.h b/kernel-open/common/inc/nv-linux.h
-index e4471f38..7775911e 100644
+index ca4dbdae..d68095a8 100644
 --- a/kernel-open/common/inc/nv-linux.h
 +++ b/kernel-open/common/inc/nv-linux.h
-@@ -930,6 +930,7 @@ typedef struct nv_alloc_s {
+@@ -947,6 +947,7 @@ typedef struct nv_alloc_s {
+         NvBool coherent    : 1;
          NvBool carveout    : 1;
          NvBool pool        : 1;
-         NvBool memtype_set : 1;
 +        NvBool fail_fast   : 1;
      } flags;
      unsigned int   cache_type;
@@ -67,10 +67,10 @@ index 2731195b..566933c3 100644
  
  NV_STATUS  NV_API_CALL  nv_register_user_pages   (nv_state_t *, NvU64, NvU64 *, void *, void **, NvBool);
 diff --git a/kernel-open/nvidia/nv-vm.c b/kernel-open/nvidia/nv-vm.c
-index c4ec2bdc..a00170c8 100644
+index 2f0043ee..f1902973 100644
 --- a/kernel-open/nvidia/nv-vm.c
 +++ b/kernel-open/nvidia/nv-vm.c
-@@ -282,7 +282,14 @@ static unsigned int nv_compute_gfp_mask(
+@@ -310,7 +310,14 @@ static unsigned int nv_compute_gfp_mask(
          }
      }
  
@@ -87,10 +87,10 @@ index c4ec2bdc..a00170c8 100644
      /*
       * __GFP_ACCOUNT is used to track/account for allocations with cgroups. The first attempt
 diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
-index 12044106..3439d0cb 100644
+index ae29b047..bc1adcad 100644
 --- a/kernel-open/nvidia/nv.c
 +++ b/kernel-open/nvidia/nv.c
-@@ -4103,6 +4103,7 @@ NV_STATUS NV_API_CALL nv_alloc_pages(
+@@ -4145,6 +4145,7 @@ NV_STATUS NV_API_CALL nv_alloc_pages(
      NvU32       cache_type,
      NvBool      zeroed,
      NvBool      unencrypted,
@@ -98,7 +98,7 @@ index 12044106..3439d0cb 100644
      NvS32       node_id,
      NvU64      *pte_array,
      void      **priv_data
-@@ -4149,6 +4150,8 @@ NV_STATUS NV_API_CALL nv_alloc_pages(
+@@ -4191,6 +4192,8 @@ NV_STATUS NV_API_CALL nv_alloc_pages(
  #endif
      if (unencrypted)
          at->flags.unencrypted = NV_TRUE;

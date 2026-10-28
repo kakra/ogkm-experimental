@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tom Englund <tomenglund26@gmail.com>
-Date: Tue, 20 Oct 2026 19:01:37 +0200
+Date: Mon, 26 Oct 2026 10:04:49 +0100
 Subject: [PATCH] nvidia: also clear RG_SEM_SKIPPED without an RG semaphore
  interrupt
 
@@ -20,51 +20,35 @@ lock held and are skipped while the GPU isn't at full power. Reads of
 0xffffffff or a 0xbadXXXXX PRI error are ignored. The log line now says
 which path cleared the event.
 
-nvidia.clear_rg_sem_skipped=0 still disables all of it.
-
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  kernel-open/common/inc/os-interface.h         |  2 +-
- kernel-open/nvidia/os-interface.c             | 12 ++-
+ kernel-open/nvidia/os-interface.c             |  5 +-
  .../arch/nvalloc/unix/include/os-interface.h  |  2 +-
  .../gpu/disp/head/arch/v04/kernel_head_0401.c | 61 ------------
  src/nvidia/src/kernel/gpu/disp/kern_disp.c    | 98 +++++++++++++++++++
- 5 files changed, 107 insertions(+), 68 deletions(-)
+ 5 files changed, 103 insertions(+), 65 deletions(-)
 
 diff --git a/kernel-open/common/inc/os-interface.h b/kernel-open/common/inc/os-interface.h
-index 8b3190f3..a4e5d944 100644
+index 9d099eb3..560fc332 100644
 --- a/kernel-open/common/inc/os-interface.h
 +++ b/kernel-open/common/inc/os-interface.h
-@@ -173,7 +173,7 @@ NvBool      NV_API_CALL  os_lockless_ctrl_no_power_ref    (void);
- NvBool      NV_API_CALL  os_readonly_get_surface_info     (void);
- NvBool      NV_API_CALL  os_async_perf_boost              (void);
- NvBool      NV_API_CALL  os_clear_rg_sem_skipped          (void);
+@@ -169,7 +169,7 @@ void        NV_API_CALL  os_dump_stack                    (void);
+ NvBool      NV_API_CALL  os_is_efi_enabled                (void);
+ NvBool      NV_API_CALL  os_is_xen_dom0                   (void);
+ NvBool      NV_API_CALL  os_is_vgx_hyper                  (void);
 -void        NV_API_CALL  os_log_rg_sem_skipped            (NvU32);
 +void        NV_API_CALL  os_log_rg_sem_skipped            (NvU32, NvBool);
  NV_STATUS   NV_API_CALL  os_inject_vgx_msi                (NvU16, NvU64, NvU32);
  NvBool      NV_API_CALL  os_is_grid_supported             (void);
  NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
 diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
-index 93de5b69..b499df6e 100644
+index f5dfd22a..e608f4a5 100644
 --- a/kernel-open/nvidia/os-interface.c
 +++ b/kernel-open/nvidia/os-interface.c
-@@ -1559,9 +1559,10 @@ NvBool NV_API_CALL os_async_perf_boost(void)
- static bool clear_rg_sem_skipped = true;
- module_param(clear_rg_sem_skipped, bool, 0644);
- MODULE_PARM_DESC(clear_rg_sem_skipped,
--                 "Clear the display RG_SEM_SKIPPED error event from the CPU on RG semaphore "
--                 "interrupts. GSP-RM never clears it, so its interrupt stays pending and keeps "
--                 "the GSP busy (and the GPU clocks at max) until the next suspend/resume.");
-+                 "Clear the display RG_SEM_SKIPPED error event from the CPU on display "
-+                 "interrupts and once a second. GSP-RM never clears it, so its interrupt stays "
-+                 "pending and keeps the GSP busy (and the GPU clocks at max) until the next "
-+                 "suspend/resume.");
+@@ -1525,12 +1525,13 @@ NvBool NV_API_CALL os_is_vgx_hyper(void)
  
  static atomic_t rg_sem_skipped_count = ATOMIC_INIT(0);
- 
-@@ -1570,12 +1571,13 @@ NvBool NV_API_CALL os_clear_rg_sem_skipped(void)
-     return READ_ONCE(clear_rg_sem_skipped);
- }
  
 -void NV_API_CALL os_log_rg_sem_skipped(NvU32 headMask)
 +void NV_API_CALL os_log_rg_sem_skipped(NvU32 headMask, NvBool bPeriodic)
@@ -79,27 +63,27 @@ index 93de5b69..b499df6e 100644
  
  NV_STATUS NV_API_CALL os_inject_vgx_msi(NvU16 guestID, NvU64 msiAddr, NvU32 msiData)
 diff --git a/src/nvidia/arch/nvalloc/unix/include/os-interface.h b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
-index 1f89ed65..d4ffefc7 100644
+index 1b773515..7bf731f1 100644
 --- a/src/nvidia/arch/nvalloc/unix/include/os-interface.h
 +++ b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
-@@ -169,7 +169,7 @@ NvBool      NV_API_CALL  os_lockless_ctrl_no_power_ref    (void);
- NvBool      NV_API_CALL  os_readonly_get_surface_info     (void);
- NvBool      NV_API_CALL  os_async_perf_boost              (void);
- NvBool      NV_API_CALL  os_clear_rg_sem_skipped          (void);
+@@ -165,7 +165,7 @@ void        NV_API_CALL  os_dump_stack                    (void);
+ NvBool      NV_API_CALL  os_is_efi_enabled                (void);
+ NvBool      NV_API_CALL  os_is_xen_dom0                   (void);
+ NvBool      NV_API_CALL  os_is_vgx_hyper                  (void);
 -void        NV_API_CALL  os_log_rg_sem_skipped            (NvU32);
 +void        NV_API_CALL  os_log_rg_sem_skipped            (NvU32, NvBool);
  NV_STATUS   NV_API_CALL  os_inject_vgx_msi                (NvU16, NvU64, NvU32);
  NvBool      NV_API_CALL  os_is_grid_supported             (void);
  NvU32       NV_API_CALL  os_get_grid_csp_support          (void);
 diff --git a/src/nvidia/src/kernel/gpu/disp/head/arch/v04/kernel_head_0401.c b/src/nvidia/src/kernel/gpu/disp/head/arch/v04/kernel_head_0401.c
-index c121468b..32b3d07d 100644
+index 6b12034e..32b3d07d 100644
 --- a/src/nvidia/src/kernel/gpu/disp/head/arch/v04/kernel_head_0401.c
 +++ b/src/nvidia/src/kernel/gpu/disp/head/arch/v04/kernel_head_0401.c
 @@ -38,19 +38,6 @@
  #include "ctrl/ctrlc370/ctrlc370event.h"
  #include "gpu/disp/kern_disp.h"
  #include "gpu/disp/head/kernel_head.h"
--#include "os-interface.h" // os_clear_rg_sem_skipped, os_log_rg_sem_skipped
+-#include "os-interface.h" // os_log_rg_sem_skipped
 -
 -/* From the v04_01/v04_02 display manuals; not in the published v04_01 excerpt. */
 -#ifndef NV_PDISP_FE_EVT_STAT_ERROR_DISP
@@ -140,7 +124,7 @@ index c121468b..32b3d07d 100644
 -{
 -    NvU32 errDisp, head, headMask = 0;
 -
--    if (!os_clear_rg_sem_skipped() || !(IsAMPERE(pGpu) || IsADA(pGpu)))
+-    if (!(IsAMPERE(pGpu) || IsADA(pGpu)))
 -        return;
 -
 -    errDisp = GPU_REG_RD32_EX(pGpu, NV_PDISP_FE_EVT_STAT_ERROR_DISP, pThreadState);
@@ -176,14 +160,14 @@ index c121468b..32b3d07d 100644
 -    _kheadClearRgSemSkipped(pGpu, pKernelDisplay, pThreadState);
  }
 diff --git a/src/nvidia/src/kernel/gpu/disp/kern_disp.c b/src/nvidia/src/kernel/gpu/disp/kern_disp.c
-index 88de10de..331f0607 100644
+index 88de10de..34464444 100644
 --- a/src/nvidia/src/kernel/gpu/disp/kern_disp.c
 +++ b/src/nvidia/src/kernel/gpu/disp/kern_disp.c
 @@ -97,6 +97,90 @@
  
  #include "rmapi/rmapi_utils.h"
  #include "class/cl0073.h"
-+#include "os-interface.h" // os_clear_rg_sem_skipped, os_log_rg_sem_skipped
++#include "os-interface.h" // os_log_rg_sem_skipped
 +
 +/* From the v04_01/v04_02 display manuals; not in the published v04_01 excerpt. */
 +#ifndef NV_PDISP_FE_EVT_STAT_ERROR_DISP
@@ -223,7 +207,7 @@ index 88de10de..331f0607 100644
 +{
 +    NvU32 errDisp, head, headMask = 0;
 +
-+    if (!os_clear_rg_sem_skipped() || !(IsAMPERE(pGpu) || IsADA(pGpu)))
++    if (!(IsAMPERE(pGpu) || IsADA(pGpu)))
 +        return;
 +
 +    errDisp = GPU_REG_RD32_EX(pGpu, NV_PDISP_FE_EVT_STAT_ERROR_DISP, pThreadState);

@@ -28,10 +28,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 21 insertions(+), 2 deletions(-)
 
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
-index 0785dddf..4af3e9d7 100644
+index 2e36323b..84a81699 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
-@@ -658,6 +658,22 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+@@ -670,6 +670,22 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
      allocParams.compressible = &p->compressible;
  
      pMemory = nvKms->allocateMemory(nv_dev->pDevice, &allocParams);
@@ -54,7 +54,7 @@ index 0785dddf..4af3e9d7 100644
      if (pMemory == NULL && (p->flags & NV_GEM_ALLOC_NO_SCANOUT)) {
          NV_DRM_DEV_LOG_INFO(
                  nv_dev,
-@@ -667,9 +683,12 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+@@ -679,9 +695,12 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
      }
  
      if (pMemory == NULL) {

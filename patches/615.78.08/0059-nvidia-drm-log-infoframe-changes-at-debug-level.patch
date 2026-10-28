@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 28 Oct 2026 13:23:01 +0100
+Subject: [PATCH] nvidia-drm: log infoframe changes at debug level
+
+nv_drm_atomic_check() printed an INFO line every time HDR metadata,
+colorspace or the HDMI VSIF changed on a CRTC. It runs for TEST_ONLY
+commits too, so compositors probing output configurations, for example
+while turning HDR on, fill the kernel log with bursts of these lines.
+Print it with DRM_DEBUG_DRIVER instead.
+
+The format string also ended in "\n" although the logging macros already
+add one, so every message was followed by an empty line. Drop it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-modeset.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-modeset.c b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+index ba0b169a..df82b119 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-modeset.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+@@ -689,7 +689,7 @@ int nv_drm_atomic_check(struct drm_device *dev,
+ 
+                 /* Check if HDR metadata or colorspace changed */
+                 if (hdr_changed || colorspace_changed || vsif_metadata_changed) {
+-                    NV_DRM_LOG_INFO("Infoframe changed on CRTC %d (hdr=%d colorspace=%d vsif=%d), adding planes on CRTC to atomic commit\n",
++                    NV_DRM_DEBUG_DRIVER("Infoframe changed on CRTC %d (hdr=%d colorspace=%d vsif=%d), adding planes on CRTC to atomic commit",
+                            to_nv_crtc(crtc)->head,
+                            hdr_changed,
+                            colorspace_changed,

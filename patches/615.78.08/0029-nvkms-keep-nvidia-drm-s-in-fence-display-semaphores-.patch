@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tom Englund <tomenglund26@gmail.com>
-Date: Wed, 21 Oct 2026 14:35:29 +0200
+Date: Mon, 26 Oct 2026 10:05:35 +0100
 Subject: [PATCH] nvkms: keep nvidia-drm's in-fence display semaphores in
  system memory
 
@@ -24,94 +24,114 @@ so the display engine sees the CPU's READY writes and the CPU sees the
 engine's DONE releases, as it does for notifiers. SOC display keeps using
 system memory as before.
 
-The choice is made when nvidia-drm sets up the device. The new
-nvidia_modeset.kapi_sysmem_semaphores parameter (default Y, 0444) can be
-set to N on the kernel command line or in modprobe.d to return to video
-memory.
-
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- kernel-open/nvidia-modeset/nvidia-modeset-linux.c   | 12 ++++++++++++
- .../nvidia-modeset/nvidia-modeset-os-interface.h    |  1 +
- src/nvidia-modeset/kapi/src/nvkms-kapi.c            | 13 +++++++++++--
- .../include/nvidia-modeset-os-interface.h           |  1 +
- 4 files changed, 25 insertions(+), 2 deletions(-)
+ .../kapi/include/nvkms-kapi-notifiers.h       |  2 +-
+ .../kapi/src/nvkms-kapi-notifiers.c           | 33 ++++++-------------
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 10 ++++--
+ 3 files changed, 19 insertions(+), 26 deletions(-)
 
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-index 6608c919..b65f927e 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-@@ -167,6 +167,13 @@ MODULE_PARM_DESC(dp_sst_edid_recovery_fix,
- static bool dp_sst_edid_recovery_fix = true;
- module_param_named(dp_sst_edid_recovery_fix, dp_sst_edid_recovery_fix, bool, 0444);
- 
-+MODULE_PARM_DESC(kapi_sysmem_semaphores,
-+                 "Keep the nvidia-drm display semaphores (used for plane in-fences) in system memory "
-+                 "instead of video memory, so the CPU check on every fenced commit doesn't read video "
-+                 "memory over PCIe. Read when the GPU is set up for nvidia-drm.");
-+static bool kapi_sysmem_semaphores = true;
-+module_param_named(kapi_sysmem_semaphores, kapi_sysmem_semaphores, bool, 0444);
-+
- /* Fail allocating the RM core channel for NVKMS using the i-th method (see
-  * FailAllocCoreChannelMethod). Failures not using the i-th method are ignored. */
- MODULE_PARM_DESC(fail_alloc_core_channel, "Control testing for hardware core channel allocation failure");
-@@ -263,6 +270,11 @@ NvBool nvkms_dp_sst_edid_recovery_fix(void)
-     return dp_sst_edid_recovery_fix;
+diff --git a/src/nvidia-modeset/kapi/include/nvkms-kapi-notifiers.h b/src/nvidia-modeset/kapi/include/nvkms-kapi-notifiers.h
+index fa8ab09b..348b4a4f 100644
+--- a/src/nvidia-modeset/kapi/include/nvkms-kapi-notifiers.h
++++ b/src/nvidia-modeset/kapi/include/nvkms-kapi-notifiers.h
+@@ -72,7 +72,7 @@ static inline NvU32 NVKMS_KAPI_NOTIFIER_OFFSET(NvU32 head,
  }
  
-+NvBool nvkms_kapi_sysmem_semaphores(void)
-+{
-+    return kapi_sysmem_semaphores;
-+}
-+
- NvBool nvkms_conceal_vrr_caps(void)
+ NvBool nvKmsKapiAllocateNotifiers(struct NvKmsKapiDevice *device);
+-NvBool nvKmsKapiAllocateSemaphores(struct NvKmsKapiDevice *device, NvBool inVideoMemory);
++NvBool nvKmsKapiAllocateSemaphores(struct NvKmsKapiDevice *device);
+ 
+ void nvKmsKapiFreeNisoSurface(struct NvKmsKapiDevice *device,
+                               struct NvKmsKapiNisoSurface *surf);
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c b/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c
+index 9f7d4301..c8eb5767 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c
+@@ -103,8 +103,7 @@ static void InitNotifier(struct NvKmsKapiDevice *device,
+ 
+ static NvBool AllocateNisoSurface(struct NvKmsKapiDevice *device,
+                                   struct NvKmsKapiNisoSurface *surface,
+-                                  NvU64 size,
+-                                  NvBool inVideoMemory)
++                                  NvU64 size)
  {
-     return conceal_vrr_caps;
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-index 78a79804..3103e42e 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-@@ -134,6 +134,7 @@ enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void);
- NvBool nvkms_enable_overlay_layers(void);
- NvBool nvkms_debug_logging(void);
- NvBool nvkms_dp_sst_edid_recovery_fix(void);
-+NvBool nvkms_kapi_sysmem_semaphores(void);
- void nvkms_extcon_report_hdmi(NvBool state);
- void nvkms_extcon_report_hdmi_audio(NvBool state);
+     struct NvKmsRegisterSurfaceParams surfParams = {};
+     NV_STATUS status = 0;
+@@ -121,21 +120,12 @@ static NvBool AllocateNisoSurface(struct NvKmsKapiDevice *device,
+         return NV_FALSE;
+     }
+ 
+-    if (inVideoMemory) {
+-        ret = nvKmsKapiAllocateVideoMemory(device,
+-                                           surface->hRmHandle,
+-                                           NvKmsSurfaceMemoryLayoutPitch,
+-                                           size,
+-                                           NVKMS_KAPI_ALLOCATION_TYPE_NOTIFIER,
+-                                           &compressible);
+-    } else {
+-        ret = nvKmsKapiAllocateSystemMemory(device,
+-                                            surface->hRmHandle,
+-                                            NvKmsSurfaceMemoryLayoutPitch,
+-                                            size,
+-                                            NVKMS_KAPI_ALLOCATION_TYPE_NOTIFIER,
+-                                            &compressible);
+-    }
++    ret = nvKmsKapiAllocateSystemMemory(device,
++                                        surface->hRmHandle,
++                                        NvKmsSurfaceMemoryLayoutPitch,
++                                        size,
++                                        NVKMS_KAPI_ALLOCATION_TYPE_NOTIFIER,
++                                        &compressible);
+ 
+     if (!ret) {
+         nvFreeUnixRmHandle(&device->handleAllocator, surface->hRmHandle);
+@@ -208,8 +198,7 @@ NvBool nvKmsKapiAllocateNotifiers(struct NvKmsKapiDevice *device)
+ 
+     if (!AllocateNisoSurface(device,
+                              &device->notifier,
+-                             NVKMS_KAPI_NOTIFIERS_SURFACE_SIZE,
+-                             NV_FALSE /* inVideoMemory */)) {
++                             NVKMS_KAPI_NOTIFIERS_SURFACE_SIZE)) {
+         return NV_FALSE;
+     }
+ 
+@@ -246,15 +235,13 @@ static void ResetSemaphore(struct NvKmsKapiDevice *device,
+ 
+ #define NVKMS_KAPI_SEMAPHORE_SURFACE_SIZE 0x1000
+ 
+-NvBool nvKmsKapiAllocateSemaphores(struct NvKmsKapiDevice *device,
+-                                   NvBool inVideoMemory)
++NvBool nvKmsKapiAllocateSemaphores(struct NvKmsKapiDevice *device)
+ {
+     NvU32 index;
+ 
+     if (!AllocateNisoSurface(device,
+                              &device->semaphore,
+-                             NVKMS_KAPI_SEMAPHORE_SURFACE_SIZE,
+-                             inVideoMemory)) {
++                             NVKMS_KAPI_SEMAPHORE_SURFACE_SIZE)) {
+         return NV_FALSE;
+     }
  
 diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
-index d8b8d468..ac55a303 100644
+index 2a923e36..c90c525c 100644
 --- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
 +++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
-@@ -665,8 +665,17 @@ static NvBool KmsAllocateDevice(struct NvKmsKapiDevice *device)
+@@ -665,8 +665,14 @@ static NvBool KmsAllocateDevice(struct NvKmsKapiDevice *device)
          goto done;
      }
  
 -    /* Allocate semaphore memory in video memory whenever available */
 -    if (!nvKmsKapiAllocateSemaphores(device, !device->isSOC)) {
 +    /*
-+     * Allocate semaphore memory in video memory whenever available, unless
-+     * nvkms_kapi_sysmem_semaphores() asks for system memory: nvidia-drm reads
-+     * a semaphore from the CPU on every commit with a plane in-fence, and an
++     * Allocate semaphore memory in system memory: nvidia-drm reads a
++     * semaphore from the CPU on every commit with a plane in-fence, and an
 +     * uncached read of video memory through BAR1 took ~130 us on a dGPU
 +     * (AD104). The display engine already accesses the notifier surface in
 +     * system memory the same way.
 +     */
-+    if (!nvKmsKapiAllocateSemaphores(device,
-+                                     !device->isSOC &&
-+                                     !nvkms_kapi_sysmem_semaphores())) {
++    if (!nvKmsKapiAllocateSemaphores(device)) {
          nvKmsKapiLogDebug(
              "Failed to allocate Semaphore objects for GPU ID 0x%08x",
              device->gpuId);
-diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-index 78a79804..3103e42e 100644
---- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-+++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-@@ -134,6 +134,7 @@ enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void);
- NvBool nvkms_enable_overlay_layers(void);
- NvBool nvkms_debug_logging(void);
- NvBool nvkms_dp_sst_edid_recovery_fix(void);
-+NvBool nvkms_kapi_sysmem_semaphores(void);
- void nvkms_extcon_report_hdmi(NvBool state);
- void nvkms_extcon_report_hdmi_audio(NvBool state);
- 

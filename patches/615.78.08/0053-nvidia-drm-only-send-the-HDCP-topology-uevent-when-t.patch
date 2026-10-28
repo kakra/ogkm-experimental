@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 23:36:59 +0100
+Subject: [PATCH] nvidia-drm: only send the HDCP topology uevent when the
+ topology changes
+
+RM posts an HDCP status change (disabled/inactive) on every DPMS off.
+nvkms turns that into a CP_TOPOLOGY_CHANGED event with a cleared
+topology, and nv_drm_connector_update_topology_property() replaced the
+blob and sent a HOTPLUG=1 connector property uevent each time, even
+when the topology was already clear. Compositors answer every hotplug
+uevent by force-probing all connectors.
+
+It also did this for connectors that never got the content protection
+properties (only DP and HDMI do), which trips the WARN_ON in
+drm_sysfs_connector_property_event() on DVI.
+
+Skip connectors without the properties, and skip the update when the
+topology is unchanged (a missing blob counts as an all-zero topology).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-connector.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index 79407636..335b1161 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -999,8 +999,27 @@ int nv_drm_connector_update_topology_property(struct nv_drm_connector *nv_connec
+     struct nv_drm_connector_state *nv_state = to_nv_drm_connector_state(state);
+     struct drm_device *dev = connector->dev;
+     struct nv_drm_device *nv_dev = to_nv_device(dev);
++    const struct drm_property_blob *old_blob = nv_state->hdcp_topology_blob;
+     int ret;
+ 
++    /* The content protection properties are only attached to DP and HDMI */
++    if ((nv_connector->type != NVKMS_CONNECTOR_TYPE_DP) &&
++        (nv_connector->type != NVKMS_CONNECTOR_TYPE_HDMI)) {
++        return 0;
++    }
++
++    /*
++     * RM reports HDCP disabled/inactive on every DPMS off, which clears an
++     * already clear topology.  Don't send a hotplug uevent for that: it makes
++     * compositors force-probe every connector.
++     */
++    if ((old_blob != NULL) ?
++        ((old_blob->length == NVKMS_HDCP_TOPOLOGY_SIZE) &&
++         (memcmp(old_blob->data, topology, NVKMS_HDCP_TOPOLOGY_SIZE) == 0)) :
++        (memchr_inv(topology, 0, NVKMS_HDCP_TOPOLOGY_SIZE) == NULL)) {
++        return 0;
++    }
++
+     ret = drm_property_replace_global_blob(dev,
+                                             &nv_state->hdcp_topology_blob,
+                                             NVKMS_HDCP_TOPOLOGY_SIZE,

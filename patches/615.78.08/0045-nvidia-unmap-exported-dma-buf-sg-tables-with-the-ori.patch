@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 09:42:22 +0100
+Subject: [PATCH] nvidia: unmap exported dma-buf sg tables with the original
+ entry count
+
+nv_dma_buf_unmap_pages() passed sgt->nents, the count dma_map_sg_attrs()
+returned, to dma_unmap_sg_attrs(). The DMA API wants the count that was
+passed to dma_map_sg_attrs() (sgt->orig_nents); the returned count can be
+smaller when an IOMMU merges segments. dma-direct and the dma-iommu unmap
+happen to cope, other implementations need not.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia/nv-dmabuf.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/kernel-open/nvidia/nv-dmabuf.c b/kernel-open/nvidia/nv-dmabuf.c
+index 8682049c..3bf02e8a 100644
+--- a/kernel-open/nvidia/nv-dmabuf.c
++++ b/kernel-open/nvidia/nv-dmabuf.c
+@@ -705,7 +705,8 @@ nv_dma_buf_unmap_pages(
+         return;
+     }
+ 
+-    dma_unmap_sg_attrs(dev, sgt->sgl, sgt->nents,
++    // Unmap takes the count passed to dma_map_sg_attrs(), not the one it returned
++    dma_unmap_sg_attrs(dev, sgt->sgl, sgt->orig_nents,
+                        DMA_BIDIRECTIONAL, DMA_ATTR_SKIP_CPU_SYNC);
+ }
+ 

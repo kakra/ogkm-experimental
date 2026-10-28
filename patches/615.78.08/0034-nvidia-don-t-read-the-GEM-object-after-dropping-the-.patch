@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Fri, 23 Oct 2026 11:37:00 +0200
+Subject: [PATCH] nvidia: don't read the GEM object after dropping the import
+ reference
+
+nv_dma_release_sgt() drops the reference that nv_dma_import_sgt() took on
+the imported GEM object, and then reads gem->dev->driver->fops->owner for
+module_put(). If that was the last reference, nvidia-drm has already freed
+the object by then (KFENCE: use-after-free read in nv_dma_release_sgt, on
+an object allocated by nv_drm_gem_prime_import_sg_table). KWin 6.8.1 hits
+this constantly on hybrid laptops, since it imports and releases dma-bufs
+for its multi-GPU copies every frame.
+
+Look up the owner before the put, and keep the module reference until
+after it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia/nv-dma.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/kernel-open/nvidia/nv-dma.c b/kernel-open/nvidia/nv-dma.c
+index 81946920..93e88eae 100644
+--- a/kernel-open/nvidia/nv-dma.c
++++ b/kernel-open/nvidia/nv-dma.c
+@@ -1015,6 +1015,8 @@ void NV_API_CALL nv_dma_release_sgt
+     struct drm_gem_object *gem
+ )
+ {
++    struct module *owner;
++
+     if (gem == NULL)
+     {
+         return;
+@@ -1023,9 +1025,14 @@ void NV_API_CALL nv_dma_release_sgt
+     // Do nothing with SGT, it will be unmapped and unpinned by the exporter
+     WARN_ON(sgt == NULL);
+ 
++    // This may drop the last reference and free the GEM object, so look up
++    // its owner first. Keep the module reference until after the put, since
++    // the put may run the owner's free callback.
++    owner = gem->dev->driver->fops->owner;
++
+     nv_dma_gem_object_put_unlocked(gem);
+ 
+-    module_put(gem->dev->driver->fops->owner);
++    module_put(owner);
+ }
+ 
+ #else

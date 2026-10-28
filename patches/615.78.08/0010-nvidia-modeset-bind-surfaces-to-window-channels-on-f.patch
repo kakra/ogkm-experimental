@@ -20,64 +20,16 @@ it is bound to; freeing the context DMA unbinds it everywhere as before.
 Local surface descriptors are zero-initialised so the new fields never hold
 stack garbage.
 
-nvidia_modeset.lazy_ctxdma_bind=0 (module parameter, also writable at
-runtime; applies to surfaces registered afterwards) restores the old
-behaviour.
-
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../nvidia-modeset/nvidia-modeset-linux.c     | 11 ++++++
- .../nvidia-modeset-os-interface.h             |  1 +
- src/nvidia-modeset/include/nvkms-ctxdma.h     |  3 ++
- src/nvidia-modeset/include/nvkms-types.h      |  8 +++++
- .../include/nvidia-modeset-os-interface.h     |  1 +
- src/nvidia-modeset/src/nvkms-ctxdma.c         | 35 +++++++++++++++++++
- src/nvidia-modeset/src/nvkms-evo3.c           | 14 ++++++++
- src/nvidia-modeset/src/nvkms-hw-flip.c        |  2 +-
- src/nvidia-modeset/src/nvkms-rm.c             | 21 +++++++++--
- 9 files changed, 92 insertions(+), 4 deletions(-)
+ src/nvidia-modeset/include/nvkms-ctxdma.h |  3 ++
+ src/nvidia-modeset/include/nvkms-types.h  |  8 ++++++
+ src/nvidia-modeset/src/nvkms-ctxdma.c     | 35 +++++++++++++++++++++++
+ src/nvidia-modeset/src/nvkms-evo3.c       | 14 +++++++++
+ src/nvidia-modeset/src/nvkms-hw-flip.c    |  2 +-
+ src/nvidia-modeset/src/nvkms-rm.c         | 32 +++++++++------------
+ 6 files changed, 74 insertions(+), 20 deletions(-)
 
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-index 62986c40..3b66e975 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-@@ -124,6 +124,12 @@ MODULE_PARM_DESC(conceal_vrr_caps,
- static bool conceal_vrr_caps = false;
- module_param_named(conceal_vrr_caps, conceal_vrr_caps, bool, 0444);
- 
-+MODULE_PARM_DESC(lazy_ctxdma_bind,
-+                 "Bind surfaces to display window channels on first use instead of to all window channels at registration "
-+                 "(each bind is a GSP RPC under the global NVKMS lock). Affects surfaces registered after a change.");
-+static bool lazy_ctxdma_bind = true;
-+module_param_named(lazy_ctxdma_bind, lazy_ctxdma_bind, bool, 0644);
-+
- MODULE_PARM_DESC(enhanced_pcon_support,
-                  "Enable enhanced display protocol converter features (e.g. VRR over active DP-HDMI converters)");
- static bool enhanced_pcon_support = false;
-@@ -230,6 +236,11 @@ NvBool nvkms_enhanced_pcon_support(void)
-     return enhanced_pcon_support;
- }
- 
-+NvBool nvkms_lazy_ctxdma_bind(void)
-+{
-+    return READ_ONCE(lazy_ctxdma_bind);
-+}
-+
- NvBool nvkms_output_rounding_fix(void)
- {
-     return output_rounding_fix;
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-index dc33314b..620f1aa4 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-@@ -120,6 +120,7 @@ NvBool nvkms_test_fail_alloc_core_channel(enum NvKmsFailAllocCoreChannelMethod m
- enum NvKmsFrlRateForce nvkms_force_frl_rate(void);
- NvBool nvkms_conceal_vrr_caps(void);
- NvBool nvkms_enhanced_pcon_support(void);
-+NvBool nvkms_lazy_ctxdma_bind(void);
- NvBool nvkms_output_rounding_fix(void);
- NvBool nvkms_disable_hdmi_frl(void);
- NvBool nvkms_disable_vrr_memclk_switch(void);
 diff --git a/src/nvidia-modeset/include/nvkms-ctxdma.h b/src/nvidia-modeset/include/nvkms-ctxdma.h
 index 1ebb1880..207b30b5 100644
 --- a/src/nvidia-modeset/include/nvkms-ctxdma.h
@@ -111,18 +63,6 @@ index f0e917d3..b3f04f2e 100644
  } NVSurfaceDescriptor;
  
  typedef struct _NVEvoDma
-diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-index dc33314b..620f1aa4 100644
---- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-+++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-@@ -120,6 +120,7 @@ NvBool nvkms_test_fail_alloc_core_channel(enum NvKmsFailAllocCoreChannelMethod m
- enum NvKmsFrlRateForce nvkms_force_frl_rate(void);
- NvBool nvkms_conceal_vrr_caps(void);
- NvBool nvkms_enhanced_pcon_support(void);
-+NvBool nvkms_lazy_ctxdma_bind(void);
- NvBool nvkms_output_rounding_fix(void);
- NvBool nvkms_disable_hdmi_frl(void);
- NvBool nvkms_disable_vrr_memclk_switch(void);
 diff --git a/src/nvidia-modeset/src/nvkms-ctxdma.c b/src/nvidia-modeset/src/nvkms-ctxdma.c
 index f485c1a4..5bd818bd 100644
 --- a/src/nvidia-modeset/src/nvkms-ctxdma.c
@@ -250,7 +190,7 @@ index bd658884..d351d075 100644
      /*! use id value to check the global table */
      if (!pDevEvo->preSyncptTable[id].allocated) {
 diff --git a/src/nvidia-modeset/src/nvkms-rm.c b/src/nvidia-modeset/src/nvkms-rm.c
-index 7ad713bb..b69f7956 100644
+index 7ad713bb..24a53732 100644
 --- a/src/nvidia-modeset/src/nvkms-rm.c
 +++ b/src/nvidia-modeset/src/nvkms-rm.c
 @@ -2845,7 +2845,7 @@ NvBool nvRmAllocEvoDma(NVDevEvoPtr pDevEvo, NVEvoDmaPtr pDma,
@@ -271,34 +211,46 @@ index 7ad713bb..b69f7956 100644
  
      if (!pDevEvo->supportsSyncpts) {
          return FALSE;
-@@ -5959,7 +5959,7 @@ NvU32 nvRmAllocAndBindSurfaceDescriptor(
+@@ -5959,9 +5959,8 @@ NvU32 nvRmAllocAndBindSurfaceDescriptor(
      NVSurfaceDescriptor *pSurfaceDesc,
      NvBool mapToDisplayRm)
  {
 -    NVSurfaceDescriptor surfaceDesc;
 +    NVSurfaceDescriptor surfaceDesc = { };
      NvU32 flags = DRF_DEF(OS03, _FLAGS, _HASH_TABLE, _DISABLE);
-     NvU32 head, layer;
+-    NvU32 head, layer;
      NvU32 ret;
-@@ -5997,6 +5997,21 @@ NvU32 nvRmAllocAndBindSurfaceDescriptor(
+ 
+     switch (layout) {
+@@ -5997,21 +5996,16 @@ NvU32 nvRmAllocAndBindSurfaceDescriptor(
          goto free_this_handle_and_fail;
      }
  
+-    for (head = 0; head < pDevEvo->numHeads; head++) {
+-        for (layer = 0; layer < pDevEvo->head[head].numLayers; layer++) {
+-            if (pDevEvo->head[head].layer[layer]) {
+-                 nvAssert(pDevEvo->head[head].layer[layer]->pb.channel_handle);
+-
+-                 ret = pDevEvo->hal->BindSurfaceDescriptor(pDevEvo,
+-                         pDevEvo->head[head].layer[layer],
+-                         &surfaceDesc);
+-                 if (ret != NVOS_STATUS_SUCCESS) {
+-                     goto free_this_handle_and_fail;
+-                 }
+-            }
+-        }
+-    }
+-
 +    /*
 +     * Binding to every window channel of every head costs one GSP RPC per
 +     * channel, all under the global NVKMS lock (about 1 ms per surface on a
 +     * 4-head GPU), while a surface is usually only ever shown in one or two
-+     * windows. With lazy_ctxdma_bind, the window channels are bound on first
-+     * use instead, by nvCtxDmaBindOnUse() in the HAL functions that program
-+     * the descriptor into a window channel.
++     * windows. So the window channels are bound on first use instead, by
++     * nvCtxDmaBindOnUse() in the HAL functions that program the descriptor
++     * into a window channel.
 +     */
-+    if (nvkms_lazy_ctxdma_bind()) {
-+        surfaceDesc.lazyBind = TRUE;
-+        surfaceDesc.lazyBoundChannelMask = 0;
-+        *pSurfaceDesc = surfaceDesc;
-+        return NVOS_STATUS_SUCCESS;
-+    }
-+
-     for (head = 0; head < pDevEvo->numHeads; head++) {
-         for (layer = 0; layer < pDevEvo->head[head].numLayers; layer++) {
-             if (pDevEvo->head[head].layer[layer]) {
++    surfaceDesc.lazyBind = TRUE;
++    surfaceDesc.lazyBoundChannelMask = 0;
+     *pSurfaceDesc = surfaceDesc;
+ 
+     return NVOS_STATUS_SUCCESS;

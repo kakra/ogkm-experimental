@@ -12,8 +12,7 @@ coding, so 3-lane rates (3L3G, 3L6G) got a too-small minimum.
 Compute in 64 bits and derive the tri-byte rate from the lane count
 and FRL coding. Only affects HDMI 2.1 FRL links with DSC.
 
-References:
-- NVIDIA/open-gpu-kernel-modules issue 1445
+Upstream issue 1445.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

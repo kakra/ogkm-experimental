@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tom Englund <tomenglund26@gmail.com>
-Date: Sun, 18 Oct 2026 01:53:11 +0200
+Date: Mon, 26 Oct 2026 09:54:06 +0100
 Subject: [PATCH] nvidia-modeset: map surfaces into the NVKMS GPU VA space on
  first use
 
@@ -11,71 +11,26 @@ NV04_UNMAP_MEMORY_DMA (~110 us) GSP RPC per surface, under the global
 nvkms_lock. Only headSurface rendering and DIFR prefetch read
 pSurfaceEvo->gpuAddress, and on a typical KMS desktop headSurface never runs.
 
-With lazy_gpu_map, registration records the map permissions and leaves
+Registration records the map permissions and leaves
 gpuAddress 0; nvHsGetSurfaceGpuAddress() maps the surface the first time
 headSurface (render textures, color/2D targets, warp mesh, semaphores) or
 DIFR needs the address. A surface that was never mapped is not unmapped.
 Surfaces registered with NvHsMapPermissionsNone (LUTs, fbconsole) are not
-affected. A failed lazy map is logged and leaves gpuAddress 0 (registration
-used to fail instead).
-
-nvidia_modeset.lazy_gpu_map=0 (module parameter, also writable at runtime;
-applies to surfaces registered afterwards) restores the old behaviour.
+affected. A failed lazy map (registration used to fail instead) returns 0,
+is logged once per surface and retried on the next use; DIFR reports a
+surface without an address as not prefetchable instead of copying from GPU
+VA 0.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../nvidia-modeset/nvidia-modeset-linux.c     | 11 +++++++
- .../nvidia-modeset-os-interface.h             |  1 +
- .../include/nvkms-headsurface.h               |  4 +++
- src/nvidia-modeset/include/nvkms-types.h      |  8 +++++
- .../include/nvidia-modeset-os-interface.h     |  1 +
- src/nvidia-modeset/src/nvkms-difr.c           |  3 +-
- src/nvidia-modeset/src/nvkms-headsurface-3d.c | 20 ++++++++----
- src/nvidia-modeset/src/nvkms-headsurface.c    | 31 +++++++++++++++++++
- src/nvidia-modeset/src/nvkms-surface.c        | 26 +++++++++++-----
- 9 files changed, 91 insertions(+), 14 deletions(-)
+ .../include/nvkms-headsurface.h               |  4 ++
+ src/nvidia-modeset/include/nvkms-types.h      | 10 +++++
+ src/nvidia-modeset/src/nvkms-difr.c           | 12 +++++-
+ src/nvidia-modeset/src/nvkms-headsurface-3d.c | 20 +++++++---
+ src/nvidia-modeset/src/nvkms-headsurface.c    | 40 +++++++++++++++++++
+ src/nvidia-modeset/src/nvkms-surface.c        | 26 ++++++++----
+ 6 files changed, 98 insertions(+), 14 deletions(-)
 
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-index 3b66e975..0bf0ae73 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-@@ -130,6 +130,12 @@ MODULE_PARM_DESC(lazy_ctxdma_bind,
- static bool lazy_ctxdma_bind = true;
- module_param_named(lazy_ctxdma_bind, lazy_ctxdma_bind, bool, 0644);
- 
-+MODULE_PARM_DESC(lazy_gpu_map,
-+                 "Map registered surfaces into the NVKMS GPU address space (used by headSurface and DIFR) on first use "
-+                 "instead of at registration. Affects surfaces registered after a change.");
-+static bool lazy_gpu_map = true;
-+module_param_named(lazy_gpu_map, lazy_gpu_map, bool, 0644);
-+
- MODULE_PARM_DESC(enhanced_pcon_support,
-                  "Enable enhanced display protocol converter features (e.g. VRR over active DP-HDMI converters)");
- static bool enhanced_pcon_support = false;
-@@ -241,6 +247,11 @@ NvBool nvkms_lazy_ctxdma_bind(void)
-     return READ_ONCE(lazy_ctxdma_bind);
- }
- 
-+NvBool nvkms_lazy_gpu_map(void)
-+{
-+    return READ_ONCE(lazy_gpu_map);
-+}
-+
- NvBool nvkms_output_rounding_fix(void)
- {
-     return output_rounding_fix;
-diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-index 620f1aa4..4a20e4c2 100644
---- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-+++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-@@ -121,6 +121,7 @@ enum NvKmsFrlRateForce nvkms_force_frl_rate(void);
- NvBool nvkms_conceal_vrr_caps(void);
- NvBool nvkms_enhanced_pcon_support(void);
- NvBool nvkms_lazy_ctxdma_bind(void);
-+NvBool nvkms_lazy_gpu_map(void);
- NvBool nvkms_output_rounding_fix(void);
- NvBool nvkms_disable_hdmi_frl(void);
- NvBool nvkms_disable_vrr_memclk_switch(void);
 diff --git a/src/nvidia-modeset/include/nvkms-headsurface.h b/src/nvidia-modeset/include/nvkms-headsurface.h
 index ef14c5c8..099450f0 100644
 --- a/src/nvidia-modeset/include/nvkms-headsurface.h
@@ -92,38 +47,28 @@ index ef14c5c8..099450f0 100644
      const NVDevEvoRec *pDevEvo,
      const NvU32 rmHandle,
 diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
-index b3f04f2e..638f491f 100644
+index b3f04f2e..f826f512 100644
 --- a/src/nvidia-modeset/include/nvkms-types.h
 +++ b/src/nvidia-modeset/include/nvkms-types.h
-@@ -2854,6 +2854,14 @@ struct _NVSurfaceEvoRec {
+@@ -2854,6 +2854,16 @@ struct _NVSurfaceEvoRec {
       */
      NvU64 gpuAddress;
  
 +    /*
-+     * With lazy_gpu_map, gpuAddress is only mapped (with gpuMapPermissions)
-+     * the first time headSurface or DIFR needs it: read it through
-+     * nvHsGetSurfaceGpuAddress().
++     * gpuAddress is only mapped (with gpuMapPermissions) the first time
++     * headSurface or DIFR needs it: read it through
++     * nvHsGetSurfaceGpuAddress(), which retries a failed mapping on the next
++     * call (gpuMapFailureLogged: the failure was logged once already).
 +     */
 +    NvBool gpuMapPending;
++    NvBool gpuMapFailureLogged;
 +    enum NvHsMapPermissions gpuMapPermissions;
 +
      /*
       * HeadSurface needs a CPU mapping of surfaces containing semaphores.
       */
-diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-index 620f1aa4..4a20e4c2 100644
---- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-+++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-@@ -121,6 +121,7 @@ enum NvKmsFrlRateForce nvkms_force_frl_rate(void);
- NvBool nvkms_conceal_vrr_caps(void);
- NvBool nvkms_enhanced_pcon_support(void);
- NvBool nvkms_lazy_ctxdma_bind(void);
-+NvBool nvkms_lazy_gpu_map(void);
- NvBool nvkms_output_rounding_fix(void);
- NvBool nvkms_disable_hdmi_frl(void);
- NvBool nvkms_disable_vrr_memclk_switch(void);
 diff --git a/src/nvidia-modeset/src/nvkms-difr.c b/src/nvidia-modeset/src/nvkms-difr.c
-index a0c6bd55..ac2d86e5 100644
+index a0c6bd55..3dd81a1f 100644
 --- a/src/nvidia-modeset/src/nvkms-difr.c
 +++ b/src/nvidia-modeset/src/nvkms-difr.c
 @@ -91,6 +91,7 @@
@@ -134,12 +79,21 @@ index a0c6bd55..ac2d86e5 100644
  #include "nvkms-push.h"
  #include "nvkms-rm.h"
  #include "nvkms-rmapi.h"
-@@ -733,7 +734,7 @@ static NvBool PrefetchHelperSurfaceEvo(NVDIFRStateEvoPtr pDifr,
+@@ -733,7 +734,16 @@ static NvBool PrefetchHelperSurfaceEvo(NVDIFRStateEvoPtr pDifr,
      pSurfaceEvo->difrLastPrefetchPass = pDifr->prefetchPass;
  
      /* Collect copy parameters and do the prefetch. */
 -    params.surfGpuAddress = pSurfaceEvo->gpuAddress;
 +    params.surfGpuAddress = nvHsGetSurfaceGpuAddress(pDifr->pDevEvo, pSurfaceEvo);
++    if (params.surfGpuAddress == 0) {
++        /*
++         * Not mapped into the NVKMS GPU address space (the mapping failed and
++         * is retried next time): don't let the copy engine read from address
++         * 0. As for noDisplayCaching, tell RM this frame can't be prefetched.
++         */
++        *status = NV2080_CTRL_LPWR_DIFR_PREFETCH_FAIL_OS_FLIPS_ENABLED;
++        return FALSE;
++    }
      params.surfSizeBytes = pSurfaceEvo->planes[0].rmObjectSizeInBytes;
      params.surfPitchBytes = pSurfaceEvo->planes[0].pitch;
      params.surfFormat = pSurfaceEvo->format;
@@ -250,16 +204,16 @@ index 5f8fd274..fd178a8a 100644
          payloadByteOffsetInSemaphore;
  
 diff --git a/src/nvidia-modeset/src/nvkms-headsurface.c b/src/nvidia-modeset/src/nvkms-headsurface.c
-index 20795a9f..f624c463 100644
+index 20795a9f..bad78c44 100644
 --- a/src/nvidia-modeset/src/nvkms-headsurface.c
 +++ b/src/nvidia-modeset/src/nvkms-headsurface.c
-@@ -188,6 +188,37 @@ NvU64 nvHsMapSurfaceToDevice(
+@@ -188,6 +188,46 @@ NvU64 nvHsMapSurfaceToDevice(
      }
  }
  
 +/*!
 + * Return the surface's address in the NVKMS GPU VA space, mapping it first if
-+ * nvEvoRegisterSurface() deferred the mapping (lazy_gpu_map).
++ * nvEvoRegisterSurface() deferred the mapping.
 + */
 +NvU64 nvHsGetSurfaceGpuAddress(
 +    const NVDevEvoRec *pDevEvo,
@@ -275,13 +229,22 @@ index 20795a9f..f624c463 100644
 +                                   pSurfaceEvo->planes[0].rmObjectSizeInBytes,
 +                                   pSurfaceEvo->gpuMapPermissions);
 +
-+        pSurfaceEvo->gpuMapPending = FALSE;
 +        if (gpuAddress == NV_HS_BAD_GPU_ADDRESS) {
-+            nvEvoLogDev(pDevEvo, EVO_LOG_ERROR,
-+                        "Failed to map surface 0x%08x into the NVKMS GPU address space",
-+                        pSurfaceEvo->planes[0].rmHandle);
-+            gpuAddress = 0;
++            /*
++             * Leave the mapping pending, so the next use tries again; until
++             * then callers get 0 and must not use it. Log only the first
++             * failure: headSurface asks once per frame.
++             */
++            if (!pSurfaceEvo->gpuMapFailureLogged) {
++                nvEvoLogDev(pDevEvo, EVO_LOG_ERROR,
++                            "Failed to map surface 0x%08x into the NVKMS GPU address space",
++                            pSurfaceEvo->planes[0].rmHandle);
++                pSurfaceEvo->gpuMapFailureLogged = TRUE;
++            }
++            return 0;
 +        }
++
++        pSurfaceEvo->gpuMapPending = FALSE;
 +        pSurfaceEvo->gpuAddress = gpuAddress;
 +    }
 +
@@ -292,7 +255,7 @@ index 20795a9f..f624c463 100644
      const NVDevEvoRec *pDevEvo,
      const NvU32 rmHandle,
 diff --git a/src/nvidia-modeset/src/nvkms-surface.c b/src/nvidia-modeset/src/nvkms-surface.c
-index f6fa4a9e..99e9d3a0 100644
+index f6fa4a9e..6efc2c53 100644
 --- a/src/nvidia-modeset/src/nvkms-surface.c
 +++ b/src/nvidia-modeset/src/nvkms-surface.c
 @@ -672,14 +672,26 @@ void nvEvoRegisterSurface(NVDevEvoPtr pDevEvo,
@@ -304,7 +267,7 @@ index f6fa4a9e..99e9d3a0 100644
 -                    pSurfaceEvo->planes[0].rmHandle,
 -                    pRequest->planes[0].rmObjectSizeInBytes,
 -                    hsMapPermissions);
-+    if (nvkms_lazy_gpu_map() && (pDevEvo->pHsDevice != NULL) &&
++    if ((pDevEvo->pHsDevice != NULL) &&
 +        (hsMapPermissions != NvHsMapPermissionsNone)) {
 +        /*
 +         * Mapping and unmapping each cost a GSP RPC under the global NVKMS

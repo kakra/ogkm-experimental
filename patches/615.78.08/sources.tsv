@@ -2,6 +2,7 @@
 nvidia: free the GSP channel group when construction fails	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia-drm: boost GPU clocks when fences miss their deadlines	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia-drm: fix vblank timestamp clock and flip event vblank	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: don't report flips a vblank early when NVKMS takes long	own, fixes patch 3
 nvidia-drm: use system_percpu_wq/system_dfl_wq	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia-modeset: really stop RG semaphore vblank interrupts	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia: use nv_vmalloc when pt_size >= PMD_SIZE	upstream PR [#1383](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1383), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
@@ -30,7 +31,37 @@ nvkms: keep nvidia-drm's in-fence display semaphores in system memory	[gulafaran
 nvidia-drm: serialize claiming in-fence display semaphores	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvkms: don't yield after wrapping a display push buffer	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvkms: don't wake the NVKMS worker for unneeded non-stall interrupts	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
-nvidia: don't restore caching type after a failed sysmem allocation	own (alternative to upstream PR [#1278](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1278))
+nvidia: open the PCI sysfs config file with PID 1's root	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: don't read the GEM object after dropping the import reference	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+mapping_reuse: release untracked VA when unmap stops at a foreign entry	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+bus: don't free a caller-owned range array on static BAR1 fallback	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+mapping_reuse: drop per-context physical maps once they are empty	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: take the API lock for read for DMA map and unmap	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: keep old cursor framebuffers instead of re-flipping all planes	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: don't tear the driver down at shutdown while suspended for hibernation	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-modeset: cut the per-flip work area memset and flip request vmalloc	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms: don't hang the display when the DIFR prefetch GPFIFO fills up	upstream PR [#1286](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1286), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: free uncached and write-combined sysmem from a worker	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: keep uncached and write-combined sysmem pages uncached in a pool	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: unmap exported dma-buf sg tables with the original entry count	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: hold the reservation lock when RM maps an imported dma-buf	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: return an error pointer from PRIME import, don't BUG on size	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: fix error handling and binary syncobjs in semsurf syncobj ioctls	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: only mark vmaps of ioremapped vidmem as I/O memory	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: enable vblank support by default	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: don't take the API lock for semaphore surface UNREGISTER_WAITER	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: restore RMAPI_GPU_LOCK_INTERNAL on golden image channel cleanup	upstream PR [#1498](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1498), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: only send the HDCP topology uevent when the topology changes	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: add the Broadcast RGB connector property	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: keep the property enum lists out of the stack frame	own, fixes the Broadcast RGB patch
+nvidia-drm: add SIZE_HINTS to the cursor plane	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: fix color pipeline state handling	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-modeset: re-arm the RG semaphore vblank interrupt on unchanged heads	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: log infoframe changes at debug level	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: unregister leftover vblank callbacks at unload	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: stop using the deprecated system workqueues	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: expose the plane stacking order as an immutable zpos	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: add the max bpc connector property	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia-modeset: free the semaphore surface callback record when the waiter is already signalled	upstream PR [#1368](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368)
 nvidia-drm: retry GEM allocations without compression, return -ENOMEM	own
 nvidia: let sysmem allocations with a fallback fail fast at high order	own
@@ -38,9 +69,6 @@ nvidia: fail fast on big-page sysmem attempts that RM retries itself	own
 nvidia-uvm: fail fast on the first big-page sysmem attempt	own
 nvidia: don't log fail-fast sysmem allocation failures as errors	own
 Fix VA space bookkeeping corruption on partial unmaps	upstream PR [#1483](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1483)
-nvidia-drm: drop duplicate newline from infoframe log message	own
-nvidia-drm: don't report flips a vblank early when NVKMS takes long	own, fixes patch 3
 nvidia: retry explicit big-page sysmem allocations with smaller pages	own
 nvidia: don't retry high-order kmalloc in os_alloc_mem()	own
-nvidia: free non-cached system memory from a kthread	own
 nvidia: zero os_alloc_mem() allocations	own

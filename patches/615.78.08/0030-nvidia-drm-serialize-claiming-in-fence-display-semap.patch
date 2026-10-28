@@ -69,10 +69,10 @@ index b359da4d..06f39b32 100644
          if (idx_count == nv_dev->display_semaphores.count) {
              NV_DRM_DEV_LOG_ERR(
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-priv.h b/kernel-open/nvidia-drm/nvidia-drm-priv.h
-index 3d581c3f..21bf6bd1 100644
+index 2f86c7eb..d1f1b5fc 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-priv.h
 +++ b/kernel-open/nvidia-drm/nvidia-drm-priv.h
-@@ -230,6 +230,12 @@ struct nv_drm_device {
+@@ -229,6 +229,12 @@ struct nv_drm_device {
      struct {
          NvU32 count;
          NvU32 next_index;
@@ -85,7 +85,7 @@ index 3d581c3f..21bf6bd1 100644
      } display_semaphores;
  
  #if defined(NV_DRM_HAS_HDR_OUTPUT_METADATA)
-@@ -309,7 +315,11 @@ struct nv_drm_device {
+@@ -308,7 +314,11 @@ struct nv_drm_device {
  static inline NvU32 nv_drm_next_display_semaphore(
      struct nv_drm_device *nv_dev)
  {
