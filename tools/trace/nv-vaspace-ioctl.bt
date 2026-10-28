@@ -1,0 +1,88 @@
+#!/usr/bin/env bpftrace
+// Logs every NVIDIA RM map/unmap ioctl (NV_ESC_RM_MAP_MEMORY_DMA 0x57,
+// NV_ESC_RM_UNMAP_MEMORY_DMA 0x58 on /dev/nvidia*, also through
+// NV_ESC_IOCTL_XFER_CMD) with its parameters and result. Evaluate the log with
+// tools/trace/nv-vaspace-analyze.py; it replays the mappings per client and shows,
+// for each failed map, which existing mapping the new range overlaps.
+//
+// Question: who triggers "dmaAllocMapping_GM107: can't update VA space"
+// (gpu_vaspace.c:4502, an existing mapping node at the target VA)?
+//
+// The RM functions themselves cannot be probed (nv-kernel.o has no fentry,
+// "Could not probe notrace function"), and nvidia_unlocked_ioctl is not in
+// kallsyms, so this hooks the ioctl syscall tracepoints.
+//
+// Run as root while playing, stop with Ctrl+C:
+//   bpftrace tools/trace/nv-vaspace-ioctl.bt | tee <log> | grep --line-buffered FAIL
+//
+// NVOS46_PARAMETERS (64 bytes): hClient @0 hDevice @4 hDma @8 hMemory @12
+//   offset @16 length @24 flags @32 flags2 @36 kindOverride @40
+//   dmaOffset @48 status @56
+// NVOS47_PARAMETERS (48 bytes): hClient @0 hDevice @4 hDma @8 hMemory @12
+//   flags @16 dmaOffset @24 size @32 status @40
+// nv_ioctl_xfer_t: cmd @0 size @4 ptr @8
+
+BEGIN
+{
+	printf("# start, ts in ms; off/len: range of hMemory; dmaoff: GPU VA (in: requested)\n");
+}
+
+tracepoint:syscalls:sys_enter_ioctl /((args.cmd >> 8) & 0xff) == 0x46/
+{
+	$nr = args.cmd & 0xff;
+	$p = (uint64)args.arg;
+	if ($nr == 211) {	// NV_ESC_IOCTL_XFER_CMD (NV_IOCTL_BASE + 11)
+		$nr = *(uint32 *)uptr($p);
+		$p = *(uint64 *)uptr($p + 8);
+	}
+	if ($nr == 0x57 || $nr == 0x58) {
+		@nr[tid] = $nr;
+		@p[tid] = $p;
+		if ($nr == 0x58) {
+			// Unmap: read the input now, the mapping is gone afterwards
+			@u_off[tid] = *(uint64 *)uptr($p + 24);
+			@u_size[tid] = *(uint64 *)uptr($p + 32);
+		} else {
+			@m_off[tid] = *(uint64 *)uptr($p + 48);
+		}
+	}
+}
+
+tracepoint:syscalls:sys_exit_ioctl /@nr[tid]/
+{
+	$p = @p[tid];
+	if (@nr[tid] == 0x57) {
+		printf("%llu %s pid=%d tid=%d ret=%d client=0x%x device=0x%x dma=0x%x mem=0x%x off=0x%llx len=0x%llx flags=0x%x dmaoff=0x%llx in=0x%llx status=0x%x comm=%s\n",
+		       nsecs / 1000000,
+		       *(uint32 *)uptr($p + 56) != 0 ? "MAPFAIL" : "map",
+		       pid, tid, args.ret,
+		       *(uint32 *)uptr($p), *(uint32 *)uptr($p + 4),
+		       *(uint32 *)uptr($p + 8), *(uint32 *)uptr($p + 12),
+		       *(uint64 *)uptr($p + 16), *(uint64 *)uptr($p + 24),
+		       *(uint32 *)uptr($p + 32), *(uint64 *)uptr($p + 48),
+		       @m_off[tid], *(uint32 *)uptr($p + 56), comm);
+	} else {
+		printf("%llu %s pid=%d tid=%d ret=%d client=0x%x device=0x%x dma=0x%x mem=0x%x size=0x%llx flags=0x%x dmaoff=0x%llx status=0x%x comm=%s\n",
+		       nsecs / 1000000,
+		       *(uint32 *)uptr($p + 40) != 0 ? "UNMAPFAIL" : "unmap",
+		       pid, tid, args.ret,
+		       *(uint32 *)uptr($p), *(uint32 *)uptr($p + 4),
+		       *(uint32 *)uptr($p + 8), *(uint32 *)uptr($p + 12),
+		       @u_size[tid], *(uint32 *)uptr($p + 16), @u_off[tid],
+		       *(uint32 *)uptr($p + 40), comm);
+	}
+	delete(@nr[tid]);
+	delete(@p[tid]);
+	delete(@m_off[tid]);
+	delete(@u_off[tid]);
+	delete(@u_size[tid]);
+}
+
+END
+{
+	clear(@nr);
+	clear(@p);
+	clear(@m_off);
+	clear(@u_off);
+	clear(@u_size);
+}
