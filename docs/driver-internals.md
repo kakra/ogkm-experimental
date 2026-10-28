@@ -117,7 +117,10 @@ fault buffer asks for huge pages and retries with 4 KB
   `echo 1 > /sys/module/nvidia_uvm/parameters/uvm_debug_prints`.
 - `dmaAllocMapping_GM107: can't update VA space` with `gpu_vaspace.c`
   asserts: user space mapped an already mapped GPU VA range or unmapped part
-  of one. RM rejects it; no process name is logged.
+  of one. RM rejects it; no process name is logged. The GotG case at
+  `gpu_vaspace.c:4502` is a stale VA in the user space driver
+  (`analysis/2026-10-28-vaspace-overlap.md`); `tools/trace/nv-vaspace-ioctl.bt`
+  shows the caller.
 
 ## Useful tracing points
 
@@ -125,4 +128,8 @@ Function names that kprobes can attach to in `nvidia.ko` (not inlined in
 615.78.08): `nv_alloc_system_pages`, `nv_free_system_pages`. Struct offsets
 for `nv_alloc_t` change between releases; check with
 `pahole -C nv_alloc_s /sys/kernel/btf/nvidia` before using
-`tools/trace/nv-sysmem-fail-trace.sh` on a new release.
+`tools/trace/nv-sysmem-fail-trace.sh` on a new release. The RM core
+(`nv-kernel.o`, e.g. `gvaspaceMap_IMPL`, `dmaAllocMapping_GM107`) cannot be
+probed: it is built without fentry, and kprobe_events refuses it as notrace.
+For RM API calls, use the ioctl syscall tracepoints and decode the escape
+parameters (`tools/trace/nv-vaspace-ioctl.bt`).
