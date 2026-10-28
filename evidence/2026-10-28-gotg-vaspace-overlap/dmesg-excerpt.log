@@ -1,0 +1,8 @@
+[ 8117.368752] NVRM: nvCheckFailedNoLog: Check failed: 0 == (pMapNode->gpuMask & gpuMask) @ gpu_vaspace.c:4502
+[ 8117.368756] NVRM: nvCheckOkFailedNoLog: Check failed: Invalid argument to call [NV_ERR_INVALID_ARGUMENT] (0x0000001F) returned from _gvaspaceMappingInsert(pGVAS, pGpu, pVASBlock, vaLo, vaHi, flags) @ gpu_vaspace.c:2035
+[ 8117.368757] NVRM: nvCheckFailedNoLog: Check failed: NV_OK == status @ virt_mem_allocator_gm107.c:2585
+[ 8117.368762] NVRM: dmaAllocMapping_GM107: can't update VA space for mapping @vaddr=0x27bb60000
+[ 8120.248171] NVRM: nvCheckFailedNoLog: Check failed: 0 == (pMapNode->gpuMask & gpuMask) @ gpu_vaspace.c:4502
+[ 8120.248175] NVRM: nvCheckOkFailedNoLog: Check failed: Invalid argument to call [NV_ERR_INVALID_ARGUMENT] (0x0000001F) returned from _gvaspaceMappingInsert(pGVAS, pGpu, pVASBlock, vaLo, vaHi, flags) @ gpu_vaspace.c:2035
+[ 8120.248175] NVRM: nvCheckFailedNoLog: Check failed: NV_OK == status @ virt_mem_allocator_gm107.c:2585
+[ 8120.248181] NVRM: dmaAllocMapping_GM107: can't update VA space for mapping @vaddr=0x28720000
