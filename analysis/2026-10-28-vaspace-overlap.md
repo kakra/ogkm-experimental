@@ -90,10 +90,12 @@ sequence is unknown.
 
 ## Next steps
 
-- Report to NVIDIA (developer forum, Linux section): the bug is in the
-  closed user space driver, not in the open kernel modules.
+- Reported to NVIDIA on 2026-10-28 in the [615 release feedback thread][forum-615]
+  (the bug is in the closed user space driver, not in the open kernel
+  modules).
 - Check whether the errors only appear with VRAM full, and whether other
   D3D12 games show the same sequence.
 
 [pr-1483]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1483
 [issue-1282]: https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1282
+[forum-615]: https://forums.developer.nvidia.com/t/615-release-feedback-discussion/382815/231
