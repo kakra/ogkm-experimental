@@ -29,7 +29,7 @@ order 9 once Unmovable pageblocks are spread over the zone
 
 | Option | Recommendation | Why |
 |---|---|---|
-| `NVreg_InitializeSystemMemoryAllocations=0` | remove | GPU system memory is then not zeroed by the driver. UVM's channel error notifier comes from such memory, and `uvm_channel.c` treats any non-zero status as an error: a likely cause of spurious "uvm encountered global fatal error" plus Xid 154 seen shortly after boot with driver 580 and this option (code reading) |
+| `NVreg_InitializeSystemMemoryAllocations=0` | remove | GPU system memory is then not zeroed by the driver. UVM's channel error notifier comes from such memory, and `uvm_channel.c` treats any non-zero status as an error: a possible cause of the spurious "uvm encountered global fatal error" plus Xid 154 seen shortly after boot with driver 580, which went away with `init_on_alloc` (code reading; that this option was set at the time is an unverified assumption, see [xid-errors](xid-errors.md)) |
 | `NVreg_UsePageAttributeTable=1` | remove | does not exist any more, only logs "unknown parameter" |
 | `nvidia-drm.modeset=1`, `nvidia-drm.fbdev=1` | keep | required for Wayland compositors |
 | `nvidia_drm.vblank` | default | on by default with the series, off upstream; `1` enables the RG vblank callbacks under `nvkms_lock` (see `docs/driver-internals.md`), `0` turns them off |
