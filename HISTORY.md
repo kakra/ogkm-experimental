@@ -18,6 +18,20 @@ failed in fragmented VRAM and fell back to system memory through patch 65
 and the upstream fallback. Not measured yet: `set_pages_array_uc` latency
 with the uncached pool (patch 44).
 
+Further games on 2026-10-28/29, same boot (a few hours of uptime after
+several reboots for driver changes):
+
+- Star Wars Outlaws and Avatar: Frontiers of Pandora, both VRAM hungry: no
+  NVRM messages.
+- No Rest for the Wicked, while a Borg backup ran: loading still takes
+  long, but all assets are visible as soon as the world appears; before,
+  some showed up 30 to 90 s later. No NVRM messages, no OOM.
+- 007 First Light, also during the backup, loaded into the world only:
+  no problems.
+
+Open: repeat these games after about 40 h of uptime, when memory is
+fragmented the way the earlier failures needed (`docs/system.md`).
+
 - 1 to 32: new versions of Tom's patches. They drop the A/B module
   parameters (`lazy_ctxdma_bind`, `unlocked_surface_rm`, `deadline_boost_stats`
   and others) and keep the former defaults. `deadline_boost=0` remains.
