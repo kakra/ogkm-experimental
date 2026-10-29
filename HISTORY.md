@@ -12,8 +12,12 @@ Fork branch `ogkm/615.78.08`, 99 patches on the upstream tag `615.78.08`.
 Tom's `gulafaran/patches` now carries our own patches too, so the series is
 his branch in his order, without the speculation barrier change, the hwmon
 device (two patches) and fdinfo usage stats. Our patches moved from the
-middle to 71 to 80. Built against 6.18.58, installed for a reboot; not
-tested yet.
+middle to 71 to 80. Built against 6.18.58.
+
+Installed on 2026-10-29 together with kernel 6.18.59 (two changes at
+once). The boot was clean: no NVRM messages, no warnings, KFENCE or
+lockdep reports from the nvidia modules, `uncached_pool_max_mb` at its
+default of 256, `nvidia_drm.vblank` on. No games tested yet.
 
 - 71: Tom fixed a use-after-free in our patch: it wrote `kick_time` into a
   flip that the flip event handler may already have freed. It is now set
