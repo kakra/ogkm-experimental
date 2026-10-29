@@ -70,6 +70,8 @@ written so that an AI coding agent can follow it as well.
   reading the kernel log)
 - [docs/tuning.md](docs/tuning.md): kernel and driver settings that helped,
   and how well each is backed by measurements
+- [docs/xid-errors.md](docs/xid-errors.md): every Xid seen on the test
+  system, what NVIDIA documents about it, and whether the series helps
 
 ## Patch sources
 
