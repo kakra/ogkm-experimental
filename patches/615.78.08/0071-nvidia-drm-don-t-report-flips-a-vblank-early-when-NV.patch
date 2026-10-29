@@ -27,19 +27,25 @@ otherwise keep the event pending until it is.
 
 Flips whose vblank didn't start during the call are reported as before.
 
-Fixes: 2ccd6ad0bf1d ("nvidia-drm: fix vblank timestamp clock and flip event vblank")
+[Tom Englund: set kick_time only while the flip is still in the CRTC's
+flip list, under flip_list_lock. The flip event can be handled before
+applyModeSetConfig() returns, and the flip is freed once it is dequeued,
+so writing it unconditionally could touch freed memory. A dequeued flip
+doesn't need it, its event time bounds the flip.]
+
+Fixes: 4a99576b0371 ("nvidia-drm: fix vblank timestamp clock and flip event vblank")
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ---
  kernel-open/nvidia-drm/nvidia-drm-crtc.c    | 89 ++++++++++++++++-----
- kernel-open/nvidia-drm/nvidia-drm-crtc.h    | 30 ++++++-
- kernel-open/nvidia-drm/nvidia-drm-modeset.c | 14 +++-
- 3 files changed, 109 insertions(+), 24 deletions(-)
+ kernel-open/nvidia-drm/nvidia-drm-crtc.h    | 55 ++++++++++++-
+ kernel-open/nvidia-drm/nvidia-drm-modeset.c | 17 +++-
+ 3 files changed, 137 insertions(+), 24 deletions(-)
 
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
-index 08dbad4a..9be3ddc6 100644
+index e8681d47..8d393db3 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
-@@ -3228,8 +3228,13 @@ failed:
+@@ -3299,8 +3299,13 @@ failed:
   * belong to the flip.
   *
   * Instead, keep a short history of handled vblanks and report each flip at
@@ -55,7 +61,7 @@ index 08dbad4a..9be3ddc6 100644
   *
   * Flips that may happen later than that are left without a submit time and
   * reported at the current vblank like before: tearing flips, flips waiting
-@@ -3285,21 +3290,32 @@ static void __nv_drm_crtc_send_flip_events_at(struct nv_drm_crtc *nv_crtc,
+@@ -3356,21 +3361,32 @@ static void __nv_drm_crtc_send_flip_events_at(struct nv_drm_crtc *nv_crtc,
  }
  
  /*
@@ -93,7 +99,7 @@ index 08dbad4a..9be3ddc6 100644
      for (i = 0; i < len; i++) {
          const unsigned int idx = (first + i) % NV_DRM_VBLANK_HISTORY;
          const NvU64 vblank_start = nv_crtc->vblank_history[idx].time -
-@@ -3310,14 +3326,44 @@ static bool __nv_drm_crtc_find_flip_vblank(const struct nv_drm_crtc *nv_crtc,
+@@ -3381,14 +3397,44 @@ static bool __nv_drm_crtc_find_flip_vblank(const struct nv_drm_crtc *nv_crtc,
           * submitted, the flip happened at it or an older one that has
           * dropped out of the history; the oldest is the best estimate.
           */
@@ -143,7 +149,7 @@ index 08dbad4a..9be3ddc6 100644
  }
  
  /*
-@@ -3340,8 +3386,7 @@ static void __nv_drm_crtc_process_pending_flip_events(struct nv_drm_crtc *nv_crt
+@@ -3411,8 +3457,7 @@ static void __nv_drm_crtc_process_pending_flip_events(struct nv_drm_crtc *nv_crt
  
          spin_lock_irqsave(&dev->vblank_time_lock, irqflags);
          if (nv_crtc->vblank_history_len > 0) {
@@ -153,7 +159,7 @@ index 08dbad4a..9be3ddc6 100644
                                                     &count, &time);
              if (!found && all) {
                  const unsigned int last =
-@@ -3378,7 +3423,8 @@ static void __nv_drm_crtc_process_pending_flip_events(struct nv_drm_crtc *nv_crt
+@@ -3449,7 +3494,8 @@ static void __nv_drm_crtc_process_pending_flip_events(struct nv_drm_crtc *nv_crt
   * once the vblank the flip happened at has been handled.
   */
  bool nv_drm_crtc_handle_flip_events(struct nv_drm_crtc *nv_crtc,
@@ -163,7 +169,7 @@ index 08dbad4a..9be3ddc6 100644
  {
      struct drm_device *dev = nv_crtc->base.dev;
      struct nv_drm_flip *nv_flip = *pp_nv_flip;
-@@ -3391,14 +3437,15 @@ bool nv_drm_crtc_handle_flip_events(struct nv_drm_crtc *nv_crtc,
+@@ -3462,14 +3508,15 @@ bool nv_drm_crtc_handle_flip_events(struct nv_drm_crtc *nv_crtc,
          return false;
      }
  
@@ -181,7 +187,7 @@ index 08dbad4a..9be3ddc6 100644
                                                 &count, &time);
      }
      spin_unlock_irqrestore(&dev->vblank_time_lock, irqflags);
-@@ -3518,12 +3565,14 @@ void nv_drm_crtc_set_vblank_duration(struct nv_drm_crtc *nv_crtc,
+@@ -3589,12 +3636,14 @@ void nv_drm_crtc_set_vblank_duration(struct nv_drm_crtc *nv_crtc,
      struct drm_device *dev = nv_crtc->base.dev;
      const struct drm_display_mode *mode = &crtc_state->adjusted_mode;
      unsigned long irqflags;
@@ -197,7 +203,7 @@ index 08dbad4a..9be3ddc6 100644
      }
  
  #if defined(NV_DRM_CRTC_STATE_HAS_VRR_ENABLED)
-@@ -3539,13 +3588,15 @@ void nv_drm_crtc_set_vblank_duration(struct nv_drm_crtc *nv_crtc,
+@@ -3610,13 +3659,15 @@ void nv_drm_crtc_set_vblank_duration(struct nv_drm_crtc *nv_crtc,
  
      spin_lock_irqsave(&dev->vblank_time_lock, irqflags);
      nv_crtc->vblank_duration_ns = duration;
@@ -215,7 +221,7 @@ index 08dbad4a..9be3ddc6 100644
      return false;
  }
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.h b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
-index e5e8d7d3..e8f72d5d 100644
+index 8ee71975..c15ec1be 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-crtc.h
 +++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
 @@ -72,6 +72,12 @@ struct nv_drm_crtc {
@@ -231,7 +237,7 @@ index e5e8d7d3..e8f72d5d 100644
      /*
       * Flips whose completion event arrived before the vblank they happened
       * at was handled; their DRM events are sent from the vblank callback.
-@@ -178,10 +184,27 @@ struct nv_drm_flip {
+@@ -188,10 +194,28 @@ struct nv_drm_flip {
       * @submit_time:
       *
       * CLOCK_MONOTONIC time (ns) just before the flip was handed to NVKMS. The
@@ -247,7 +253,8 @@ index e5e8d7d3..e8f72d5d 100644
 +     * @kick_time:
 +     *
 +     * CLOCK_MONOTONIC time (ns) just after NVKMS returned, so the hardware
-+     * got the flip before this. Zero until then.
++     * got the flip before this. Zero until then. Only set while the flip is
++     * in &nv_drm_crtc.flip_list, see nv_drm_crtc_set_flip_kick_time().
 +     */
 +    NvU64 kick_time;
 +
@@ -261,7 +268,7 @@ index e5e8d7d3..e8f72d5d 100644
  };
  
  struct nv_drm_crtc_state {
-@@ -353,7 +376,8 @@ static inline struct nv_drm_crtc *to_nv_crtc(struct drm_crtc *crtc)
+@@ -363,7 +387,8 @@ static inline struct nv_drm_crtc *to_nv_crtc(struct drm_crtc *crtc)
  }
  
  bool nv_drm_crtc_handle_flip_events(struct nv_drm_crtc *nv_crtc,
@@ -271,11 +278,58 @@ index e5e8d7d3..e8f72d5d 100644
  
  bool nv_drm_crtc_has_pending_flip_events(struct nv_drm_crtc *nv_crtc);
  
+@@ -438,6 +463,30 @@ struct nv_drm_flip *nv_drm_crtc_dequeue_flip(struct nv_drm_crtc *nv_crtc)
+     return nv_flip;
+ }
+ 
++/**
++ * nv_drm_crtc_set_flip_kick_time - Set the kick time of a flip that is
++ * still in flip_list of crtc.
++ *
++ * The flip event can be handled before NVKMS returns, and the flip is freed
++ * once it is dequeued, so only touch it while it is still queued. A dequeued
++ * flip doesn't need the kick time any more: its event time bounds the flip.
++ */
++static inline void nv_drm_crtc_set_flip_kick_time(struct nv_drm_crtc *nv_crtc,
++                                                  struct nv_drm_flip *nv_flip,
++                                                  NvU64 kick_time)
++{
++    struct nv_drm_flip *nv_queued_flip;
++
++    spin_lock(&nv_crtc->flip_list_lock);
++    list_for_each_entry(nv_queued_flip, &nv_crtc->flip_list, list_entry) {
++        if (nv_queued_flip == nv_flip) {
++            WRITE_ONCE(nv_flip->kick_time, kick_time);
++            break;
++        }
++    }
++    spin_unlock(&nv_crtc->flip_list_lock);
++}
++
+ void nv_drm_enumerate_crtcs_and_planes(
+     struct nv_drm_device *nv_dev,
+     const struct NvKmsKapiDeviceResourcesInfo *pResInfo);
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-modeset.c b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
-index 7c31fc97..3dcd81b2 100644
+index ec805876..27078860 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-modeset.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
-@@ -555,13 +555,14 @@ nv_drm_atomic_apply_modeset_config(struct drm_device *dev,
+@@ -458,6 +458,7 @@ nv_drm_atomic_apply_modeset_config(struct drm_device *dev,
+     struct drm_crtc *crtc;
+     struct drm_crtc_state *old_crtc_state, *new_crtc_state;
+     struct nv_drm_flip *submitted_flips[NVKMS_KAPI_MAX_HEADS];
++    struct nv_drm_crtc *submitted_crtcs[NVKMS_KAPI_MAX_HEADS];
+     int num_submitted_flips = 0;
+     int i;
+     int ret;
+@@ -532,6 +533,7 @@ nv_drm_atomic_apply_modeset_config(struct drm_device *dev,
+                 if (!__nv_drm_crtc_state_async_flip(new_crtc_state) &&
+                     !__nv_drm_crtc_has_unsignaled_in_fence(state, crtc) &&
+                     num_submitted_flips < ARRAY_SIZE(submitted_flips)) {
++                    submitted_crtcs[num_submitted_flips] = nv_crtc;
+                     submitted_flips[num_submitted_flips++] =
+                         nv_new_crtc_state->nv_flip;
+                 }
+@@ -571,13 +573,14 @@ nv_drm_atomic_apply_modeset_config(struct drm_device *dev,
      }
  
      /*
@@ -291,7 +345,7 @@ index 7c31fc97..3dcd81b2 100644
              WRITE_ONCE(submitted_flips[i]->submit_time, submit_time);
          }
      }
-@@ -573,6 +574,14 @@ nv_drm_atomic_apply_modeset_config(struct drm_device *dev,
+@@ -589,6 +592,15 @@ nv_drm_atomic_apply_modeset_config(struct drm_device *dev,
          return -EINVAL;
      }
  
@@ -299,14 +353,15 @@ index 7c31fc97..3dcd81b2 100644
 +        const NvU64 kick_time = ktime_get_ns();
 +
 +        for (i = 0; i < num_submitted_flips; i++) {
-+            WRITE_ONCE(submitted_flips[i]->kick_time, kick_time);
++            nv_drm_crtc_set_flip_kick_time(submitted_crtcs[i],
++                                           submitted_flips[i], kick_time);
 +        }
 +    }
 +
  #ifdef NV_DRM_SUPPORT_CONTENT_PROTECTION_PROPERTY
      if (commit) {
          struct drm_connector *connector;
-@@ -776,6 +785,7 @@ static void __nv_drm_handle_flip_event(struct nv_drm_crtc *nv_crtc)
+@@ -774,6 +786,7 @@ static void __nv_drm_handle_flip_event(struct nv_drm_crtc *nv_crtc)
      struct drm_device *dev = nv_crtc->base.dev;
      struct nv_drm_device *nv_dev = to_nv_device(dev);
      struct nv_drm_flip *nv_flip;
@@ -314,7 +369,7 @@ index 7c31fc97..3dcd81b2 100644
  
      /*
       * Acquire event_lock before nv_flip object dequeue, otherwise immediate
-@@ -785,7 +795,7 @@ static void __nv_drm_handle_flip_event(struct nv_drm_crtc *nv_crtc)
+@@ -783,7 +796,7 @@ static void __nv_drm_handle_flip_event(struct nv_drm_crtc *nv_crtc)
      spin_lock(&dev->event_lock);
      nv_flip = nv_drm_crtc_dequeue_flip(nv_crtc);
      if (likely(nv_flip != NULL) &&

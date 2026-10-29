@@ -38,10 +38,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  5 files changed, 244 insertions(+), 24 deletions(-)
 
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.h b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
-index e8f72d5d..b3e07e24 100644
+index e5e8d7d3..2d34b9c9 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-crtc.h
 +++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
-@@ -116,6 +116,16 @@ struct nv_drm_crtc {
+@@ -110,6 +110,16 @@ struct nv_drm_crtc {
       */
      spinlock_t flip_list_lock;
  
@@ -58,7 +58,7 @@ index e8f72d5d..b3e07e24 100644
      /**
       * @modeset_permission_filep:
       *
-@@ -414,6 +424,7 @@ static inline void nv_drm_crtc_enqueue_flip(struct nv_drm_crtc *nv_crtc,
+@@ -390,6 +400,7 @@ static inline void nv_drm_crtc_enqueue_flip(struct nv_drm_crtc *nv_crtc,
  {
      spin_lock(&nv_crtc->flip_list_lock);
      list_add(&nv_flip->list_entry, &nv_crtc->flip_list);
@@ -66,7 +66,7 @@ index e8f72d5d..b3e07e24 100644
      spin_unlock(&nv_crtc->flip_list_lock);
  }
  
-@@ -437,6 +448,7 @@ struct nv_drm_flip *nv_drm_crtc_dequeue_flip(struct nv_drm_crtc *nv_crtc)
+@@ -413,6 +424,7 @@ struct nv_drm_flip *nv_drm_crtc_dequeue_flip(struct nv_drm_crtc *nv_crtc)
          pending_events = --nv_flip->pending_events;
          if (!pending_events) {
              list_del(&nv_flip->list_entry);
@@ -97,7 +97,7 @@ index c3a984b5..39ec5514 100644
  
      drm_mode_config_cleanup(dev);
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-modeset.c b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
-index 06f39b32..ba0b169a 100644
+index 021c6930..724581e2 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-modeset.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
 @@ -40,6 +40,7 @@
@@ -108,7 +108,7 @@ index 06f39b32..ba0b169a 100644
  
  #if defined(NV_LINUX_NVHOST_H_PRESENT) && defined(CONFIG_TEGRA_GRHOST)
  #include <linux/nvhost.h>
-@@ -643,32 +644,16 @@ int nv_drm_atomic_check(struct drm_device *dev,
+@@ -634,32 +635,16 @@ int nv_drm_atomic_check(struct drm_device *dev,
      struct drm_crtc_state *crtc_state;
      int i;
  
@@ -146,7 +146,7 @@ index 06f39b32..ba0b169a 100644
  
          /*
           * Check if infoframe-related properties changed on any connector
-@@ -722,9 +707,7 @@ int nv_drm_atomic_check(struct drm_device *dev,
+@@ -713,9 +698,7 @@ int nv_drm_atomic_check(struct drm_device *dev,
           * the commit. Similarly, if infoframe properties changed, add all
           * planes to ensure the flip is serialized via flip_list.
           */
@@ -157,7 +157,7 @@ index 06f39b32..ba0b169a 100644
              if ((ret = drm_atomic_add_affected_planes(state, crtc)) != 0) {
                  goto done;
              }
-@@ -844,9 +827,209 @@ static void __nv_drm_handle_flip_event(struct nv_drm_crtc *nv_crtc)
+@@ -834,9 +817,209 @@ static void __nv_drm_handle_flip_event(struct nv_drm_crtc *nv_crtc)
  
      wake_up_all(&nv_dev->flip_event_wq);
  
@@ -367,7 +367,7 @@ index 06f39b32..ba0b169a 100644
  int nv_drm_atomic_commit(struct drm_device *dev,
                           nv_drm_atomic_state_base_t *state,
                           bool nonblock)
-@@ -857,6 +1040,7 @@ int nv_drm_atomic_commit(struct drm_device *dev,
+@@ -847,6 +1030,7 @@ int nv_drm_atomic_commit(struct drm_device *dev,
      struct drm_crtc *crtc = NULL;
      struct drm_crtc_state *crtc_state = NULL;
      struct nv_drm_device *nv_dev = to_nv_device(dev);
@@ -375,7 +375,7 @@ index 06f39b32..ba0b169a 100644
  
      /*
       * XXX: drm_mode_config_funcs::atomic_commit() mandates to return -EBUSY
-@@ -926,8 +1110,14 @@ int nv_drm_atomic_commit(struct drm_device *dev,
+@@ -916,8 +1100,14 @@ int nv_drm_atomic_commit(struct drm_device *dev,
       * expected.
       */
  
@@ -390,7 +390,7 @@ index 06f39b32..ba0b169a 100644
          return ret;
      }
  
-@@ -952,9 +1142,12 @@ int nv_drm_atomic_commit(struct drm_device *dev,
+@@ -942,9 +1132,12 @@ int nv_drm_atomic_commit(struct drm_device *dev,
              "Failed to apply atomic modeset.  Error code: %d",
              ret);
  

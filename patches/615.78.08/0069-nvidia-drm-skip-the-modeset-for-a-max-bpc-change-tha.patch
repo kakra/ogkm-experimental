@@ -1,0 +1,230 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 28 Oct 2026 20:44:05 +0100
+Subject: [PATCH] nvidia-drm: skip the modeset for a max bpc change that keeps
+ the bpc
+
+Changing "max bpc" always caused a full modeset: DRM core flags the
+connectors of the CRTC as changed, which nvidia-drm turns into an NVKMS
+modeset, and the patch adding the property also flagged the mode. That
+blanks the screen even when the display keeps its bpc, e.g. lowering the
+limit from 10 to 8 on a link that already only fits 8 bpc.
+
+When the new limit is still at least the bpc NVKMS currently drives and
+not higher than the old limit, the next modeset would pick the same bpc,
+so only the stored limit has to change. The connector check then clears
+the connectors_changed flag DRM core set, if the limit was its only
+reason: same CRTC, encoder, link status and color format, the CRTC drives
+only this connector and stays active, and nothing else asked for a
+modeset. It also checks that NVKMS still has the old limit stored. A
+higher limit may allow a higher bpc, so it still needs a modeset.
+
+KAPI now stores the limit for flips too, before the flip or modeset
+ioctl, so the skipped modeset doesn't lose it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/conftest.sh                       | 15 +++
+ kernel-open/nvidia-drm/nvidia-drm-connector.c | 92 +++++++++++++++++--
+ kernel-open/nvidia-drm/nvidia-drm-sources.mk  |  1 +
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 11 ++-
+ 4 files changed, 109 insertions(+), 10 deletions(-)
+
+diff --git a/kernel-open/conftest.sh b/kernel-open/conftest.sh
+index 15c22c2e..36e3fec5 100755
+--- a/kernel-open/conftest.sh
++++ b/kernel-open/conftest.sh
+@@ -4353,6 +4353,21 @@ compile_test() {
+             compile_check_conftest "$CODE" "NV_DRM_CONNECTOR_FUNCS_HAVE_DEBUGFS_INIT" "" "types"
+         ;;
+ 
++        drm_connector_state_has_color_format)
++            #
++            # Determine if 'struct drm_connector_state' has a 'color_format'
++            # member; DRM core flags the CRTC for a modeset when it changes.
++            #
++            CODE="
++            #include <drm/drm_crtc.h>
++            #include <drm/drm_connector.h>
++            int conftest_drm_connector_state_has_color_format(void) {
++                return offsetof(struct drm_connector_state, color_format);
++            }"
++
++            compile_check_conftest "$CODE" "NV_DRM_CONNECTOR_STATE_HAS_COLOR_FORMAT" "" "types"
++        ;;
++
+         iommu_sva_bind_device_has_drvdata_arg)
+             #
+             # Check if iommu_sva_bind_device() has drvdata parameter.
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index d52f1582..c7f4ee8c 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -783,6 +783,82 @@ static const NvU32 __nv_drm_connector_supported_colorspaces =
+ #endif
+ 
+ #if defined(NV_DRM_CONNECTOR_ATTACH_HDR_OUTPUT_METADATA_PROPERTY_PRESENT)
++/* NVKMS drives 8, 10 or 12 bpc; round a "max bpc" value down to one of them */
++static NvU8 nv_drm_connector_round_max_bpc(unsigned int max_bpc)
++{
++    return (max_bpc >= 12) ? 12 : (max_bpc >= 10) ? 10 : 8;
++}
++
++/*
++ * A "max bpc" change only needs a modeset if it changes the bpc NVKMS drives
++ * the display with. When the new limit is still at least the current bpc and
++ * not higher than the old limit, the next modeset would pick the same bpc, so
++ * NVKMS only has to store the limit, which a flip does as well. A higher
++ * limit may allow a higher bpc, so it still needs a modeset.
++ *
++ * DRM core flags the CRTC's connectors as changed for any "max bpc" change.
++ * Only skip the modeset if that is the only reason: same CRTC, encoder, link
++ * status and color format, and the CRTC drives just this connector and stays
++ * active without other modeset changes.
++ */
++static bool
++nv_drm_connector_max_bpc_needs_modeset(struct drm_connector *connector,
++                                       nv_drm_atomic_state_base_t *state,
++                                       struct drm_crtc_state *crtc_state)
++{
++    struct nv_drm_device *nv_dev = to_nv_device(connector->dev);
++    struct nv_drm_connector *nv_connector = to_nv_connector(connector);
++    const struct drm_connector_state *old_connector_state =
++        drm_atomic_get_old_connector_state(state, connector);
++    const struct drm_connector_state *new_connector_state =
++        drm_atomic_get_new_connector_state(state, connector);
++    const struct drm_crtc_state *old_crtc_state =
++        drm_atomic_get_old_crtc_state(state, crtc_state->crtc);
++    const NvU8 old_max_bpc =
++        nv_drm_connector_round_max_bpc(old_connector_state->max_requested_bpc);
++    const NvU8 new_max_bpc =
++        nv_drm_connector_round_max_bpc(new_connector_state->max_requested_bpc);
++    NvU32 bpc = 0;
++    NvU32 stored_max_bpc = 0;
++
++    if (crtc_state->mode_changed ||
++        crtc_state->active_changed ||
++        !crtc_state->active ||
++        (old_connector_state->crtc != new_connector_state->crtc) ||
++        (old_connector_state->best_encoder !=
++         new_connector_state->best_encoder) ||
++        (old_connector_state->link_status !=
++         new_connector_state->link_status) ||
++#if defined(NV_DRM_CONNECTOR_STATE_HAS_COLOR_FORMAT)
++        (old_connector_state->color_format !=
++         new_connector_state->color_format) ||
++#endif
++        (old_crtc_state->connector_mask != crtc_state->connector_mask) ||
++        (hweight32(crtc_state->connector_mask) != 1) ||
++        (nv_connector->nv_detected_encoder == NULL)) {
++        return true;
++    }
++
++    if (new_max_bpc > old_max_bpc) {
++        return true;
++    }
++
++    /*
++     * Commits reach NVKMS before the commit ioctl returns, so NVKMS drives
++     * the display as in the old state; it must also have stored the old
++     * limit.
++     */
++    if (!nvKms->getDisplayColorBpc(nv_dev->pDevice,
++                                   nv_connector->nv_detected_encoder->hDisplay,
++                                   &bpc, &stored_max_bpc)) {
++        return true;
++    }
++
++    return (stored_max_bpc != old_max_bpc) ||
++           (bpc == 0) ||
++           (bpc > new_max_bpc);
++}
++
+ static int
+ __nv_drm_connector_atomic_check(struct drm_connector *connector,
+                                 nv_drm_atomic_state_base_t *state)
+@@ -844,7 +920,8 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
+      * Handle "max bpc". Like the color range it is only applied by a
+      * modeset; DRM core already flags the CRTC when it changes. Pass it along
+      * with every modeset, so it also reaches a display that is newly driven
+-     * by this CRTC or was recreated by a hotplug.
++     * by this CRTC or was recreated by a hotplug. A change that keeps the
++     * current bpc is only stored, without a modeset.
+      */
+     if (connector->max_bpc_property != NULL) {
+         const NvBool maxBpcChanged =
+@@ -852,15 +929,18 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
+             new_connector_state->max_requested_bpc;
+ 
+         if (maxBpcChanged || drm_atomic_crtc_needs_modeset(crtc_state)) {
+-            const unsigned int max_bpc = new_connector_state->max_requested_bpc;
+-
+-            /* NVKMS drives 8, 10 or 12 bpc; round down to one of them */
+             req_config->modeSetConfig.maxBpc =
+-                (max_bpc >= 12) ? 12 : (max_bpc >= 10) ? 10 : 8;
++                nv_drm_connector_round_max_bpc(
++                    new_connector_state->max_requested_bpc);
+             req_config->flags.maxBpcChanged = NV_TRUE;
+         }
+         if (maxBpcChanged) {
+-            crtc_state->mode_changed = true;
++            if (nv_drm_connector_max_bpc_needs_modeset(connector, state,
++                                                       crtc_state)) {
++                crtc_state->mode_changed = true;
++            } else {
++                crtc_state->connectors_changed = false;
++            }
+         }
+     }
+ 
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-sources.mk b/kernel-open/nvidia-drm/nvidia-drm-sources.mk
+index e349f947..9c83ff66 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-sources.mk
++++ b/kernel-open/nvidia-drm/nvidia-drm-sources.mk
+@@ -103,6 +103,7 @@ NV_CONFTEST_TYPE_COMPILE_TESTS += dma_resv_reserve_fences
+ NV_CONFTEST_TYPE_COMPILE_TESTS += reservation_object_reserve_shared_has_num_fences_arg
+ NV_CONFTEST_TYPE_COMPILE_TESTS += drm_connector_has_override_edid
+ NV_CONFTEST_TYPE_COMPILE_TESTS += drm_connector_funcs_have_debugfs_init
++NV_CONFTEST_TYPE_COMPILE_TESTS += drm_connector_state_has_color_format
+ NV_CONFTEST_TYPE_COMPILE_TESTS += drm_file_get_master
+ NV_CONFTEST_TYPE_COMPILE_TESTS += drm_modeset_lock_all_end
+ NV_CONFTEST_TYPE_COMPILE_TESTS += drm_driver_has_dumb_destroy
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index 790100dd..a8a04ba1 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -3655,9 +3655,10 @@ static void SetRequestedColorRange(
+ }
+ 
+ /*
+- * Store the requested bpc limit on the displays. Like the color range, the
+- * modeset that follows applies it, and a limit can't make a mode fail that
+- * passes without it, so a TEST_ONLY check skips it.
++ * Store the requested bpc limit on the displays; the next modeset applies it.
++ * nvidia-drm skips the modeset when the limit keeps the current bpc, so this
++ * is done for flips too. A limit can't make a mode fail that passes without
++ * it, so a TEST_ONLY check skips it.
+  */
+ static void SetRequestedColorBpcMax(
+     struct NvKmsKapiDevice *device,
+@@ -3824,7 +3825,6 @@ static NvBool KmsSetMode(
+     /* The range can't make a modeset fail, so a TEST_ONLY check skips it */
+     if (commit) {
+         SetRequestedColorRange(device, requestedConfig);
+-        SetRequestedColorBpcMax(device, requestedConfig);
+     }
+ 
+     status = nvkms_ioctl_from_kapi_try_pmlock(device->pKmsOpen,
+@@ -4184,9 +4184,12 @@ static NvBool ApplyModeSetConfig(
+     /*
+      * The content type is sent without a modeset, so set it for flips too.
+      * A modeset sends the AVI InfoFrame of newly driven displays with it.
++     * The bpc limit can change without a modeset too, and has to be stored
++     * before a modeset applies it.
+      */
+     if (commit) {
+         SetContentType(device, requestedConfig);
++        SetRequestedColorBpcMax(device, requestedConfig);
+     }
+ 
+     if (bRequiredModeset) {

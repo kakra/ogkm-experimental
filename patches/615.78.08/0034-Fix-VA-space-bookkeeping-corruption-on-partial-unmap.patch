@@ -28,13 +28,9 @@ mappings of the same client.
 Symptom on a 4 GB GPU under memory pressure: intermap "Failed to insert new
 mapping node for range ...", gpu_vaspace.c asserts and "can't update VA
 space for mapping @vaddr=..." from dmaAllocMapping, i.e. the same family as
-the upstream issues below.
+upstream issues 1364 and 1453 (from upstream PR 1483).
 
-References:
-- NVIDIA/open-gpu-kernel-modules issue 1364
-- NVIDIA/open-gpu-kernel-modules issue 1453
-
-(cherry picked from commit 37ef7bc0f289a02319b58d88144192f81d78f865)
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../arch/maxwell/virt_mem_allocator_gm107.c   | 26 +++++++-
  src/nvidia/src/kernel/mem_mgr/virtual_mem.c   | 65 ++++++++++++++++++-

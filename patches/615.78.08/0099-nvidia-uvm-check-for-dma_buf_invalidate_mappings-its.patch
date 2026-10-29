@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 16:45:56 +0100
+Subject: [PATCH] nvidia-uvm: check for dma_buf_invalidate_mappings() itself
+
+uvm_dmabuf_test.c chose between dma_buf_invalidate_mappings() and
+dma_buf_move_notify() by whether dma_buf_attach_ops has invalidate_mappings.
+Some kernels (Ubuntu linux-gcp 7.0.0-1014) rename the function but keep the
+move_notify callback name, and the build failed with an implicit declaration
+of dma_buf_move_notify(). Add a conftest for the function and use that.
+
+Fixes upstream issue 1465.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/conftest.sh                  | 15 +++++++++++++++
+ kernel-open/nvidia-uvm/nvidia-uvm.Kbuild |  1 +
+ kernel-open/nvidia-uvm/uvm_dmabuf_test.c |  2 +-
+ 3 files changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/kernel-open/conftest.sh b/kernel-open/conftest.sh
+index 36e3fec5..52e60297 100755
+--- a/kernel-open/conftest.sh
++++ b/kernel-open/conftest.sh
+@@ -2565,6 +2565,21 @@ compile_test() {
+             fi
+         ;;
+ 
++        dma_buf_invalidate_mappings)
++            #
++            # Determine if the dma_buf_invalidate_mappings() function is
++            # present. It replaces dma_buf_move_notify(), and some kernels
++            # rename the function without renaming the
++            # dma_buf_attach_ops::move_notify() callback.
++            #
++            CODE="
++            #include <linux/dma-buf.h>
++            void conftest_dma_buf_invalidate_mappings(void) {
++                dma_buf_invalidate_mappings();
++            }"
++            compile_check_conftest "$CODE" "NV_DMA_BUF_INVALIDATE_MAPPINGS_PRESENT" "" "functions"
++        ;;
++
+         drm_fb_create_takes_format_info)
+             #
+             # Determine if a `struct drm_format_info *` is passed into
+diff --git a/kernel-open/nvidia-uvm/nvidia-uvm.Kbuild b/kernel-open/nvidia-uvm/nvidia-uvm.Kbuild
+index 6883f700..7b8c0576 100644
+--- a/kernel-open/nvidia-uvm/nvidia-uvm.Kbuild
++++ b/kernel-open/nvidia-uvm/nvidia-uvm.Kbuild
+@@ -51,6 +51,7 @@ NV_OBJECTS_DEPEND_ON_CONFTEST += $(NVIDIA_UVM_OBJECTS)
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += list_is_first
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += ioasid_get
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += mm_pasid_drop
++NV_CONFTEST_FUNCTION_COMPILE_TESTS += dma_buf_invalidate_mappings
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += iommu_sva_bind_device_has_drvdata_arg
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += for_each_sgtable_dma_page
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += folio_test_swapcache
+diff --git a/kernel-open/nvidia-uvm/uvm_dmabuf_test.c b/kernel-open/nvidia-uvm/uvm_dmabuf_test.c
+index db69a042..aa349972 100644
+--- a/kernel-open/nvidia-uvm/uvm_dmabuf_test.c
++++ b/kernel-open/nvidia-uvm/uvm_dmabuf_test.c
+@@ -285,7 +285,7 @@ NV_STATUS uvm_test_revoke_dma_buf(UVM_TEST_REVOKE_DMA_BUF_PARAMS *params,
+     // but in UVM's use case all GMMU mappings will be withdrawn and any
+     // further access should produce a fatal fault.
+     dma_resv_lock(dmabuf->resv, NULL);
+-#if defined(NV_DMA_BUF_ATTACH_OPS_HAS_INVALIDATE_MAPPINGS)
++#if defined(NV_DMA_BUF_INVALIDATE_MAPPINGS_PRESENT)
+     dma_buf_invalidate_mappings(dmabuf);
+ #else
+     dma_buf_move_notify(dmabuf);

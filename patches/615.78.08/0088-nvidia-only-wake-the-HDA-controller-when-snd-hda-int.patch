@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 16:45:06 +0100
+Subject: [PATCH] nvidia: only wake the HDA controller when snd-hda-intel
+ drives it
+
+nv_audio_dynamic_power() takes the driver data of the GPU's audio function as
+a struct snd_card without checking which driver is bound. With the function
+bound to vfio-pci (or any other driver) it walks foreign data as the card's
+device list and oopses (page fault at 0x10000001c / 0x41c). It also dropped
+the device reference right away (os_pci_init_handle()) and didn't keep the
+driver from being unbound while it used the card.
+
+Hold a device reference and the device lock while using the card, and only
+touch it when snd_hda_intel is bound. Don't wait for the device lock: the
+wakeup is best effort.
+
+Fixes upstream issues 1365 and 1410.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia/nv.c | 42 ++++++++++++++++++++++++++++++-----------
+ 1 file changed, 31 insertions(+), 11 deletions(-)
+
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index dd669a40..77da4614 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -6131,25 +6131,39 @@ void NV_API_CALL nv_audio_dynamic_power(
+ 
+     pci_dev = to_pci_dev(dev);
+ 
+-    audio_pci_dev = os_pci_init_handle(NV_PCI_DOMAIN_NUMBER(pci_dev),
+-                                       NV_PCI_BUS_NUMBER(pci_dev),
+-                                       NV_PCI_SLOT_NUMBER(pci_dev),
+-                                       1, NULL, NULL);
++    if (!NV_MAY_SLEEP())
++        return;
+ 
++    audio_pci_dev = NV_GET_DOMAIN_BUS_AND_SLOT(NV_PCI_DOMAIN_NUMBER(pci_dev),
++                                               NV_PCI_BUS_NUMBER(pci_dev),
++                                               PCI_DEVFN(NV_PCI_SLOT_NUMBER(pci_dev), 1));
+     if (audio_pci_dev == NULL)
+         return;
+ 
++    /*
++     * The driver data is only a struct snd_card when snd-hda-intel is bound
++     * (the function may be bound to vfio-pci, for example). Hold the device
++     * lock so that it can't be unbound and free the card meanwhile; don't
++     * wait for it, the wakeup is best effort.
++     */
++    if (!device_trylock(&audio_pci_dev->dev))
++        goto put_dev;
++
++    if ((audio_pci_dev->driver == NULL) ||
++        (strcmp(audio_pci_dev->driver->name, "snd_hda_intel") != 0))
++        goto unlock;
++
+     /*
+      * Check if HDA controller is in pm suspended state. The HDA contoller
+      * can not be runtime resumed if this API is called during system
+      * suspend/resume time and HDA controller is in pm suspended state.
+      */
+     if (audio_pci_dev->dev.power.is_suspended)
+-        return;
++        goto unlock;
+ 
+     card = pci_get_drvdata(audio_pci_dev);
+     if (card == NULL)
+-        return;
++        goto unlock;
+ 
+     /*
+      * Commit be57bfffb7b5 ("ALSA: hda: move hda_codec.h to include/sound")
+@@ -6183,7 +6197,7 @@ void NV_API_CALL nv_audio_dynamic_power(
+                  */
+                 if (codec->core.exec_verb == NULL)
+                 {
+-                    return;
++                    goto unlock;
+                 }
+ 
+                 break;
+@@ -6192,13 +6206,13 @@ void NV_API_CALL nv_audio_dynamic_power(
+ 
+         if (codec == NULL)
+         {
+-            return;
++            goto unlock;
+         }
+ 
+         /* If HDA codec controller is already runtime active, then return */
+         if (snd_hdac_is_power_on(&codec->core))
+         {
+-            return;
++            goto unlock;
+         }
+ 
+         /*
+@@ -6228,11 +6242,11 @@ void NV_API_CALL nv_audio_dynamic_power(
+          * process teardown.
+          */
+         if (current->fs == NULL)
+-            return;
++            goto unlock;
+ 
+         /* If device is runtime active, then return */
+         if (audio_pci_dev->dev.power.runtime_status == RPM_ACTIVE)
+-            return;
++            goto unlock;
+ 
+         for (codec_addr = 0; codec_addr < NV_HDA_MAX_CODECS; codec_addr++)
+         {
+@@ -6252,6 +6266,12 @@ void NV_API_CALL nv_audio_dynamic_power(
+         }
+     }
+ #endif
++
++unlock:
++    device_unlock(&audio_pci_dev->dev);
++
++put_dev:
++    pci_dev_put(audio_pci_dev);
+ #endif
+ }
+ 

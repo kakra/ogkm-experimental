@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 16:45:06 +0100
+Subject: [PATCH] nvidia: quiesce GPUs without the procfs interface when
+ restoring a hibernation image
+
+The kernel that loads a hibernation image freezes its devices before it jumps
+into the image, but it only sends PM_RESTORE_PREPARE, which nv_pm_notifier()
+ignored. With PreserveVideoMemoryAllocations set, nv_pmops_freeze() then fails
+the freeze with "System Power Management attempted without driver procfs
+suspend interface" and the restore is abandoned (pci_pm_freeze returns -5,
+"resume failed (-5)", a fresh boot follows). This happens whenever nvidia is
+loaded from the initramfs, which is common for early KMS.
+
+The video memory of that kernel is discarded when the image takes over, so
+there is nothing to preserve, and the procfs/notifier suspend can't be used
+there anyway: the initramfs usually lacks NVreg_TemporaryFilePath. Mark the
+restore between PM_RESTORE_PREPARE and PM_POST_RESTORE, and let
+nvidia_suspend() quiesce the GPU through the freeze callback with video
+memory preservation off for that call.
+
+Register the PM notifier regardless of NVreg_UseKernelSuspendNotifiers, so
+that the restore is handled with the procfs interface too; without kernel
+suspend notifiers it only acts on the restore events.
+
+Fixes upstream issues 1343 and 1335 (first part).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia/nv.c | 76 +++++++++++++++++++++++++++++++----------
+ 1 file changed, 58 insertions(+), 18 deletions(-)
+
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index bc1adcad..dd669a40 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -198,6 +198,12 @@ static nv_power_state_t nv_system_power_state;
+ static nv_pm_action_depth_t nv_system_pm_action_depth;
+ struct semaphore nv_system_power_state_lock;
+ 
++/*
++ * Set between PM_RESTORE_PREPARE and PM_POST_RESTORE, while this kernel loads
++ * a hibernation image and quiesces its devices before jumping into it.
++ */
++static NvBool nv_restoring_hibernation_image;
++
+ #include <linux/suspend.h>
+ 
+ static int nv_pm_notifier(struct notifier_block *nb, unsigned long event, void *unused);
+@@ -986,15 +992,15 @@ static int __init nvidia_init_module(void)
+     }
+ 
+ #if defined(CONFIG_PM)
+-    if (NVreg_UseKernelSuspendNotifiers)
++    /*
++     * Register the PM notifier for automatic suspend/resume, and in any case
++     * for restoring hibernation images.
++     */
++    rc = register_pm_notifier(&nv_pm_nb);
++    if (rc != 0)
+     {
+-        /* Register PM notifier for automatic suspend/resume */
+-        rc = register_pm_notifier(&nv_pm_nb);
+-        if (rc != 0)
+-        {
+-            nv_printf(NV_DBG_ERRORS, "NVRM: Failed to register PM notifier\n");
+-            goto procfs_exit;
+-        }
++        nv_printf(NV_DBG_ERRORS, "NVRM: Failed to register PM notifier\n");
++        goto procfs_exit;
+     }
+ #endif
+ 
+@@ -1154,10 +1160,7 @@ caps_root_exit:
+ 
+ pm_notifier_exit:
+ #if defined(CONFIG_PM)
+-    if (NVreg_UseKernelSuspendNotifiers)
+-    {
+-        unregister_pm_notifier(&nv_pm_nb);
+-    }
++    unregister_pm_notifier(&nv_pm_nb);
+ 
+ procfs_exit:
+ #endif
+@@ -1188,10 +1191,7 @@ static void __exit nvidia_exit_module(void)
+     nv_caps_root_exit();
+ 
+ #if defined(CONFIG_PM)
+-    if (NVreg_UseKernelSuspendNotifiers)
+-    {
+-        unregister_pm_notifier(&nv_pm_nb);
+-    }
++    unregister_pm_notifier(&nv_pm_nb);
+ #endif
+ 
+     nv_procfs_exit();
+@@ -4748,6 +4748,12 @@ static int nv_pm_notifier(struct notifier_block *nb, unsigned long event, void *
+     nv_power_state_t power_state;
+     const char *name;
+ 
++    if (!NVreg_UseKernelSuspendNotifiers &&
++        (event != PM_RESTORE_PREPARE) && (event != PM_POST_RESTORE))
++    {
++        return NOTIFY_DONE;
++    }
++
+     switch (event) {
+     case PM_SUSPEND_PREPARE:
+         power_state = NV_POWER_STATE_IN_STANDBY;
+@@ -4765,6 +4771,19 @@ static int nv_pm_notifier(struct notifier_block *nb, unsigned long event, void *
+         name = "resume";
+         break;
+ 
++    /*
++     * Restoring a hibernation image doesn't go through PM_HIBERNATION_PREPARE;
++     * see nvidia_suspend(). PM_POST_RESTORE is only sent if the restore
++     * failed and this kernel keeps running.
++     */
++    case PM_RESTORE_PREPARE:
++        WRITE_ONCE(nv_restoring_hibernation_image, NV_TRUE);
++        return NOTIFY_OK;
++
++    case PM_POST_RESTORE:
++        WRITE_ONCE(nv_restoring_hibernation_image, NV_FALSE);
++        return NOTIFY_OK;
++
+     default:
+         return NOTIFY_DONE;
+     }
+@@ -4871,6 +4890,7 @@ nvidia_suspend(
+     struct pci_dev *pci_dev = NULL;
+     nv_linux_state_t *nvl;
+     nv_state_t *nv;
++    NvBool restoring_image;
+ 
+     if (dev_is_pci(dev))
+     {
+@@ -4928,9 +4948,18 @@ nvidia_suspend(
+         goto pci_pm;
+     }
+ 
++    /*
++     * The video memory of the kernel that restores a hibernation image is
++     * discarded when the image takes over, so its devices are quiesced
++     * without preserving it. The procfs and PM notifier interfaces can't
++     * be used for that: this kernel usually runs from the initramfs.
++     */
++    restoring_image = !is_procfs_suspend &&
++                      READ_ONCE(nv_restoring_hibernation_image);
++
+     if (nv->preserve_vidmem_allocations &&
+         nv_dev_needs_vidmem_preservation(nv) &&
+-        !is_procfs_suspend)
++        !is_procfs_suspend && !restoring_image)
+     {
+         NV_DEV_PRINTF(NV_DBG_ERRORS, nv,
+                       "PreserveVideoMemoryAllocations module parameter is set. "
+@@ -4942,7 +4971,18 @@ nvidia_suspend(
+ 
+     nvidia_modeset_suspend(nv->gpu_id);
+ 
+-    status = nv_power_management(nv, pm_action);
++    if (restoring_image)
++    {
++        NvBool preserve_vidmem_allocations = nv->preserve_vidmem_allocations;
++
++        nv->preserve_vidmem_allocations = NV_FALSE;
++        status = nv_power_management(nv, pm_action);
++        nv->preserve_vidmem_allocations = preserve_vidmem_allocations;
++    }
++    else
++    {
++        status = nv_power_management(nv, pm_action);
++    }
+ 
+     nv->flags |= NV_FLAG_SUSPENDED;
+ 

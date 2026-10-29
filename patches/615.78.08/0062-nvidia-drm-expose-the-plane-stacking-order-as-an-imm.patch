@@ -55,7 +55,7 @@ index 94ea0f82..d913c48c 100755
              #
              # Determine if struct drm_format_info has .is_yuv member.
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
-index 89e87239..1a197318 100644
+index 70331cc6..e0b636be 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
 @@ -3243,6 +3243,19 @@ nv_drm_plane_create(struct drm_device *dev,

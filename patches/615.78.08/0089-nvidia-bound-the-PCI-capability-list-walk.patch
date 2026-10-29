@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 16:45:06 +0100
+Subject: [PATCH] nvidia: bound the PCI capability list walk
+
+nv_find_pci_capability() only stopped at a NULL next pointer or capability ID
+0xff. A capability list that loops, even transiently through a bad config
+read, made it spin forever: a read of /proc/driver/nvidia/gpus/*/information
+pinned a CPU for hours with soft lockups. Cap the walk at 48 entries like the
+kernel's pci_find_capability() (PCI_FIND_CAP_TTL).
+
+Fixes upstream issue 1479.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia/nv-pci.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/kernel-open/nvidia/nv-pci.c b/kernel-open/nvidia/nv-pci.c
+index 43ea2526..0007747a 100644
+--- a/kernel-open/nvidia/nv-pci.c
++++ b/kernel-open/nvidia/nv-pci.c
+@@ -3089,6 +3089,8 @@ NvU8 nv_find_pci_capability(struct pci_dev *pci_dev, NvU8 capability)
+ {
+     u16 status = 0;
+     u8  cap_ptr = 0, cap_id = 0xff;
++    /* Same bound as PCI_FIND_CAP_TTL, in case the list loops */
++    int ttl = 48;
+ 
+     pci_read_config_word(pci_dev, PCI_STATUS, &status);
+     status &= PCI_STATUS_CAP_LIST;
+@@ -3110,7 +3112,7 @@ NvU8 nv_find_pci_capability(struct pci_dev *pci_dev, NvU8 capability)
+         if (cap_id == capability)
+             return cap_ptr;
+         pci_read_config_byte(pci_dev, cap_ptr + PCI_CAP_LIST_NEXT, &cap_ptr);
+-    } while (cap_ptr && cap_id != 0xff);
++    } while (cap_ptr && cap_id != 0xff && --ttl > 0);
+ 
+     return 0;
+ }

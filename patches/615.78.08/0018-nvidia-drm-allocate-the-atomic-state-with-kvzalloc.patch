@@ -19,7 +19,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 10 insertions(+), 3 deletions(-)
 
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-modeset.c b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
-index 3dcd81b2..b359da4d 100644
+index 7c31fc97..b37fa5f5 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-modeset.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
 @@ -48,6 +48,8 @@

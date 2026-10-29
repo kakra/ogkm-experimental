@@ -1,0 +1,365 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 08:06:55 +0100
+Subject: [PATCH] nvidia-drm: skip the modeset for a higher max bpc that can't
+ raise the bpc
+
+Raising "max bpc" always caused a modeset, as a higher limit may allow a
+higher bpc. But often the limit isn't what holds the bpc down: on a
+DisplayPort link without the bandwidth for 10 bpc, NVKMS drives 8 bpc
+under a limit of 10 or 12 alike. KWin switches the limit between 10 and
+12 with its color accuracy setting, so that blanked the screen for a
+modeset that picked 8 bpc again.
+
+NVKMS now records, with the current color, whether the bpc limit lowered
+the bpc (nvLimitColorBpcEvo), and reports it through a new read-only
+display attribute, NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_LIMITED. If the
+limit didn't lower it, the display, the link bandwidth or a requested bpc
+did, and a higher limit gives the same bpc. KAPI's getDisplayColorBpc
+returns it, and nvidia-drm only does a modeset for a higher limit when it
+is set. The current_bpc debugfs file shows it as "Limited".
+
+The flag is conservative: when the limit lowered the bpc and the link
+then lowered it further, it stays set, so a higher limit still does a
+modeset.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nvkms-kapi.h           | 14 +++++----
+ kernel-open/nvidia-drm/nvidia-drm-connector.c | 30 ++++++++++---------
+ src/nvidia-modeset/include/nvkms-types.h      |  3 ++
+ src/nvidia-modeset/interface/nvkms-api.h      |  8 +++++
+ .../kapi/interface/nvkms-kapi.h               | 14 +++++----
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 11 +++++--
+ src/nvidia-modeset/src/nvkms-attributes.c     | 19 ++++++++++++
+ src/nvidia-modeset/src/nvkms-evo.c            |  5 ++++
+ 8 files changed, 77 insertions(+), 27 deletions(-)
+
+diff --git a/kernel-open/common/inc/nvkms-kapi.h b/kernel-open/common/inc/nvkms-kapi.h
+index 4e6bf902..1aec355b 100644
+--- a/kernel-open/common/inc/nvkms-kapi.h
++++ b/kernel-open/common/inc/nvkms-kapi.h
+@@ -1729,13 +1729,16 @@ struct NvKmsKapiFunctionsTable {
+      * Query the output color bpc that a display is currently driven with,
+      * and the bpc limit stored for it.
+      *
+-     * \param [in]  device   A device allocated using allocateDevice().
++     * \param [in]  device    A device allocated using allocateDevice().
+      *
+-     * \param [in]  display  The display to query.
++     * \param [in]  display   The display to query.
+      *
+-     * \param [out] pBpc     The current bpc, 0 if unknown.
++     * \param [out] pBpc      The current bpc, 0 if unknown.
+      *
+-     * \param [out] pMaxBpc  The bpc limit, 0 for none.
++     * \param [out] pMaxBpc   The bpc limit, 0 for none.
++     *
++     * \param [out] pLimited  Whether the limit lowered the current bpc; if
++     *                        not, a higher limit wouldn't raise it.
+      *
+      * \return NV_TRUE on success, NV_FALSE on failure.
+      */
+@@ -1743,7 +1746,8 @@ struct NvKmsKapiFunctionsTable {
+         struct NvKmsKapiDevice *device,
+         NvKmsKapiDisplay display,
+         NvU32 *pBpc,
+-        NvU32 *pMaxBpc
++        NvU32 *pMaxBpc,
++        NvBool *pLimited
+     );
+ };
+ 
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index c7f4ee8c..0bb3cb4e 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -502,9 +502,10 @@ static int nv_drm_connector_atomic_get_property(
+ 
+ #if defined(NV_DRM_CONNECTOR_FUNCS_HAVE_DEBUGFS_INIT) && defined(CONFIG_DEBUG_FS)
+ /*
+- * current_bpc: the bpc NVKMS currently drives the display with, and the bpc
+- * limit NVKMS has stored for it from "max bpc" (0 for none). DRM core's
+- * output_bpc file next to it shows the maximum the display supports.
++ * current_bpc: the bpc NVKMS currently drives the display with, the bpc
++ * limit NVKMS has stored for it from "max bpc" (0 for none), and whether
++ * that limit lowered the bpc. DRM core's output_bpc file next to it shows the
++ * maximum the display supports.
+  */
+ static int nv_drm_connector_current_bpc_show(struct seq_file *m, void *data)
+ {
+@@ -514,6 +515,7 @@ static int nv_drm_connector_current_bpc_show(struct seq_file *m, void *data)
+     struct nv_drm_connector *nv_connector = to_nv_connector(connector);
+     NvU32 bpc = 0;
+     NvU32 max_bpc = 0;
++    NvBool limited = NV_FALSE;
+     int idx;
+     int ret = 0;
+ 
+@@ -528,7 +530,7 @@ static int nv_drm_connector_current_bpc_show(struct seq_file *m, void *data)
+         (nv_connector->nv_detected_encoder != NULL) &&
+         !nvKms->getDisplayColorBpc(nv_dev->pDevice,
+                                    nv_connector->nv_detected_encoder->hDisplay,
+-                                   &bpc, &max_bpc)) {
++                                   &bpc, &max_bpc, &limited)) {
+         ret = -EIO;
+     }
+ 
+@@ -539,6 +541,7 @@ static int nv_drm_connector_current_bpc_show(struct seq_file *m, void *data)
+     if (ret == 0) {
+         seq_printf(m, "Current: %u\n", bpc);
+         seq_printf(m, "Maximum: %u\n", max_bpc);
++        seq_printf(m, "Limited: %s\n", limited ? "yes" : "no");
+     }
+ 
+     return ret;
+@@ -791,10 +794,11 @@ static NvU8 nv_drm_connector_round_max_bpc(unsigned int max_bpc)
+ 
+ /*
+  * A "max bpc" change only needs a modeset if it changes the bpc NVKMS drives
+- * the display with. When the new limit is still at least the current bpc and
+- * not higher than the old limit, the next modeset would pick the same bpc, so
+- * NVKMS only has to store the limit, which a flip does as well. A higher
+- * limit may allow a higher bpc, so it still needs a modeset.
++ * the display with. When the new limit is still at least the current bpc, the
++ * next modeset would pick the same bpc, so NVKMS only has to store the limit,
++ * which a flip does as well. Unless the limit is raised while the old limit
++ * held the bpc down: then a higher bpc may be possible. If something else
++ * held it down, like the link bandwidth, a higher limit doesn't change it.
+  *
+  * DRM core flags the CRTC's connectors as changed for any "max bpc" change.
+  * Only skip the modeset if that is the only reason: same CRTC, encoder, link
+@@ -820,6 +824,7 @@ nv_drm_connector_max_bpc_needs_modeset(struct drm_connector *connector,
+         nv_drm_connector_round_max_bpc(new_connector_state->max_requested_bpc);
+     NvU32 bpc = 0;
+     NvU32 stored_max_bpc = 0;
++    NvBool limited = NV_FALSE;
+ 
+     if (crtc_state->mode_changed ||
+         crtc_state->active_changed ||
+@@ -839,10 +844,6 @@ nv_drm_connector_max_bpc_needs_modeset(struct drm_connector *connector,
+         return true;
+     }
+ 
+-    if (new_max_bpc > old_max_bpc) {
+-        return true;
+-    }
+-
+     /*
+      * Commits reach NVKMS before the commit ioctl returns, so NVKMS drives
+      * the display as in the old state; it must also have stored the old
+@@ -850,13 +851,14 @@ nv_drm_connector_max_bpc_needs_modeset(struct drm_connector *connector,
+      */
+     if (!nvKms->getDisplayColorBpc(nv_dev->pDevice,
+                                    nv_connector->nv_detected_encoder->hDisplay,
+-                                   &bpc, &stored_max_bpc)) {
++                                   &bpc, &stored_max_bpc, &limited)) {
+         return true;
+     }
+ 
+     return (stored_max_bpc != old_max_bpc) ||
+            (bpc == 0) ||
+-           (bpc > new_max_bpc);
++           (bpc > new_max_bpc) ||
++           ((new_max_bpc > old_max_bpc) && limited);
+ }
+ 
+ static int
+diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
+index 14fd5455..8311422e 100644
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -1769,6 +1769,9 @@ typedef struct __NVDpyAttributeColorRec {
+     enum NvKmsDpyAttributeColorRangeValue range;
+ 
+     enum NvKmsOutputColorimetry colorimetry;
++
++    /* Whether nvLimitColorBpcEvo() lowered bpc to the requested limit */
++    NvBool bpcLimited;
+ } NVDpyAttributeColor;
+ 
+ typedef struct __NVAttributesSetEvoRec {
+diff --git a/src/nvidia-modeset/interface/nvkms-api.h b/src/nvidia-modeset/interface/nvkms-api.h
+index 29865b83..d0c08848 100644
+--- a/src/nvidia-modeset/interface/nvkms-api.h
++++ b/src/nvidia-modeset/interface/nvkms-api.h
+@@ -2780,6 +2780,14 @@ enum NvKmsDpyAttribute {
+      * NVKMS chooses itself (IT content, graphics, for CTA modes).
+      */
+     NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE,
++
++    /*
++     * Whether NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_BPC_MAX lowered the
++     * current bpc. If not, the bpc is held down by something else (the
++     * display, the link bandwidth or a requested bpc), and a higher limit
++     * wouldn't raise it.
++     */
++    NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_LIMITED,
+ };
+ 
+ /*! Values for the NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE attribute. */
+diff --git a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+index 4e6bf902..1aec355b 100644
+--- a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
++++ b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+@@ -1729,13 +1729,16 @@ struct NvKmsKapiFunctionsTable {
+      * Query the output color bpc that a display is currently driven with,
+      * and the bpc limit stored for it.
+      *
+-     * \param [in]  device   A device allocated using allocateDevice().
++     * \param [in]  device    A device allocated using allocateDevice().
+      *
+-     * \param [in]  display  The display to query.
++     * \param [in]  display   The display to query.
+      *
+-     * \param [out] pBpc     The current bpc, 0 if unknown.
++     * \param [out] pBpc      The current bpc, 0 if unknown.
+      *
+-     * \param [out] pMaxBpc  The bpc limit, 0 for none.
++     * \param [out] pMaxBpc   The bpc limit, 0 for none.
++     *
++     * \param [out] pLimited  Whether the limit lowered the current bpc; if
++     *                        not, a higher limit wouldn't raise it.
+      *
+      * \return NV_TRUE on success, NV_FALSE on failure.
+      */
+@@ -1743,7 +1746,8 @@ struct NvKmsKapiFunctionsTable {
+         struct NvKmsKapiDevice *device,
+         NvKmsKapiDisplay display,
+         NvU32 *pBpc,
+-        NvU32 *pMaxBpc
++        NvU32 *pMaxBpc,
++        NvBool *pLimited
+     );
+ };
+ 
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index a8a04ba1..8c4bf4a4 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -3778,9 +3778,10 @@ static NvBool GetDisplayColorBpc(
+     struct NvKmsKapiDevice *device,
+     NvKmsKapiDisplay display,
+     NvU32 *pBpc,
+-    NvU32 *pMaxBpc)
++    NvU32 *pMaxBpc,
++    NvBool *pLimited)
+ {
+-    NvS64 bpc, maxBpc;
++    NvS64 bpc, maxBpc, limited;
+ 
+     if (device->hKmsDevice == 0x0) {
+         return NV_FALSE;
+@@ -3790,12 +3791,16 @@ static NvBool GetDisplayColorBpc(
+                              NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC, &bpc) ||
+         !GetDisplayAttribute(device, display,
+                              NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_BPC_MAX,
+-                             &maxBpc)) {
++                             &maxBpc) ||
++        !GetDisplayAttribute(device, display,
++                             NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_LIMITED,
++                             &limited)) {
+         return NV_FALSE;
+     }
+ 
+     *pBpc = bpc;
+     *pMaxBpc = maxBpc;
++    *pLimited = (limited != 0);
+ 
+     return NV_TRUE;
+ }
+diff --git a/src/nvidia-modeset/src/nvkms-attributes.c b/src/nvidia-modeset/src/nvkms-attributes.c
+index 20cc2641..6fa8ba57 100644
+--- a/src/nvidia-modeset/src/nvkms-attributes.c
++++ b/src/nvidia-modeset/src/nvkms-attributes.c
+@@ -458,6 +458,7 @@ static void DpyPostColorFormatOrRangeSetEvo(NVDpyEvoPtr pDpyEvo)
+     enum NvKmsDpyAttributeCurrentColorFormatValue colorFormat;
+     enum NvKmsDpyAttributeColorBpcValue colorBpc;
+     enum NvKmsDpyAttributeColorRangeValue colorRange;
++    NvBool bpcLimited;
+     NVEvoUpdateState updateState = { };
+     NVDispEvoRec *pDispEvo = pDpyEvo->pDispEvo;
+     NVDispApiHeadStateEvoRec *pApiHeadState;
+@@ -510,6 +511,7 @@ static void DpyPostColorFormatOrRangeSetEvo(NVDpyEvoPtr pDpyEvo)
+ 
+         colorBpc = limitedDpyColor.bpc;
+         colorRange = limitedDpyColor.range;
++        bpcLimited = limitedDpyColor.bpcLimited;
+     }
+ 
+     colorFormatChanged = (pApiHeadState->attributes.color.format != colorFormat);
+@@ -525,6 +527,7 @@ static void DpyPostColorFormatOrRangeSetEvo(NVDpyEvoPtr pDpyEvo)
+     tmpDpyColor.format = colorFormat;
+     tmpDpyColor.range = colorRange;
+     tmpDpyColor.bpc = colorBpc;
++    tmpDpyColor.bpcLimited = bpcLimited;
+ 
+     if (nvDpyIsHdmiEvo(pDpyEvo) &&
+             ((colorBpc > pApiHeadState->attributes.color.bpc) || 
+@@ -535,6 +538,8 @@ static void DpyPostColorFormatOrRangeSetEvo(NVDpyEvoPtr pDpyEvo)
+          */
+         if (pApiHeadState->timings.protocol == NVKMS_PROTOCOL_SOR_HDMI_FRL) {
+             tmpDpyColor.bpc = pApiHeadState->attributes.color.bpc;
++            tmpDpyColor.bpcLimited =
++                pApiHeadState->attributes.color.bpcLimited;
+         } else {
+             if (!nvEvoHdmiTmdsMaxPixelClockCheck(
+                     pDpyEvo,
+@@ -552,6 +557,7 @@ static void DpyPostColorFormatOrRangeSetEvo(NVDpyEvoPtr pDpyEvo)
+     pApiHeadState->attributes.color.format = tmpDpyColor.format;
+     pApiHeadState->attributes.color.range = tmpDpyColor.range;
+     pApiHeadState->attributes.color.bpc = tmpDpyColor.bpc;
++    pApiHeadState->attributes.color.bpcLimited = tmpDpyColor.bpcLimited;
+ 
+     /* Update hardware's current color format and colorRange */
+     FOR_EACH_EVO_HW_HEAD_IN_MASK(pApiHeadState->hwHeadsMask, head) {
+@@ -854,6 +860,13 @@ static NvBool GetContentTypeValidValues(
+     return TRUE;
+ }
+ 
++static NvBool GetCurrentColorBpcLimited(const NVDpyEvoRec *pDpyEvo,
++                                        NvS64 *pValue)
++{
++    *pValue = pDpyEvo->currentAttributes.color.bpcLimited;
++    return TRUE;
++}
++
+ static NvBool GetRequestedColorBpcMaxValidValues(
+     const NVDpyEvoRec *pDpyEvo,
+     struct NvKmsAttributeValidValuesCommonReply *pValidValues)
+@@ -1450,6 +1463,12 @@ static const struct {
+         .getValidValues = GetContentTypeValidValues,
+         .type           = NV_KMS_ATTRIBUTE_TYPE_INTEGER,
+     },
++    [NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_LIMITED] = {
++        .set            = NULL,
++        .get            = GetCurrentColorBpcLimited,
++        .getValidValues = NULL,
++        .type           = NV_KMS_ATTRIBUTE_TYPE_BOOLEAN,
++    },
+ };
+ 
+ /*!
+diff --git a/src/nvidia-modeset/src/nvkms-evo.c b/src/nvidia-modeset/src/nvkms-evo.c
+index acf7b1b4..34739096 100644
+--- a/src/nvidia-modeset/src/nvkms-evo.c
++++ b/src/nvidia-modeset/src/nvkms-evo.c
+@@ -6988,6 +6988,9 @@ void nvLimitColorBpcEvo(const NVDpyEvoRec *pDpyEvo,
+ {
+     const NvKmsDpyOutputColorFormatInfo supportedColorFormats =
+         nvDpyGetOutputColorFormatInfo(pDpyEvo);
++    const enum NvKmsDpyAttributeColorBpcValue bpc = pDpyColor->bpc;
++
++    pDpyColor->bpcLimited = FALSE;
+ 
+     if (maxBpc == NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_UNKNOWN) {
+         return;
+@@ -7003,6 +7006,8 @@ void nvLimitColorBpcEvo(const NVDpyEvoRec *pDpyEvo,
+ 
+         *pDpyColor = dpyColor;
+     }
++
++    pDpyColor->bpcLimited = (pDpyColor->bpc < bpc);
+ }
+ 
+ NvBool nvDowngradeColorFormatAndBpc(

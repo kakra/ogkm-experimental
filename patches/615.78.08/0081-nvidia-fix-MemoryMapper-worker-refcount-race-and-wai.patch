@@ -1,0 +1,343 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 08:40:14 +0100
+Subject: [PATCH] nvidia: fix MemoryMapper worker refcount race and waiter
+ callback UAF
+
+memmapperQueueWork() takes a reference on the shared worker params with a
+plain numRefs++ before queueing memoryMapperWorker(), and the worker drops
+it with a plain --numRefs. Workers run under the API lock, and so do the
+submit, requeue and resume callers, but memmapperSemaphoreEventCallback()
+does not: it is the semaphore surface waiter callback, delivered from the
+NV01_EVENT_NONSTALL_INTR notification, which is serviced without the GPU
+or API lock. An increment there can race with a worker's decrement and
+get lost.
+
+The worker then counts one reference short. It only processes the queue
+while numRefs > 1, so the last queued worker sees numRefs == 1, logs
+"Worker is called , with reference count = 0x1 and pMemoryMapper not
+null" and returns without processing. That worker is typically the one
+queued because the semaphore a SEMAPHORE_WAIT operation waits on was just
+released; semaphore surface waiters are removed once notified, so no
+further event comes and the operation queue never moves again. Userspace
+waits for the sparse bind signal forever (seen as Vulkan/VKD3D-Proton
+rendering stalls with GPU utilization at 0 and no Xid).
+
+Update numRefs with portAtomicIncrementU32()/portAtomicDecrementU32() and
+let the worker process the queue whenever pMemoryMapper is still set
+under the read lock; the destructor clears it under the write lock, which
+is what actually protects the mapper. Every worker now drops its own
+reference, and whoever drops the last one frees the params.
+
+The same callback can also run after the MemoryMapper is freed: the
+semaphore surface notifier detaches signaled waiters under its spinlock
+and calls them after dropping it, so the destructor freeing the internal
+semaphore surface doesn't stop a delivery already in progress. Both the
+callback struct (&pMemoryMapper->semaphoreCallback, read by
+osEventNotification()) and its argument pointed into the MemoryMapper.
+
+Move the callback struct and the GPU pointer into the refcounted worker
+params and pass the params as the callback argument, so the callback
+never touches the MemoryMapper. Each registered waiter holds a reference,
+taken before REGISTER_WAITER (and dropped again if nothing got
+registered). It is dropped by the callback, after queueing the worker,
+or by whoever unregisters the waiter: the worker when it passes a wait
+whose waiter wasn't notified yet, and the destructor for the waits still
+queued, before it frees the semaphore surface (which would delete those
+waiters without a callback). UNREGISTER_WAITER fails for a waiter that is
+already being notified, so exactly one side drops each reference.
+
+Also check the worker params allocation before using it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/generated/g_mem_mapper_nvoc.h      |   8 +-
+ .../src/kernel/gpu/mem_mgr/mem_mapper.c       | 166 ++++++++++++++----
+ 2 files changed, 133 insertions(+), 41 deletions(-)
+
+diff --git a/src/nvidia/generated/g_mem_mapper_nvoc.h b/src/nvidia/generated/g_mem_mapper_nvoc.h
+index a15285e2..7bd447b9 100644
+--- a/src/nvidia/generated/g_mem_mapper_nvoc.h
++++ b/src/nvidia/generated/g_mem_mapper_nvoc.h
+@@ -97,11 +97,16 @@ typedef struct MemoryMapper MemoryMapper;
+ 
+ // MemoryMapper can't wait for workers to finish in destructor due to locking constraints
+ // Instead set pMemoryMapper to NULL and leave the params structure until all workers are done
++// The semaphore surface waiter callback lives here too: it runs without RM locks and can be
++// delivered after the MemoryMapper is destroyed. Every queued worker and every registered
++// waiter holds a reference.
+ typedef struct
+ {
+     struct MemoryMapper *pMemoryMapper;
+     NvU32         numRefs;
+-    PORT_RWLOCK  *pLock; 
++    PORT_RWLOCK  *pLock;
++    struct OBJGPU *pGpu;
++    NVOS10_EVENT_KERNEL_CALLBACK_EX semaphoreCallback;
+ } MemoryMapperWorkerParams;
+ 
+ /*!
+@@ -157,7 +162,6 @@ struct MemoryMapper {
+     NvHandle hInternalDevice;
+     NvHandle hInternalSubdevice;
+     NvHandle hInternalSemaphoreSurface;
+-    NVOS10_EVENT_KERNEL_CALLBACK_EX semaphoreCallback;
+     MemoryMapperWorkerParams *pWorkerParams;
+     struct SemaphoreSurface *pSemSurf;
+     NvBool bError;
+diff --git a/src/nvidia/src/kernel/gpu/mem_mgr/mem_mapper.c b/src/nvidia/src/kernel/gpu/mem_mgr/mem_mapper.c
+index 8189a830..99f5bb41 100644
+--- a/src/nvidia/src/kernel/gpu/mem_mgr/mem_mapper.c
++++ b/src/nvidia/src/kernel/gpu/mem_mgr/mem_mapper.c
+@@ -188,6 +188,50 @@ memmapperExecuteSemaphoreSignal
+     return NV_OK;
+ }
+ 
++static void
++memmapperWorkerParamsRelease
++(
++    MemoryMapperWorkerParams             *pWorkerParams
++)
++{
++    if (portAtomicDecrementU32(&pWorkerParams->numRefs) == 0)
++    {
++        NV_PRINTF(LEVEL_INFO, "freeing worker params\n");
++        portSyncRwLockDestroy(pWorkerParams->pLock);
++        portMemFree(pWorkerParams);
++    }
++}
++
++static void
++memmapperUnregisterSemaphoreWait
++(
++    MemoryMapper                         *pMemoryMapper,
++    NV00FE_CTRL_OPERATION_SEMAPHORE      *pWait,
++    RM_API                               *pRmApi
++)
++{
++    MemoryMapperWorkerParams *pWorkerParams = pMemoryMapper->pWorkerParams;
++    NV_SEMAPHORE_SURFACE_CTRL_UNREGISTER_WAITER_PARAMS params = {0};
++
++    params.index              = pWait->index;
++    params.waitValue          = pWait->value;
++    params.notificationHandle = (NvU64)&pWorkerParams->semaphoreCallback;
++
++    //
++    // This fails if the waiter was already notified, or is about to be. Its
++    // callback drops the waiter's reference then.
++    //
++    if (pRmApi->Control(pRmApi,
++                        pMemoryMapper->hInternalClient,
++                        pMemoryMapper->hInternalSemaphoreSurface,
++                        NV_SEMAPHORE_SURFACE_CTRL_CMD_UNREGISTER_WAITER,
++                        &params,
++                        sizeof(params)) == NV_OK)
++    {
++        memmapperWorkerParamsRelease(pWorkerParams);
++    }
++}
++
+ static void
+ memmapperSetError
+ (
+@@ -261,6 +305,9 @@ memmapperProcessWork
+             case NV00FE_CTRL_OPERATION_TYPE_SEMAPHORE_WAIT:
+                 status = memmapperExecuteSemaphoreWait(pMemoryMapper, &pOperation->data.semaphore);
+                 NV_CHECK(LEVEL_ERROR, (status == NV_OK) || (status == NV_ERR_BUSY_RETRY));
++                // Only waits still in the queue are unregistered by the destructor
++                if (status == NV_OK)
++                    memmapperUnregisterSemaphoreWait(pMemoryMapper, &pOperation->data.semaphore, pRmApi);
+                 break;
+             case NV00FE_CTRL_OPERATION_TYPE_SEMAPHORE_SIGNAL:
+                 status = memmapperExecuteSemaphoreSignal(pMemoryMapper, &pOperation->data.semaphore, pRmApi);
+@@ -293,7 +340,6 @@ memoryMapperWorker
+ )
+ {
+     MemoryMapperWorkerParams *pWorkerParams = pArg;
+-    MemoryMapper *pMemoryMapper = pWorkerParams->pMemoryMapper;
+     if (pWorkerParams ==NULL || pWorkerParams->pLock == NULL)
+     {
+         // Lock already destroyed, nothing to do
+@@ -301,26 +347,42 @@ memoryMapperWorker
+         return;
+     }
+ 
++    //
++    // The destructor clears pMemoryMapper under the write lock, so a non-NULL
++    // pMemoryMapper under the read lock is all that is needed to process.
++    //
+     portSyncRwLockAcquireRead(pWorkerParams->pLock);
+-    if (pWorkerParams->pMemoryMapper != NULL && pWorkerParams->numRefs > 1) 
++    if (pWorkerParams->pMemoryMapper != NULL)
+     {
+-        memmapperProcessWork(pMemoryMapper);
+-    }
+-    if(pWorkerParams->pMemoryMapper != NULL && pWorkerParams->numRefs ==1)
+-    {
+-        NV_PRINTF(LEVEL_ERROR, "Worker is called , with reference count = 0x%x and pMemoryMapper not null \n",pWorkerParams->numRefs);
+-        portSyncRwLockReleaseRead(pWorkerParams->pLock);
+-        return;
++        memmapperProcessWork(pWorkerParams->pMemoryMapper);
+     }
+     portSyncRwLockReleaseRead(pWorkerParams->pLock);
+ 
+-    if(pWorkerParams->numRefs !=0 && --pWorkerParams->numRefs == 0 && pWorkerParams->pMemoryMapper == NULL)
+-    {
+-        NV_PRINTF(LEVEL_ERROR, "worker is freeing param\n");
+-        portSyncRwLockDestroy(pWorkerParams->pLock);
+-        portMemFree(pWorkerParams);
+-    }
+-    
++    memmapperWorkerParamsRelease(pWorkerParams);
++}
++
++static void
++memmapperQueueWorkerParams
++(
++    MemoryMapperWorkerParams *pWorkerParams
++)
++{
++    //
++    // Also called from the semaphore surface waiter callback without the API
++    // lock, so this can race with a worker dropping its reference.
++    //
++    portAtomicIncrementU32(&pWorkerParams->numRefs);
++
++    // Queue work at passive IRQL
++    NV_ASSERT_OK(
++        osQueueWorkItem(pWorkerParams->pGpu,
++                        memoryMapperWorker,
++                        pWorkerParams,
++                        (OsQueueWorkItemFlags){
++                            .bDontFreeParams = NV_TRUE,
++                            .bDropOnUnloadQueueFlush = NV_TRUE,
++                            .bFallbackToDpc = NV_TRUE,
++                            .apiLock = WORKITEM_FLAGS_API_LOCK_READ_WRITE}));
+ }
+ 
+ void
+@@ -329,18 +391,7 @@ memmapperQueueWork_IMPL
+     MemoryMapper *pMemoryMapper
+ )
+ {
+-    pMemoryMapper->pWorkerParams->numRefs++;
+-
+-    // Queue work at passive IRQL
+-    NV_ASSERT_OK(
+-        osQueueWorkItem(GPU_RES_GET_GPU(pMemoryMapper),
+-                        memoryMapperWorker,
+-                        pMemoryMapper->pWorkerParams,
+-                        (OsQueueWorkItemFlags){
+-                            .bDontFreeParams = NV_TRUE,
+-                            .bDropOnUnloadQueueFlush = NV_TRUE,
+-                            .bFallbackToDpc = NV_TRUE,
+-                            .apiLock = WORKITEM_FLAGS_API_LOCK_READ_WRITE}));
++    memmapperQueueWorkerParams(pMemoryMapper->pWorkerParams);
+ }
+ 
+ static void
+@@ -353,7 +404,16 @@ memmapperSemaphoreEventCallback
+     NvU32        status
+ )
+ {
+-    memmapperQueueWork(pArg);
++    MemoryMapperWorkerParams *pWorkerParams = pArg;
++
++    //
++    // Delivered from the nonstall interrupt path (or a SET_VALUE caller)
++    // without RM locks, after the semaphore surface detached the waiter. The
++    // MemoryMapper may already be destroyed; the waiter's reference keeps the
++    // params alive. Queue the worker before dropping it, so this never frees.
++    //
++    memmapperQueueWorkerParams(pWorkerParams);
++    memmapperWorkerParamsRelease(pWorkerParams);
+ }
+ 
+ NV_STATUS
+@@ -429,13 +489,14 @@ memmapperConstruct_IMPL
+     NV_CHECK_TRUE_OR_GOTO(status, LEVEL_ERROR, pMemoryMapper->pSemSurf != NULL, NV_ERR_INVALID_ARGUMENT, failed);
+ 
+     pMemoryMapper->pWorkerParams = portMemAllocNonPaged(sizeof(*pMemoryMapper->pWorkerParams));
++    NV_CHECK_TRUE_OR_GOTO(status, LEVEL_ERROR, pMemoryMapper->pWorkerParams != NULL, NV_ERR_NO_MEMORY, failed);
+     pMemoryMapper->pWorkerParams->pMemoryMapper = pMemoryMapper;
+     pMemoryMapper->pWorkerParams->numRefs = 1;
+     pMemoryMapper->pWorkerParams->pLock = portSyncRwLockCreate(portMemAllocatorGetGlobalNonPaged());
+-    NV_CHECK_TRUE_OR_GOTO(status, LEVEL_ERROR, pMemoryMapper->pWorkerParams != NULL, NV_ERR_NO_MEMORY, failed);
++    pMemoryMapper->pWorkerParams->pGpu = pGpu;
+ 
+-    pMemoryMapper->semaphoreCallback.func = memmapperSemaphoreEventCallback;
+-    pMemoryMapper->semaphoreCallback.arg  = pMemoryMapper;
++    pMemoryMapper->pWorkerParams->semaphoreCallback.func = memmapperSemaphoreEventCallback;
++    pMemoryMapper->pWorkerParams->semaphoreCallback.arg  = pMemoryMapper->pWorkerParams;
+ 
+     NV_ASSERT_OK_OR_GOTO(status, refAddDependant(pNotificationMemoryRef, RES_GET_REF(pMemoryMapper)), failed);
+ 
+@@ -473,6 +534,27 @@ memmapperDestruct_IMPL
+                          sizeof (NV_MEMORY_MAPPER_NOTIFICATION), TRANSFER_FLAGS_USE_BAR1);
+ 
+     refRemoveDependant(RES_GET_REF(pMemoryMapper->pNotificationMemory), RES_GET_REF(pMemoryMapper));
++
++    //
++    // Unregister the waiters of queued waits, freeing the semaphore surface
++    // would delete them without dropping their references. Waiters that are
++    // already being notified keep the params alive until their callback ran.
++    //
++    if (pMemoryMapper->pWorkerParams != NULL)
++    {
++        NvU32 i;
++
++        for (i = pMemoryMapper->operationQueueGet;
++             i != pMemoryMapper->operationQueuePut;
++             i = (i + 1) % pMemoryMapper->operationQueueLen)
++        {
++            NV00FE_CTRL_OPERATION *pOperation = &pMemoryMapper->pOperationQueue[i];
++
++            if (pOperation->type == NV00FE_CTRL_OPERATION_TYPE_SEMAPHORE_WAIT)
++                memmapperUnregisterSemaphoreWait(pMemoryMapper, &pOperation->data.semaphore, pRmApi);
++        }
++    }
++
+     pRmApi->Free(pRmApi, pMemoryMapper->hInternalClient, pMemoryMapper->hInternalSemaphoreSurface);
+     portMemFree(pMemoryMapper->pOperationQueue);
+ 
+@@ -489,12 +571,8 @@ memmapperDestruct_IMPL
+     portSyncRwLockReleaseWrite(pMemoryMapper->pWorkerParams->pLock);
+     
+     NV_PRINTF(LEVEL_INFO, "Destructor is called , reference count = 0x%x\n",pMemoryMapper->pWorkerParams->numRefs);
+-    if (pMemoryMapper->pWorkerParams->numRefs !=0 && --pMemoryMapper->pWorkerParams->numRefs == 0)
+-    {
+-        portSyncRwLockDestroy(pMemoryMapper->pWorkerParams->pLock);
+-        portMemFree(pMemoryMapper->pWorkerParams);
+-        pMemoryMapper->pWorkerParams = NULL;
+-    }
++    memmapperWorkerParamsRelease(pMemoryMapper->pWorkerParams);
++    pMemoryMapper->pWorkerParams = NULL;
+ }
+ 
+ static NV_STATUS
+@@ -509,7 +587,13 @@ memmapperSubmitSemaphoreWait
+     NV_SEMAPHORE_SURFACE_CTRL_REGISTER_WAITER_PARAMS params = {0};
+     params.index              = pSemaphoreWait->index;
+     params.waitValue          = pSemaphoreWait->value;
+-    params.notificationHandle = (NvU64)&pMemoryMapper->semaphoreCallback;
++    params.notificationHandle = (NvU64)&pMemoryMapper->pWorkerParams->semaphoreCallback;
++
++    //
++    // The waiter holds a reference until its callback ran or it was
++    // unregistered. Take it first, the callback can run before Control returns.
++    //
++    portAtomicIncrementU32(&pMemoryMapper->pWorkerParams->numRefs);
+ 
+     NV_STATUS status = pRmApi->Control(pRmApi,
+                                        pMemoryMapper->hInternalClient,
+@@ -518,6 +602,10 @@ memmapperSubmitSemaphoreWait
+                                        &params,
+                                       sizeof params);
+ 
++    // Nothing was registered (ALREADY_SIGNALLED doesn't register either)
++    if (status != NV_OK)
++        memmapperWorkerParamsRelease(pMemoryMapper->pWorkerParams);
++
+     NV_CHECK(LEVEL_ERROR, status == NV_OK || status == NV_ERR_ALREADY_SIGNALLED);
+     return status;
+ }

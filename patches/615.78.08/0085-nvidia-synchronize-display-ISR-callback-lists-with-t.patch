@@ -1,0 +1,377 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 09:26:53 +0100
+Subject: [PATCH] nvidia: synchronize display ISR callback lists with the low
+ latency lock
+
+With interrupt mask locking (Turing and later dGPUs), DISP stays
+unblocked while the GPU lock is held, and _osIsrIntrMask_GpusUnlocked()
+runs kdispServiceLowLatencyIntrs() holding only the display low latency
+lock. Besides the RG semaphore events, that path uses three more pieces
+of state that the GPU-locked side changes without that lock:
+
+- the per-head low latency vblank callback list: kheadProcessVblankCallbacks()
+  walks it and calls the callbacks (nvkms' NV9010 VblankCallback, the GSP
+  vblank count keepalive), while kheadAddVblankCallback() and
+  kheadDeleteVblankCallback() link and unlink entries; nvkms removes and
+  re-adds its callback around every modeset, and the VblankCallback
+  object is freed right after the delete
+- the RG line callback slots: kdispInvokeRgLineCallback() reads the
+  RgLineCallback pointer and calls through it, while rglcbDestruct()
+  clears the slot and the object is freed
+- the client channel table used for display AWAKEN interrupts (nvkms
+  flips with an awaken completion notifier): _kdispHandleAwakenChnMask()
+  looks the channel up in the client's resource map by handle, without
+  the client lock, and walks its event list, while channels and their
+  events are allocated and freed
+
+Take the low latency lock (kdispSetupVBlank() already does so for the
+OS vblank callback) when linking/unlinking vblank callbacks, when
+updating the RG line callback slots and when setting/clearing a channel
+table entry. kheadDeleteVblankCallback() now runs the
+COMPLETE_ON_OBJECT_CLEANUP callback after the unlink, outside the lock.
+Keep the DispChannel pointer in the channel table so the awaken handler
+doesn't need the client resource map, and walk the channel event list
+under the share map lock, which event link/unlink take.
+
+The register writes in add/delete stay outside the lock. Nothing that
+runs under the low latency lock adds or deletes vblank callbacks,
+registers RG line callbacks or creates display channels.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/generated/g_kern_disp_nvoc.h       |   2 +
+ .../kernel/gpu/disp/arch/v03/kern_disp_0300.c |  24 ++--
+ src/nvidia/src/kernel/gpu/disp/disp_channel.c |  11 ++
+ src/nvidia/src/kernel/gpu/disp/kern_disp.c    |  13 +-
+ .../kernel/gpu/disp/vblank_callback/vblank.c  | 126 +++++++++---------
+ 5 files changed, 104 insertions(+), 72 deletions(-)
+
+diff --git a/src/nvidia/generated/g_kern_disp_nvoc.h b/src/nvidia/generated/g_kern_disp_nvoc.h
+index 54514b69..67fe016d 100644
+--- a/src/nvidia/generated/g_kern_disp_nvoc.h
++++ b/src/nvidia/generated/g_kern_disp_nvoc.h
+@@ -123,6 +123,8 @@ typedef struct
+     NvHandle hChannel;
+     NvU32    channelNum;
+     NvBool   bInUse;
++    // Read by the awaken interrupt without the GPU lock; set/cleared under the low latency lock
++    struct DispChannel *pDispChannel;
+ } KernelDisplayClientChannelMap;
+ 
+ typedef void (*OSVBLANKCALLBACKPROC)(NvP64 pParm1, NvP64 pParm2);
+diff --git a/src/nvidia/src/kernel/gpu/disp/arch/v03/kern_disp_0300.c b/src/nvidia/src/kernel/gpu/disp/arch/v03/kern_disp_0300.c
+index 4b75ac17..bdb1747b 100644
+--- a/src/nvidia/src/kernel/gpu/disp/arch/v03/kern_disp_0300.c
++++ b/src/nvidia/src/kernel/gpu/disp/arch/v03/kern_disp_0300.c
+@@ -653,9 +653,8 @@ _kdispHandleAwakenChnMask
+     NvBool            bEventFound  = NV_FALSE;
+     NV_STATUS         status       = NV_OK;
+     NvU32             channelNum   = 0;
+-    RsClient         *pClient;
+-    NvHandle          hChannel;
+     NvBool            bInUse;
++    DispChannel      *pChannel;
+ 
+     _kdispResetAwakenChannelNumMask(pGpu, pKernelDisplay, channelNumMask, channelClass, pThreadState);
+ 
+@@ -677,26 +676,35 @@ _kdispHandleAwakenChnMask
+         }
+ 
+         NV_ASSERT_OR_RETURN_VOID(pKernelDisplay->pClientChannelTable != NULL);
++        //
++        // This runs from the display interrupt without the GPU lock, holding
++        // the low latency lock, under which the table entry is set and cleared;
++        // the channel stays alive while it is in the table. Don't look it up
++        // in the client's resource map, which can change without the client
++        // lock.
++        //
+         bInUse = pKernelDisplay->pClientChannelTable[channelNum].bInUse;
+-        pClient = pKernelDisplay->pClientChannelTable[channelNum].pClient;
+-        hChannel = pKernelDisplay->pClientChannelTable[channelNum].hChannel;
++        pChannel = pKernelDisplay->pClientChannelTable[channelNum].pDispChannel;
+ 
+         // OK, we've got this interrupt, lets see if we have a SW channel ready for it.
+         if (bInUse)
+         {
+-            DispChannel *pChannel;
+-
+-            if (dispchnGetByHandle(pClient, hChannel, &pChannel) == NV_OK)
++            if (pChannel != NULL)
+             {
+-                PEVENTNOTIFICATION pEventNotifications = inotifyGetNotificationList(staticCast(pChannel, INotifier));
++                PEVENTNOTIFICATION pEventNotifications;
+                 bEventFound = NV_TRUE;
+ 
++                // Event list nodes are linked/unlinked under the share map lock
++                portSyncSpinlockAcquire(g_resServ.pShareMapLock);
++                pEventNotifications = inotifyGetNotificationList(staticCast(pChannel, INotifier));
++
+                 //
+                 // Assuming that caller must always use 0 as the index.
+                 // And since the method that will always cause this is UPDATE, there's no need
+                 // to send any real method data here anyway.
+                 //
+                 notifyEvents(pGpu, pEventNotifications, 0, 0, 0, NV_OK, NV_OS_WRITE_THEN_AWAKEN);
++                portSyncSpinlockRelease(g_resServ.pShareMapLock);
+             }
+         }
+ 
+diff --git a/src/nvidia/src/kernel/gpu/disp/disp_channel.c b/src/nvidia/src/kernel/gpu/disp/disp_channel.c
+index feaee8b4..2d7a1c68 100644
+--- a/src/nvidia/src/kernel/gpu/disp/disp_channel.c
++++ b/src/nvidia/src/kernel/gpu/disp/disp_channel.c
+@@ -263,9 +263,16 @@ dispchnConstruct_IMPL
+             goto done;
+         }
+ 
++        //
++        // _kdispHandleAwakenChnMask() uses this entry from the display
++        // interrupt without the GPU lock, holding the low latency lock.
++        //
++        kdispAcquireLowLatencyLock(&pKernelDisplay->lowLatencyLock);
+         pKernelDisplay->pClientChannelTable[dispChannelNum].pClient = pClient;
+         pKernelDisplay->pClientChannelTable[dispChannelNum].hChannel = hChannel;
++        pKernelDisplay->pClientChannelTable[dispChannelNum].pDispChannel = pDispChannel;
+         pKernelDisplay->pClientChannelTable[dispChannelNum].bInUse = NV_TRUE;
++        kdispReleaseLowLatencyLock(&pKernelDisplay->lowLatencyLock);
+          
+         NV_PRINTF(LEVEL_INFO, "Mapped hclient: %p hchannel: 0x%x channleNum: 0x%x\n",
+                                 pClient, hChannel, dispChannelNum);
+@@ -584,9 +591,13 @@ dispchnDestruct_IMPL
+         rmStatus = kdispGetChannelNum_HAL(pKernelDisplay, pDispChannel->DispClass, pDispChannel->InstanceNumber, &dispChannelNum);
+         if (rmStatus == NV_OK)
+         {
++            // See dispchnConstruct; the awaken interrupt is done with the channel after this
++            kdispAcquireLowLatencyLock(&pKernelDisplay->lowLatencyLock);
+             pKernelDisplay->pClientChannelTable[dispChannelNum].pClient = NULL;
+             pKernelDisplay->pClientChannelTable[dispChannelNum].hChannel = 0;
++            pKernelDisplay->pClientChannelTable[dispChannelNum].pDispChannel = NULL;
+             pKernelDisplay->pClientChannelTable[dispChannelNum].bInUse = NV_FALSE;
++            kdispReleaseLowLatencyLock(&pKernelDisplay->lowLatencyLock);
+         }
+         else
+         {
+diff --git a/src/nvidia/src/kernel/gpu/disp/kern_disp.c b/src/nvidia/src/kernel/gpu/disp/kern_disp.c
+index 3ade2a3b..1831a4ce 100644
+--- a/src/nvidia/src/kernel/gpu/disp/kern_disp.c
++++ b/src/nvidia/src/kernel/gpu/disp/kern_disp.c
+@@ -1530,16 +1530,27 @@ kdispRegisterRgLineCallback_IMPL
+     NV_ASSERT_OR_RETURN(rgIntrLine < MAX_RG_LINE_CALLBACKS_PER_HEAD, NV_ERR_INVALID_ARGUMENT);
+ 
+     RgLineCallback **slot = &pKernelDisplay->rgLineCallbackPerHead[head][rgIntrLine];
++    NvBool bUpdated = NV_FALSE;
+ 
++    //
++    // kdispInvokeRgLineCallback() runs from the display interrupt without the
++    // GPU lock, holding the low latency lock, and the RgLineCallback is freed
++    // right after unregistering. Update the slot under the same lock.
++    //
++    kdispAcquireLowLatencyLock(&pKernelDisplay->lowLatencyLock);
+     if (bEnable && *slot == NULL)
+     {
+         *slot = pRgLineCallback;
++        bUpdated = NV_TRUE;
+     }
+     else if (!bEnable && *slot == pRgLineCallback)
+     {
+         *slot = NULL;
++        bUpdated = NV_TRUE;
+     }
+-    else
++    kdispReleaseLowLatencyLock(&pKernelDisplay->lowLatencyLock);
++
++    if (!bUpdated)
+     {
+         //
+         // OBJDISP is the authority for *allocating* these "slots";
+diff --git a/src/nvidia/src/kernel/gpu/disp/vblank_callback/vblank.c b/src/nvidia/src/kernel/gpu/disp/vblank_callback/vblank.c
+index 6c514485..210def4b 100644
+--- a/src/nvidia/src/kernel/gpu/disp/vblank_callback/vblank.c
++++ b/src/nvidia/src/kernel/gpu/disp/vblank_callback/vblank.c
+@@ -44,6 +44,7 @@ kheadAddVblankCallback_IMPL
+     VBLANKCALLBACK  *pList   = NULL;
+     NvU32            Count;
+     NvBool           vblankIntrIsBeingGenerated = NV_FALSE;
++    KernelDisplay   *pKernelDisplay = GPU_GET_KERNEL_DISPLAY(pGpu);
+ 
+     //
+     // If callback needs vblank safety, make it low-latency, persistent and promote-to-front.
+@@ -89,6 +90,17 @@ kheadAddVblankCallback_IMPL
+ 
+     if ( vblankIntrIsBeingGenerated || (pCallback->Flags & VBLANK_CALLBACK_FLAG_PERSISTENT) )
+     {
++        //
++        // The low latency list is also processed from the display interrupt
++        // without the GPU lock (DISP stays unblocked with intr mask locking),
++        // which holds the low latency lock. Link under it.
++        //
++        kdispAcquireLowLatencyLock(&pKernelDisplay->lowLatencyLock);
++
++        pList = (pCallback->Flags & VBLANK_CALLBACK_FLAG_LOW_LATENCY) ?
++                    pKernelHead->Vblank.Callback.pListLL :
++                    pKernelHead->Vblank.Callback.pListNL;
++
+         pCheck = pList;
+ 
+         //
+@@ -205,6 +217,8 @@ kheadAddVblankCallback_IMPL
+             NV_PRINTF(LEVEL_INFO,
+                       "VBlankCallback discarded in dacCRTCAddVblankCallback to avoid infinite loop\n");
+         }
++
++        kdispReleaseLowLatencyLock(&pKernelDisplay->lowLatencyLock);
+     }
+     else
+     {
+@@ -309,7 +323,9 @@ kheadDeleteVblankCallback_IMPL
+ {
+     VBLANKCALLBACK  *pList   = NULL;
+     NvBool           enabled = NV_FALSE;
++    NvBool           bFound  = NV_FALSE;
+     NvU32            Count;
++    KernelDisplay   *pKernelDisplay = GPU_GET_KERNEL_DISPLAY(pGpu);
+ 
+     // Cache the requested queue and its current vblank count
+     if (pCallback->Flags & VBLANK_CALLBACK_FLAG_LOW_LATENCY)
+@@ -331,12 +347,21 @@ kheadDeleteVblankCallback_IMPL
+         kheadWriteVblankIntrState(pGpu, pKernelHead, NV_HEAD_VBLANK_INTR_AVAILABLE);
+     }
+ 
+-    // Search the list and remove this Callback entry
++    //
++    // Search the list and remove this Callback entry. The low latency list is
++    // also processed from the display interrupt without the GPU lock, which
++    // holds the low latency lock; unlink under it and run the completion
++    // callback only afterwards.
++    //
++    kdispAcquireLowLatencyLock(&pKernelDisplay->lowLatencyLock);
++
++    pList = (pCallback->Flags & VBLANK_CALLBACK_FLAG_LOW_LATENCY) ?
++                pKernelHead->Vblank.Callback.pListLL :
++                pKernelHead->Vblank.Callback.pListNL;
++
+     if (pList == pCallback)
+     {
+-        //
+-        // Found it.
+-        // Unlink it now. If we call it, it may try to add itself again, and wont be able to.
++        // Found it. Unlink it now; if we call it, it may try to add itself again.
+         if (pCallback->Flags & VBLANK_CALLBACK_FLAG_LOW_LATENCY)
+         {
+             pKernelHead->Vblank.Callback.pListLL = pCallback->Next;
+@@ -345,35 +370,7 @@ kheadDeleteVblankCallback_IMPL
+         {
+             pKernelHead->Vblank.Callback.pListNL = pCallback->Next;
+         }
+-
+-        //
+-        // Should the callback be executed as part of the object destroy?
+-        // (safe to do, since we already hold the necessary lock).
+-        //
+-        if ( (pCallback->Proc) &&
+-             (pCallback->Flags & VBLANK_CALLBACK_FLAG_COMPLETE_ON_OBJECT_CLEANUP) )
+-        {
+-            // Force it to appear to be on the correct VBlankCount
+-            pCallback->VBlankCount = Count;
+-
+-            // This is a user call back, they don't get a pointer to our pDev or Object data structs.
+-            if (pCallback->Flags & VBLANK_CALLBACK_FLAG_USER)
+-            {
+-                pCallback->Proc(NULL,
+-                                NULL,
+-                                pCallback->Param1,
+-                                pCallback->Param2,
+-                                pCallback->Status);
+-            }
+-            else
+-            {
+-                pCallback->Proc(pGpu,
+-                                pCallback->pObject,
+-                                pCallback->Param1,
+-                                pCallback->Param2,
+-                                pCallback->Status);
+-            }
+-        }
++        bFound = NV_TRUE;
+     }
+     else
+     {
+@@ -383,37 +380,8 @@ kheadDeleteVblankCallback_IMPL
+         {
+             if (pPrev->Next == pCallback)
+             {
+-                //
+-                // Found it.
+-                // Should the callback be executed as part of the object destroy?
+-                // (safe to do, since we already hold the necessary lock).
+-                //
+-                if ( (pCallback->Proc) &&
+-                     (pCallback->Flags & VBLANK_CALLBACK_FLAG_COMPLETE_ON_OBJECT_CLEANUP) )
+-                {
+-                    // Force it to appear to be on the correct VBlankCount
+-                    pCallback->VBlankCount = Count;
+-
+-                    // This is a user call back, they don't get a pointer to our pDev or Object data structs.
+-                    if (pCallback->Flags & VBLANK_CALLBACK_FLAG_USER)
+-                    {
+-                        pCallback->Proc(NULL,
+-                                        NULL,
+-                                        pCallback->Param1,
+-                                        pCallback->Param2,
+-                                        pCallback->Status);
+-                    }
+-                    else
+-                    {
+-                        pCallback->Proc(pGpu,
+-                                        pCallback->pObject,
+-                                        pCallback->Param1,
+-                                        pCallback->Param2,
+-                                        pCallback->Status);
+-                    }
+-                }
+-
+                 pPrev->Next = pCallback->Next;
++                bFound = NV_TRUE;
+                 break;
+             }
+             pPrev = pPrev->Next;
+@@ -421,6 +389,38 @@ kheadDeleteVblankCallback_IMPL
+     }
+     pCallback->Next = NULL;
+ 
++    kdispReleaseLowLatencyLock(&pKernelDisplay->lowLatencyLock);
++
++    //
++    // Should the callback be executed as part of the object destroy?
++    // (safe to do, since we already hold the necessary lock).
++    //
++    if (bFound &&
++        (pCallback->Proc) &&
++        (pCallback->Flags & VBLANK_CALLBACK_FLAG_COMPLETE_ON_OBJECT_CLEANUP))
++    {
++        // Force it to appear to be on the correct VBlankCount
++        pCallback->VBlankCount = Count;
++
++        // This is a user call back, they don't get a pointer to our pDev or Object data structs.
++        if (pCallback->Flags & VBLANK_CALLBACK_FLAG_USER)
++        {
++            pCallback->Proc(NULL,
++                            NULL,
++                            pCallback->Param1,
++                            pCallback->Param2,
++                            pCallback->Status);
++        }
++        else
++        {
++            pCallback->Proc(pGpu,
++                            pCallback->pObject,
++                            pCallback->Param1,
++                            pCallback->Param2,
++                            pCallback->Status);
++        }
++    }
++
+     // Check to see if there are no callbacks scheduled for this head
+     if (!(pKernelHead->Vblank.Callback.pListLL) &&
+         !(pKernelHead->Vblank.Callback.pListNL) )

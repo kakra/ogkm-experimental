@@ -17,10 +17,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  6 files changed, 26 insertions(+), 7 deletions(-)
 
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
-index 9be3ddc6..edf0602f 100644
+index 08dbad4a..fc879bba 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
-@@ -3468,7 +3468,7 @@ bool nv_drm_crtc_handle_flip_events(struct nv_drm_crtc *nv_crtc,
+@@ -3421,7 +3421,7 @@ bool nv_drm_crtc_handle_flip_events(struct nv_drm_crtc *nv_crtc,
      list_add_tail(&nv_flip->list_entry, &nv_crtc->pending_flip_events);
      *pp_nv_flip = NULL;
  

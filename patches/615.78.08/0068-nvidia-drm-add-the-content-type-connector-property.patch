@@ -1,0 +1,404 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 28 Oct 2026 19:13:20 +0100
+Subject: [PATCH] nvidia-drm: add the content type connector property
+
+KWin, like other compositors, sets the standard "content type" connector
+property (graphics, photo, cinema or game) so that HDMI TVs can switch to
+a matching picture mode, for example a low latency game mode. The value
+goes into the AVI InfoFrame: the IT content bit and the CN1:CN0 content
+type. nvidia-drm didn't have the property, and NVKMS always sends "IT
+content, graphics" for CTA modes.
+
+KWin sets the property in every page flip commit, not only in modesets,
+so a change must not need a modeset, or the commit would fail. Add a
+display attribute, NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE, rather than a field
+in the flip request, which would change the ioctl ABI that NVIDIA's
+userspace uses. NVKMS applies it to the AVI InfoFrame it builds, and when
+it changes on an active HDMI display, sends the InfoFrame right away the
+way a color range change does: a new core FID, so that flip-synchronized
+InfoFrames switch slots, then the InfoFrame update and a kickoff. Its
+default keeps what NVKMS chose before, so NVKMS clients that don't set it
+see no change.
+
+KAPI takes the value with a changed flag in the head's modeset config and
+sets the attribute on the head's displays for every commit that has the
+flag, modeset or flip; TEST_ONLY checks skip it, as it can't make a commit
+fail. nvidia-drm attaches the property to HDMI connectors, like i915, and
+passes it when it changes and with every modeset, so it also reaches a
+display that is newly driven by the CRTC or was recreated by a hotplug.
+
+Like on the other drivers, "No Data" is the property's default and clears
+the IT content bit; KWin sets "Graphics" by default.
+
+Not tested on HDMI hardware (none here). On DisplayPort the attribute is
+only stored, as NVKMS sends no AVI InfoFrame there.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nvkms-kapi.h           |  9 +++
+ kernel-open/nvidia-drm/nvidia-drm-connector.c | 25 ++++++++
+ src/nvidia-modeset/include/nvkms-types.h      |  3 +
+ src/nvidia-modeset/interface/nvkms-api.h      | 19 +++++++
+ .../kapi/interface/nvkms-kapi.h               |  9 +++
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 55 ++++++++++++++++++
+ src/nvidia-modeset/src/nvkms-attributes.c     | 57 +++++++++++++++++++
+ src/nvidia-modeset/src/nvkms-hdmi.c           | 35 ++++++++++++
+ 8 files changed, 212 insertions(+)
+
+diff --git a/kernel-open/common/inc/nvkms-kapi.h b/kernel-open/common/inc/nvkms-kapi.h
+index ded99127..4e6bf902 100644
+--- a/kernel-open/common/inc/nvkms-kapi.h
++++ b/kernel-open/common/inc/nvkms-kapi.h
+@@ -432,6 +432,14 @@ struct NvKmsKapiHeadModeSetConfig {
+      */
+     NvU8 maxBpc;
+ 
++    /*
++     * Content type for the AVI InfoFrame of HDMI displays, an
++     * NvKmsDpyAttributeContentTypeValue; the DRM "content type" property.
++     * Unlike the other fields it doesn't need a modeset: it is sent with the
++     * commit, whether that is a modeset or a flip.
++     */
++    NvU8 contentType;
++
+     /*
+      * Scale an image of sizeIn to the out rectangle within the mode's visible
+      * area; the DRM "scaling mode" property. The layers are positioned in
+@@ -459,6 +467,7 @@ struct NvKmsKapiHeadRequestedConfig {
+         NvBool ditheringChanged                : 1;
+         NvBool colorRangeChanged               : 1;
+         NvBool maxBpcChanged                   : 1;
++        NvBool contentTypeChanged              : 1;
+         NvBool hdmiVsifMetadataChanged         : 1;
+         NvBool postcompColorPassthroughChanged : 1;
+     } flags;
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index aad36a1f..d52f1582 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -880,6 +880,23 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
+         crtc_state->mode_changed = true;
+     }
+ 
++    /*
++     * Handle "content type". It only changes the AVI InfoFrame, so unlike
++     * the properties above it doesn't need a modeset; compositors set it in
++     * their page flip commits. Pass it with every modeset too, so it also
++     * reaches a display that is newly driven by this CRTC or was recreated
++     * by a hotplug. The DRM values are the NVKMS values minus one (NVKMS 0
++     * keeps its own default).
++     */
++    if ((connector->dev->mode_config.content_type_property != NULL) &&
++        ((old_connector_state->content_type !=
++          new_connector_state->content_type) ||
++         drm_atomic_crtc_needs_modeset(crtc_state))) {
++        req_config->modeSetConfig.contentType =
++            new_connector_state->content_type + 1;
++        req_config->flags.contentTypeChanged = NV_TRUE;
++    }
++
+     /* Handle HDMI VSIF metadata changes */
+     req_config->flags.hdmiVsifMetadataChanged =
+         !nv_drm_blobs_equal(nv_old_connector_state->hdmi_vsif_metadata,
+@@ -1152,6 +1169,14 @@ nv_drm_connector_new(struct drm_device *dev,
+         }
+         drm_connector_attach_hdr_output_metadata_property(&nv_connector->base);
+ 
++        /* Signalled in the AVI InfoFrame, so HDMI only, like on i915 */
++        if (drm_connector_attach_content_type_property(&nv_connector->base) != 0) {
++            NV_DRM_DEV_LOG_ERR(
++                nv_dev,
++                "Failed to attach the content type property to connector created from physical index %u",
++                nv_connector->physicalIndex);
++        }
++
+         if (nv_dev->nv_connector_hdmi_vsif_metadata_property) {
+             drm_object_attach_property(&nv_connector->base.base,
+                                        nv_dev->nv_connector_hdmi_vsif_metadata_property,
+diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
+index f66c857b..14fd5455 100644
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -2358,6 +2358,9 @@ typedef struct _NVDpyEvoRec {
+     /* NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_BPC_MAX; UNKNOWN for no limit */
+     enum NvKmsDpyAttributeColorBpcValue requestedColorBpcMax;
+ 
++    /* NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE */
++    enum NvKmsDpyAttributeContentTypeValue contentType;
++
+     NVAttributesSetEvoRec currentAttributes;
+ 
+     nvkms_timer_handle_t *hdrToSdrTransitionTimer;
+diff --git a/src/nvidia-modeset/interface/nvkms-api.h b/src/nvidia-modeset/interface/nvkms-api.h
+index 822e8b8e..29865b83 100644
+--- a/src/nvidia-modeset/interface/nvkms-api.h
++++ b/src/nvidia-modeset/interface/nvkms-api.h
+@@ -2771,6 +2771,25 @@ enum NvKmsDpyAttribute {
+      * support, but never less than the colorimetry requires.
+      */
+     NV_KMS_DPY_ATTRIBUTE_REQUESTED_COLOR_BPC_MAX,
++
++    /*
++     * Content type signalled to HDMI sinks in the AVI InfoFrame (ITC and
++     * CN1:CN0), like the DRM "content type" connector property. Takes an
++     * NvKmsDpyAttributeContentTypeValue. Sent right away when the display is
++     * active, and with every following InfoFrame update. DEFAULT keeps what
++     * NVKMS chooses itself (IT content, graphics, for CTA modes).
++     */
++    NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE,
++};
++
++/*! Values for the NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE attribute. */
++enum NvKmsDpyAttributeContentTypeValue {
++    NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_DEFAULT = 0,
++    NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_NO_DATA = 1,
++    NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_GRAPHICS = 2,
++    NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_PHOTO = 3,
++    NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_CINEMA = 4,
++    NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_GAME = 5,
+ };
+ 
+ /*
+diff --git a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+index ded99127..4e6bf902 100644
+--- a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
++++ b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+@@ -432,6 +432,14 @@ struct NvKmsKapiHeadModeSetConfig {
+      */
+     NvU8 maxBpc;
+ 
++    /*
++     * Content type for the AVI InfoFrame of HDMI displays, an
++     * NvKmsDpyAttributeContentTypeValue; the DRM "content type" property.
++     * Unlike the other fields it doesn't need a modeset: it is sent with the
++     * commit, whether that is a modeset or a flip.
++     */
++    NvU8 contentType;
++
+     /*
+      * Scale an image of sizeIn to the out rectangle within the mode's visible
+      * area; the DRM "scaling mode" property. The layers are positioned in
+@@ -459,6 +467,7 @@ struct NvKmsKapiHeadRequestedConfig {
+         NvBool ditheringChanged                : 1;
+         NvBool colorRangeChanged               : 1;
+         NvBool maxBpcChanged                   : 1;
++        NvBool contentTypeChanged              : 1;
+         NvBool hdmiVsifMetadataChanged         : 1;
+         NvBool postcompColorPassthroughChanged : 1;
+     } flags;
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index 4ee28ad6..790100dd 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -3702,6 +3702,53 @@ static void SetRequestedColorBpcMax(
+     }
+ }
+ 
++/*
++ * Store the requested content type on the displays; NVKMS sends the AVI
++ * InfoFrame right away for active displays. It can't make a commit fail, so
++ * a TEST_ONLY check skips it.
++ */
++static void SetContentType(
++    struct NvKmsKapiDevice *device,
++    const struct NvKmsKapiRequestedModeSetConfig *requestedConfig)
++{
++    NvU32 head;
++
++    for (head = 0;
++         head < ARRAY_LEN(requestedConfig->headRequestedConfig); head++) {
++
++        const struct NvKmsKapiHeadRequestedConfig *headRequestedConfig =
++            &requestedConfig->headRequestedConfig[head];
++        const struct NvKmsKapiHeadModeSetConfig *headModeSetConfig =
++            &headRequestedConfig->modeSetConfig;
++        NvU32 i;
++
++        if ((requestedConfig->headsMask & (1 << head)) == 0x0 ||
++            !headRequestedConfig->flags.contentTypeChanged) {
++            continue;
++        }
++
++        for (i = 0; i < headModeSetConfig->numDisplays; i++) {
++            struct NvKmsSetDpyAttributeParams params = { };
++
++            params.request.deviceHandle = device->hKmsDevice;
++            params.request.dispHandle = device->hKmsDisp;
++            params.request.dpyId =
++                nvNvU32ToDpyId(headModeSetConfig->displays[i]);
++            params.request.attribute = NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE;
++            params.request.value = headModeSetConfig->contentType;
++
++            if (!nvkms_ioctl_from_kapi_try_pmlock(device->pKmsOpen,
++                                                  NVKMS_IOCTL_SET_DPY_ATTRIBUTE,
++                                                  &params, sizeof(params))) {
++                nvKmsKapiLogDeviceDebug(
++                    device,
++                    "Failed to set the content type of display 0x%08x",
++                    headModeSetConfig->displays[i]);
++            }
++        }
++    }
++}
++
+ static NvBool GetDisplayAttribute(
+     struct NvKmsKapiDevice *device,
+     NvKmsKapiDisplay display,
+@@ -4134,6 +4181,14 @@ static NvBool ApplyModeSetConfig(
+         }
+     }
+ 
++    /*
++     * The content type is sent without a modeset, so set it for flips too.
++     * A modeset sends the AVI InfoFrame of newly driven displays with it.
++     */
++    if (commit) {
++        SetContentType(device, requestedConfig);
++    }
++
+     if (bRequiredModeset) {
+         return KmsSetMode(device, requestedConfig, replyConfig, commit);
+     }
+diff --git a/src/nvidia-modeset/src/nvkms-attributes.c b/src/nvidia-modeset/src/nvkms-attributes.c
+index b97e996a..20cc2641 100644
+--- a/src/nvidia-modeset/src/nvkms-attributes.c
++++ b/src/nvidia-modeset/src/nvkms-attributes.c
+@@ -803,6 +803,57 @@ static NvBool GetRequestedColorBpcMax(const NVDpyEvoRec *pDpyEvo,
+     return TRUE;
+ }
+ 
++/*
++ * Send the AVI InfoFrame with the new content type: a new core FID, so that
++ * flip-synchronized InfoFrames switch slots, like a color range change
++ * without a modeset.
++ */
++static NvBool SetContentType(NVDpyEvoRec *pDpyEvo, NvS64 value)
++{
++    NVDispEvoRec *pDispEvo = pDpyEvo->pDispEvo;
++    NVDevEvoRec *pDevEvo = pDispEvo->pDevEvo;
++    NVEvoUpdateState updateState = { };
++
++    if ((value < NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_DEFAULT) ||
++        (value > NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_GAME)) {
++        return FALSE;
++    }
++
++    if (pDpyEvo->contentType == value) {
++        return TRUE;
++    }
++
++    pDpyEvo->contentType = value;
++
++    if ((pDpyEvo->apiHead == NV_INVALID_HEAD) || !nvDpyIsHdmiEvo(pDpyEvo)) {
++        return TRUE;
++    }
++
++    nvUpdateCoreFid(pDispEvo, pDpyEvo->apiHead, &updateState);
++    nvUpdateInfoFrames(pDpyEvo, pDevEvo->supportsFlipSynchronizedInfoframes);
++    nvEvoUpdateAndKickOff(pDispEvo, FALSE, &updateState, TRUE /* releaseElv */);
++
++    return TRUE;
++}
++
++static NvBool GetContentType(const NVDpyEvoRec *pDpyEvo, NvS64 *pValue)
++{
++    *pValue = pDpyEvo->contentType;
++    return TRUE;
++}
++
++static NvBool GetContentTypeValidValues(
++    const NVDpyEvoRec *pDpyEvo,
++    struct NvKmsAttributeValidValuesCommonReply *pValidValues)
++{
++    nvAssert(pValidValues->type == NV_KMS_ATTRIBUTE_TYPE_INTEGER);
++
++    pValidValues->u.range.min = NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_DEFAULT;
++    pValidValues->u.range.max = NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_GAME;
++
++    return TRUE;
++}
++
+ static NvBool GetRequestedColorBpcMaxValidValues(
+     const NVDpyEvoRec *pDpyEvo,
+     struct NvKmsAttributeValidValuesCommonReply *pValidValues)
+@@ -1393,6 +1444,12 @@ static const struct {
+         .getValidValues = GetRequestedColorBpcMaxValidValues,
+         .type           = NV_KMS_ATTRIBUTE_TYPE_INTBITS,
+     },
++    [NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE] = {
++        .set            = SetContentType,
++        .get            = GetContentType,
++        .getValidValues = GetContentTypeValidValues,
++        .type           = NV_KMS_ATTRIBUTE_TYPE_INTEGER,
++    },
+ };
+ 
+ /*!
+diff --git a/src/nvidia-modeset/src/nvkms-hdmi.c b/src/nvidia-modeset/src/nvkms-hdmi.c
+index b7963b14..17b99398 100644
+--- a/src/nvidia-modeset/src/nvkms-hdmi.c
++++ b/src/nvidia-modeset/src/nvkms-hdmi.c
+@@ -501,6 +501,38 @@ static void UpdateInfoFrameFlipStatePost(NvEvoInfoFrameTransmitControl *currentT
+     currentTransmitCtrl->curFlipSynchronized = currentTransmitCtrl->newFlipSynchronized;
+ }
+ 
++/*
++ * Apply the content type a client requested (NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE)
++ * to the IT content and content type fields of the AVI InfoFrame.
++ */
++static void ApplyVideoInfoFrameContentType(
++    enum NvKmsDpyAttributeContentTypeValue contentType,
++    NVT_VIDEO_INFOFRAME_CTRL *pCtrl)
++{
++    switch (contentType) {
++        case NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_DEFAULT:
++            return;
++        case NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_NO_DATA:
++            pCtrl->it_content = NVT_VIDEO_INFOFRAME_BYTE3_ITC_NO_DATA;
++            pCtrl->it_content_type = NVT_VIDEO_INFOFRAME_BYTE5_CN1CN0_NODATA;
++            return;
++        case NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_GRAPHICS:
++            pCtrl->it_content_type = NVT_VIDEO_INFOFRAME_BYTE5_CN1CN0_GRAPHICS;
++            break;
++        case NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_PHOTO:
++            pCtrl->it_content_type = NVT_VIDEO_INFOFRAME_BYTE5_CN1CN0_PHOTO;
++            break;
++        case NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_CINEMA:
++            pCtrl->it_content_type = NVT_VIDEO_INFOFRAME_BYTE5_CN1CN0_CINEMA;
++            break;
++        case NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE_GAME:
++            pCtrl->it_content_type = NVT_VIDEO_INFOFRAME_BYTE5_CN1CN0_GAME;
++            break;
++    }
++
++    pCtrl->it_content = NVT_VIDEO_INFOFRAME_BYTE3_ITC_IT_CONTENT;
++}
++
+ /*
+  * SendVideoInfoFrame() - Construct video infoframe using provided EDID and call
+  * ->SendHdmiInfoFrame() to send it to RM.
+@@ -511,6 +543,7 @@ static void SendVideoInfoFrame(const NVDispEvoRec *pDispEvo,
+                                const NVDispHeadInfoFrameStateEvoRec *pInfoFrameState,
+                                NvEvoInfoFrameTransmitControl *currentTransmitCtrl,
+                                NvEvoInfoFrameTransmitControl *newTransmitCtrl,
++                               enum NvKmsDpyAttributeContentTypeValue contentType,
+                                NVT_EDID_INFO *pEdidInfo)
+ {
+     const NVDevEvoRec *pDevEvo = pDispEvo->pDevEvo;
+@@ -520,6 +553,7 @@ static void SendVideoInfoFrame(const NVDispEvoRec *pDispEvo,
+     NVT_STATUS status;
+ 
+     CalculateVideoInfoFrameColorFormat(pDpyColor, hdTimings, pEdidInfo, &videoCtrl);
++    ApplyVideoInfoFrameContentType(contentType, &videoCtrl);
+ 
+     status = NvTiming_ConstructVideoInfoframe(pEdidInfo,
+                                               &videoCtrl,
+@@ -739,6 +773,7 @@ void nvUpdateHdmiInfoFrames(const NVDispEvoRec *pDispEvo,
+                        pInfoFrameState,
+                        &flipState->videoInfoframeTransmitCtrl,
+                        newTransmitCtrl,
++                       pDpyEvo->contentType,
+                        &pDpyEvo->parsedEdid.info);
+ 
+     SendVendorSpecificInfoFrame(pDispEvo,

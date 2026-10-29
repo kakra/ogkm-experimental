@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 16:45:56 +0100
+Subject: [PATCH] nvidia: only define struct nv_cxl with the CXL bring-up API
+
+struct nv_cxl embeds a struct cxl_dev_state and was defined whenever
+<cxl/cxl.h> exists. Some kernels (Proxmox 7.0.14-20 and later, CentOS Stream
+10 6.12.0-278) ship a <cxl/cxl.h> that doesn't define it, failing the build
+with "field 'cxlds' has incomplete type". It is only used when
+NV_CXL_INIT_SUPPORTED, so define it under that.
+
+Fixes upstream issues 1433 and 1472.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nv-linux.h | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/kernel-open/common/inc/nv-linux.h b/kernel-open/common/inc/nv-linux.h
+index 35fe0abc..1a9de993 100644
+--- a/kernel-open/common/inc/nv-linux.h
++++ b/kernel-open/common/inc/nv-linux.h
+@@ -1311,7 +1311,11 @@ struct nv_pci_tegra_devfreq_dev;
+ /* this is a general os-specific state structure. the first element *must* be
+    the general state structure, for the generic unix-based code */
+ 
+-#if defined(NV_CXL_CXL_H_PRESENT)
++/*
++ * Some kernels have <cxl/cxl.h> without struct cxl_dev_state; nv_cxl is only
++ * used when the CXL bring-up API is available.
++ */
++#if defined(NV_CXL_INIT_SUPPORTED)
+ struct nv_cxl {
+     struct cxl_dev_state         cxlds;
+     struct cxl_memdev           *cxlmd;

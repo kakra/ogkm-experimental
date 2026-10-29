@@ -50,7 +50,7 @@ index c863ca13..94ea0f82 100755
              #
              # Determine if the pde_data() function is present.
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
-index edf0602f..5d1b1067 100644
+index fc879bba..ef62d5ec 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
 @@ -3080,6 +3080,44 @@ __nv_drm_plane_create_rotation_property(struct drm_plane *plane,

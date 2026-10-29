@@ -1,0 +1,516 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 28 Oct 2026 18:25:01 +0100
+Subject: [PATCH] nvidia-drm: add the scaling mode connector property
+
+KWin, like other compositors, offers common lower resolutions on laptop
+panels (1920x1200, 1600x1200, ...) only when the connector has the
+standard "scaling mode" property with "Full aspect", and then uses it for
+those modes. nvidia-drm didn't have it, so the internal panel could only
+run at its native resolution. Laptop panels often accept nothing but
+their own timings (this one's EDID allows a single 432 kHz line rate), so
+the driver has to drive the native timings and scale the smaller image
+with the display hardware, as i915 and amdgpu do.
+
+NVKMS can already do that: a modeset request takes the size the head
+fetches (viewPortSizeIn) and the rectangle within the raster it scales
+it to (viewPortOut). KAPI always set the input size to the mode's visible
+size and never passed an output rectangle. Add both to the KAPI head
+modeset config, used when the new viewPort.enabled is set.
+
+nvidia-drm attaches "scaling mode" (None, Full, Center, Full aspect) to
+every connector, None by default, which drives the mode as requested,
+like before. get_modes saves the modes at the display's native
+resolution (the preferred mode's size). A new encoder atomic_check, used
+when a modeset is needed and the CRTC drives a single connector, takes
+the native mode with the closest refresh rate as the adjusted mode when
+scaling is requested and the mode is smaller than the native resolution,
+and computes the viewport: the whole raster (Full), the mode's size
+centered (Center), or the largest centered rectangle with the mode's
+aspect ratio (Full aspect). The CRTC's mode keeps the requested size,
+which the planes are positioned in. The CRTC check now passes the
+adjusted mode to KAPI, so the vblank timing, which already used it,
+matches what is driven. A change of the property forces a modeset.
+
+nvidia_drm.scaling_mode=0 leaves the property out.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nvkms-kapi.h           |  11 ++
+ kernel-open/nvidia-drm/nvidia-drm-connector.c | 119 ++++++++++++++++++
+ kernel-open/nvidia-drm/nvidia-drm-connector.h |  22 ++++
+ kernel-open/nvidia-drm/nvidia-drm-crtc.c      |  12 +-
+ kernel-open/nvidia-drm/nvidia-drm-encoder.c   |  96 +++++++++++++-
+ kernel-open/nvidia-drm/nvidia-drm-linux.c     |   6 +
+ .../nvidia-drm/nvidia-drm-os-interface.c      |   1 +
+ .../nvidia-drm/nvidia-drm-os-interface.h      |   2 +
+ .../kapi/interface/nvkms-kapi.h               |  11 ++
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      |  14 ++-
+ 10 files changed, 283 insertions(+), 11 deletions(-)
+
+diff --git a/kernel-open/common/inc/nvkms-kapi.h b/kernel-open/common/inc/nvkms-kapi.h
+index 4f96715c..ded99127 100644
+--- a/kernel-open/common/inc/nvkms-kapi.h
++++ b/kernel-open/common/inc/nvkms-kapi.h
+@@ -432,6 +432,17 @@ struct NvKmsKapiHeadModeSetConfig {
+      */
+     NvU8 maxBpc;
+ 
++    /*
++     * Scale an image of sizeIn to the out rectangle within the mode's visible
++     * area; the DRM "scaling mode" property. The layers are positioned in
++     * sizeIn. When not enabled, both are the mode's visible size.
++     */
++    struct {
++        NvBool enabled;
++        struct NvKmsSize sizeIn;
++        struct NvKmsRect out;
++    } viewPort;
++
+     NvBool postcompColorPassthrough;
+ };
+ 
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index 0a25f7fd..b2cbc2f8 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -546,6 +546,93 @@ static struct drm_connector_funcs nv_connector_funcs = {
+ #endif
+ };
+ 
++/*
++ * Remember the modes at the native resolution: the size of the preferred
++ * mode, or the largest size if the display has no preferred mode.
++ */
++static void nv_drm_connector_save_native_mode(
++    struct nv_drm_connector *nv_connector,
++    const struct drm_display_mode *mode)
++{
++    const bool preferred = (mode->type & DRM_MODE_TYPE_PREFERRED) != 0;
++
++    spin_lock(&nv_connector->native_modes_lock);
++
++    if (nv_connector->num_native_modes > 0) {
++        const struct drm_display_mode *native = &nv_connector->native_modes[0];
++        const bool same_size = (mode->hdisplay == native->hdisplay) &&
++                               (mode->vdisplay == native->vdisplay);
++        const bool larger =
++            ((u32)mode->hdisplay * mode->vdisplay) >
++            ((u32)native->hdisplay * native->vdisplay);
++
++        if (!same_size) {
++            if (nv_connector->native_mode_preferred ||
++                (!preferred && !larger)) {
++                goto done;
++            }
++            nv_connector->num_native_modes = 0;
++        }
++    }
++
++    if (preferred) {
++        nv_connector->native_mode_preferred = true;
++    }
++
++    if (nv_connector->num_native_modes < NV_DRM_CONNECTOR_MAX_NATIVE_MODES) {
++        drm_mode_copy(
++            &nv_connector->native_modes[nv_connector->num_native_modes++],
++            mode);
++    }
++
++done:
++    spin_unlock(&nv_connector->native_modes_lock);
++}
++
++static void nv_drm_connector_clear_native_modes(
++    struct nv_drm_connector *nv_connector)
++{
++    spin_lock(&nv_connector->native_modes_lock);
++    nv_connector->num_native_modes = 0;
++    nv_connector->native_mode_preferred = false;
++    spin_unlock(&nv_connector->native_modes_lock);
++}
++
++/*
++ * Find the native-resolution mode with the refresh rate closest to vrefresh.
++ * Returns false if the display has none (not probed yet).
++ */
++bool nv_drm_connector_get_native_mode(struct nv_drm_connector *nv_connector,
++                                      int vrefresh,
++                                      struct drm_display_mode *native_mode)
++{
++    unsigned int best = 0;
++    int best_diff = INT_MAX;
++    unsigned int i;
++    bool found;
++
++    spin_lock(&nv_connector->native_modes_lock);
++
++    for (i = 0; i < nv_connector->num_native_modes; i++) {
++        const int diff =
++            abs(drm_mode_vrefresh(&nv_connector->native_modes[i]) - vrefresh);
++
++        if (diff < best_diff) {
++            best_diff = diff;
++            best = i;
++        }
++    }
++
++    found = nv_connector->num_native_modes > 0;
++    if (found) {
++        drm_mode_copy(native_mode, &nv_connector->native_modes[best]);
++    }
++
++    spin_unlock(&nv_connector->native_modes_lock);
++
++    return found;
++}
++
+ static int nv_drm_connector_get_modes(struct drm_connector *connector)
+ {
+     struct drm_device *dev = connector->dev;
+@@ -561,6 +648,8 @@ static int nv_drm_connector_get_modes(struct drm_connector *connector)
+         nv_drm_connector_update_edid_property(connector, nv_connector->edid);
+     }
+ 
++    nv_drm_connector_clear_native_modes(nv_connector);
++
+     while (1) {
+         struct drm_display_mode *mode;
+         struct NvKmsKapiDisplayMode displayMode;
+@@ -609,6 +698,8 @@ static int nv_drm_connector_get_modes(struct drm_connector *connector)
+             mode->type |= DRM_MODE_TYPE_PREFERRED;
+         }
+ 
++        nv_drm_connector_save_native_mode(nv_connector, mode);
++
+         /* Add a mode to a connector's probed_mode list */
+ 
+         drm_mode_probed_add(connector, mode);
+@@ -747,6 +838,15 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
+         }
+     }
+ 
++    /*
++     * Handle "scaling mode". It decides the raster timings and the viewport
++     * the encoder check derives from the mode, so it needs a modeset.
++     */
++    if (old_connector_state->scaling_mode !=
++        new_connector_state->scaling_mode) {
++        crtc_state->mode_changed = true;
++    }
++
+     /* Handle HDMI VSIF metadata changes */
+     req_config->flags.hdmiVsifMetadataChanged =
+         !nv_drm_blobs_equal(nv_old_connector_state->hdmi_vsif_metadata,
+@@ -898,6 +998,7 @@ nv_drm_connector_new(struct drm_device *dev,
+     nv_connector->internal = internal;
+     nv_connector->modeset_permission_filep = NULL;
+     nv_connector->modeset_permission_crtc = NULL;
++    spin_lock_init(&nv_connector->native_modes_lock);
+     nv_connector->cp = NVKMS_CONTENT_PROTECTION_OFF;
+ 
+     strcpy(nv_connector->dpAddress, dpAddress);
+@@ -999,6 +1100,24 @@ nv_drm_connector_new(struct drm_device *dev,
+                 nv_connector->physicalIndex);
+         }
+     }
++
++    /*
++     * The head scaler can show a mode smaller than the display's native
++     * resolution at the native timings. Like on other drivers, no scaling is
++     * the default; then the mode is driven as requested.
++     */
++    if (nv_drm_scaling_mode_module_param &&
++        drm_connector_attach_scaling_mode_property(
++            &nv_connector->base,
++            BIT(DRM_MODE_SCALE_NONE) |
++            BIT(DRM_MODE_SCALE_FULLSCREEN) |
++            BIT(DRM_MODE_SCALE_CENTER) |
++            BIT(DRM_MODE_SCALE_ASPECT)) != 0) {
++        NV_DRM_DEV_LOG_ERR(
++            nv_dev,
++            "Failed to attach the scaling mode property to connector created from physical index %u",
++            nv_connector->physicalIndex);
++    }
+ #endif
+ 
+     /* Attach dithering mode property */
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.h b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+index e8413012..c6340eaf 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+@@ -32,10 +32,16 @@
+ #endif
+ 
+ #include <drm/drm_connector.h>
++#include <drm/drm_modes.h>
++
++#include <linux/spinlock.h>
+ 
+ #include "nvtypes.h"
+ #include "nvkms-api-types.h"
+ 
++/* Native-resolution modes kept per connector for "scaling mode" */
++#define NV_DRM_CONNECTOR_MAX_NATIVE_MODES 8
++
+ struct nv_drm_connector {
+     NvU32 physicalIndex;
+ 
+@@ -65,6 +71,18 @@ struct nv_drm_connector {
+      */
+     struct nv_drm_crtc *modeset_permission_crtc;
+ 
++    /*
++     * The modes at the display's native resolution (the size of its
++     * preferred mode), saved by get_modes. A mode of another size is scaled
++     * to the one of these with the closest refresh rate when "scaling mode"
++     * asks for it. Protected by native_modes_lock, since atomic checks
++     * don't hold mode_config.mutex.
++     */
++    spinlock_t native_modes_lock;
++    struct drm_display_mode native_modes[NV_DRM_CONNECTOR_MAX_NATIVE_MODES];
++    unsigned int num_native_modes;
++    bool native_mode_preferred;
++
+     struct drm_connector base;
+ };
+ 
+@@ -124,6 +142,10 @@ void nv_drm_connector_update_content_protection(struct nv_drm_connector *nv_conn
+ int nv_drm_connector_update_topology_property(struct nv_drm_connector *nv_connector,
+                                               const void *topology);
+ 
++bool nv_drm_connector_get_native_mode(struct nv_drm_connector *nv_connector,
++                                      int vrefresh,
++                                      struct drm_display_mode *native_mode);
++
+ 
+ #endif /* NV_DRM_AVAILABLE */
+ 
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+index e0b636be..e8681d47 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -2714,9 +2714,17 @@ static int nv_drm_crtc_atomic_check(struct drm_crtc *crtc,
+         &nv_crtc_state->req_config;
+     int ret = 0;
+ 
+-    if (crtc_state->mode_changed) {
+-        drm_mode_to_nvkms_display_mode(&crtc_state->mode,
++    /*
++     * Drive the adjusted mode: with "scaling mode" the encoder check replaces
++     * it with the display's native timings and sets up the viewport. DRM core
++     * resets it from the mode in these cases.
++     */
++    if (crtc_state->mode_changed || crtc_state->connectors_changed) {
++        drm_mode_to_nvkms_display_mode(&crtc_state->adjusted_mode,
+                                        &req_config->modeSetConfig.mode);
++    }
++
++    if (crtc_state->mode_changed) {
+         req_config->flags.modeChanged = NV_TRUE;
+     }
+ 
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-encoder.c b/kernel-open/nvidia-drm/nvidia-drm-encoder.c
+index 7ca3f1c0..63ba1f78 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-encoder.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-encoder.c
+@@ -59,11 +59,97 @@ static const struct drm_encoder_funcs nv_encoder_funcs = {
+     .destroy = nv_drm_encoder_destroy,
+ };
+ 
+-static bool nv_drm_encoder_mode_fixup(struct drm_encoder *encoder,
+-                                      const struct drm_display_mode *mode,
+-                                      struct drm_display_mode *adjusted_mode)
++/*
++ * Implement "scaling mode": show a mode smaller than the display's native
++ * resolution by driving the native timings with the closest refresh rate and
++ * scaling the mode's area with the head scaler. Displays such as laptop
++ * panels often accept no other timings. The CRTC's mode keeps the requested
++ * size, which is what the layers are positioned in; the adjusted mode gets
++ * the timings that are driven.
++ */
++static int nv_drm_encoder_atomic_check(struct drm_encoder *encoder,
++                                       struct drm_crtc_state *crtc_state,
++                                       struct drm_connector_state *conn_state)
+ {
+-    return true;
++    struct nv_drm_connector *nv_connector =
++        to_nv_connector(conn_state->connector);
++    struct nv_drm_crtc_state *nv_crtc_state = to_nv_crtc_state(crtc_state);
++    struct NvKmsKapiHeadModeSetConfig *config =
++        &nv_crtc_state->req_config.modeSetConfig;
++    const struct drm_display_mode *mode = &crtc_state->mode;
++    struct drm_display_mode native = { };
++    struct NvKmsRect out;
++
++    /* DRM core only resets the adjusted mode in these cases */
++    if (!crtc_state->mode_changed && !crtc_state->connectors_changed) {
++        return 0;
++    }
++
++    config->viewPort.enabled = NV_FALSE;
++
++    if (!crtc_state->enable ||
++        (conn_state->scaling_mode == DRM_MODE_SCALE_NONE) ||
++        (hweight32(crtc_state->connector_mask) != 1) ||
++        (mode->flags & (DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN))) {
++        return 0;
++    }
++
++    if (!nv_drm_connector_get_native_mode(nv_connector,
++                                          drm_mode_vrefresh(mode),
++                                          &native)) {
++        return 0;
++    }
++
++    /*
++     * Drive the native size as requested, and leave larger modes to mode
++     * validation; the head scaler only upscales here.
++     */
++    if (((mode->hdisplay == native.hdisplay) &&
++         (mode->vdisplay == native.vdisplay)) ||
++        (mode->hdisplay > native.hdisplay) ||
++        (mode->vdisplay > native.vdisplay) ||
++        (mode->hdisplay == 0) || (mode->vdisplay == 0)) {
++        return 0;
++    }
++
++    switch (conn_state->scaling_mode) {
++    case DRM_MODE_SCALE_CENTER:
++        out.width = mode->hdisplay;
++        out.height = mode->vdisplay;
++        break;
++    case DRM_MODE_SCALE_ASPECT:
++        if ((u32)mode->hdisplay * native.vdisplay >
++            (u32)mode->vdisplay * native.hdisplay) {
++            /* Wider than the display: fill the width */
++            out.width = native.hdisplay;
++            out.height = DIV_ROUND_CLOSEST((u32)mode->vdisplay *
++                                           native.hdisplay,
++                                           mode->hdisplay);
++        } else {
++            out.width = DIV_ROUND_CLOSEST((u32)mode->hdisplay *
++                                          native.vdisplay,
++                                          mode->vdisplay);
++            out.height = native.vdisplay;
++        }
++        break;
++    case DRM_MODE_SCALE_FULLSCREEN:
++    default:
++        out.width = native.hdisplay;
++        out.height = native.vdisplay;
++        break;
++    }
++
++    out.x = (native.hdisplay - out.width) / 2;
++    out.y = (native.vdisplay - out.height) / 2;
++
++    drm_mode_copy(&crtc_state->adjusted_mode, &native);
++
++    config->viewPort.enabled = NV_TRUE;
++    config->viewPort.sizeIn.width = mode->hdisplay;
++    config->viewPort.sizeIn.height = mode->vdisplay;
++    config->viewPort.out = out;
++
++    return 0;
+ }
+ 
+ static void nv_drm_encoder_prepare(struct drm_encoder *encoder)
+@@ -84,7 +170,7 @@ static void nv_drm_encoder_mode_set(struct drm_encoder *encoder,
+ }
+ 
+ static const struct drm_encoder_helper_funcs nv_encoder_helper_funcs = {
+-    .mode_fixup = nv_drm_encoder_mode_fixup,
++    .atomic_check = nv_drm_encoder_atomic_check,
+     .prepare    = nv_drm_encoder_prepare,
+     .commit     = nv_drm_encoder_commit,
+     .mode_set   = nv_drm_encoder_mode_set,
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-linux.c b/kernel-open/nvidia-drm/nvidia-drm-linux.c
+index 8343830c..80060217 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-linux.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-linux.c
+@@ -61,6 +61,12 @@ MODULE_PARM_DESC(
+ module_param_named(deadline_boost, nv_drm_deadline_boost_module_param, bool, 0644);
+ #endif
+ 
++MODULE_PARM_DESC(
++    scaling_mode,
++    "Add the \"scaling mode\" connector property, to show modes below the "
++    "native resolution with the display scaler (1 = enable (default), 0 = disable)");
++module_param_named(scaling_mode, nv_drm_scaling_mode_module_param, bool, 0444);
++
+ #endif /* NV_DRM_AVAILABLE */
+ 
+ /*************************************************************************
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-os-interface.c b/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
+index b3d3f7d3..5a2a04cc 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
+@@ -47,6 +47,7 @@ bool nv_drm_fbdev_module_param = true;
+ bool nv_drm_vblank_module_param = true;
+ bool nv_drm_color_pipeline_module_param = true;
+ bool nv_drm_deadline_boost_module_param = true;
++bool nv_drm_scaling_mode_module_param = true;
+ 
+ void *nv_drm_calloc(size_t nmemb, size_t size)
+ {
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-os-interface.h b/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
+index 12e4ebeb..2d6237bf 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
+@@ -72,6 +72,8 @@ extern bool nv_drm_color_pipeline_module_param;
+ #endif
+ /* Set to true when fence deadlines may boost GPU clocks. */
+ extern bool nv_drm_deadline_boost_module_param;
++/* Set to true when connectors get the "scaling mode" property. */
++extern bool nv_drm_scaling_mode_module_param;
+ 
+ void *nv_drm_calloc(size_t nmemb, size_t size);
+ 
+diff --git a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+index 4f96715c..ded99127 100644
+--- a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
++++ b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+@@ -432,6 +432,17 @@ struct NvKmsKapiHeadModeSetConfig {
+      */
+     NvU8 maxBpc;
+ 
++    /*
++     * Scale an image of sizeIn to the out rectangle within the mode's visible
++     * area; the DRM "scaling mode" property. The layers are positioned in
++     * sizeIn. When not enabled, both are the mode's visible size.
++     */
++    struct {
++        NvBool enabled;
++        struct NvKmsSize sizeIn;
++        struct NvKmsRect out;
++    } viewPort;
++
+     NvBool postcompColorPassthrough;
+ };
+ 
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index b235785c..4ee28ad6 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -3576,10 +3576,16 @@ static NvBool NvKmsKapiRequestedModeSetConfigToKms(
+         paramsHead->flip.colorimetry.specified = NV_TRUE;
+         paramsHead->flip.colorimetry.val = headModeSetConfig->colorimetry;
+ 
+-        paramsHead->viewPortSizeIn.width =
+-            headModeSetConfig->mode.timings.hVisible;
+-        paramsHead->viewPortSizeIn.height =
+-            headModeSetConfig->mode.timings.vVisible;
++        if (headModeSetConfig->viewPort.enabled) {
++            paramsHead->viewPortSizeIn = headModeSetConfig->viewPort.sizeIn;
++            paramsHead->viewPortOut = headModeSetConfig->viewPort.out;
++            paramsHead->viewPortOutSpecified = NV_TRUE;
++        } else {
++            paramsHead->viewPortSizeIn.width =
++                headModeSetConfig->mode.timings.hVisible;
++            paramsHead->viewPortSizeIn.height =
++                headModeSetConfig->mode.timings.vVisible;
++        }
+ 
+         paramsHead->allowGsync = NV_TRUE;
+         paramsHead->allowAdaptiveSync = NVKMS_ALLOW_ADAPTIVE_SYNC_ALL;

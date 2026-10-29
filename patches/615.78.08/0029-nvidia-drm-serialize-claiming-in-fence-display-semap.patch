@@ -44,7 +44,7 @@ index b39e77a7..c3a984b5 100644
      nv_dev->vtFbBaseAddress = resInfo.vtFbBaseAddress;
      nv_dev->vtFbSize = resInfo.vtFbSize;
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-modeset.c b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
-index b359da4d..06f39b32 100644
+index b37fa5f5..021c6930 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-modeset.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
 @@ -253,12 +253,20 @@ static int __nv_drm_convert_in_fences(

@@ -1,0 +1,428 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 28 Oct 2026 18:55:26 +0100
+Subject: [PATCH] nvidia-drm: add the underscan connector properties
+
+KWin's display settings have an "Overscan" slider for TVs that crop the
+edges of the picture. KWin implements it with the "overscan" connector
+property or, failing that, with amdgpu's "underscan", "underscan hborder"
+and "underscan vborder", and offers the setting only when the connector
+has one of them. nvidia-drm had neither.
+
+Add the properties amdgpu, radeon and nouveau share: "underscan" (off, on,
+auto) and the two borders (0-128 pixels). When underscan is on (or auto)
+and a border is set, the image is shrunk by hborder pixels on the left and
+on the right and vborder pixels at the top and at the bottom, keeping its
+aspect ratio, and the area around it stays black. The borders are per
+side, as on nouveau and radeon; amdgpu splits them over both sides, which
+makes KWin's slider (vborder = the slider value) only half as effective.
+
+This uses the viewport support added for "scaling mode": the encoder check
+now computes the output rectangle within the raster minus the borders. With
+"scaling mode" also active the mode is scaled into that smaller area the
+way the scaling mode says; with underscan alone the mode's own timings are
+driven and the head scaler shrinks it. A change of the properties forces a
+modeset. Borders as large as the raster are rejected.
+
+nvidia_drm.scaling_mode=0 leaves these properties out as well.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-connector.c |  57 +++++++-
+ kernel-open/nvidia-drm/nvidia-drm-connector.h |   3 +
+ kernel-open/nvidia-drm/nvidia-drm-drv.c       |  29 +++++
+ kernel-open/nvidia-drm/nvidia-drm-encoder.c   | 122 ++++++++++++------
+ kernel-open/nvidia-drm/nvidia-drm-linux.c     |   4 +-
+ .../nvidia-drm/nvidia-drm-os-interface.h      |   2 +-
+ kernel-open/nvidia-drm/nvidia-drm-priv.h      |  14 ++
+ 7 files changed, 182 insertions(+), 49 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index b2cbc2f8..1832c2f7 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -361,6 +361,11 @@ static struct drm_connector_state* nv_drm_connector_atomic_duplicate_state(struc
+ 
+     nv_drm_new_connector_state->dithering_mode = nv_drm_old_connector_state->dithering_mode;
+     nv_drm_new_connector_state->broadcast_rgb = nv_drm_old_connector_state->broadcast_rgb;
++    nv_drm_new_connector_state->underscan = nv_drm_old_connector_state->underscan;
++    nv_drm_new_connector_state->underscan_hborder =
++        nv_drm_old_connector_state->underscan_hborder;
++    nv_drm_new_connector_state->underscan_vborder =
++        nv_drm_old_connector_state->underscan_vborder;
+     nv_drm_new_connector_state->hdcp_topology_blob = nv_drm_old_connector_state->hdcp_topology_blob;
+     if (nv_drm_new_connector_state->hdcp_topology_blob) {
+         drm_property_blob_get(nv_drm_new_connector_state->hdcp_topology_blob);
+@@ -423,6 +428,18 @@ static int nv_drm_connector_atomic_set_property(
+         }
+         nv_connector_state->broadcast_rgb = val;
+         return 0;
++    } else if (property == nv_dev->nv_connector_underscan_property) {
++        if (val >= NV_DRM_UNDERSCAN_MAX) {
++            return -EINVAL;
++        }
++        nv_connector_state->underscan = val;
++        return 0;
++    } else if (property == nv_dev->nv_connector_underscan_hborder_property) {
++        nv_connector_state->underscan_hborder = val;
++        return 0;
++    } else if (property == nv_dev->nv_connector_underscan_vborder_property) {
++        nv_connector_state->underscan_vborder = val;
++        return 0;
+     } else if (property == nv_dev->nv_hdcp_level_property) {
+         // nv_hdcp_level_property is read only
+         return -EINVAL;
+@@ -459,6 +476,15 @@ static int nv_drm_connector_atomic_get_property(
+     } else if (property == nv_dev->nv_connector_broadcast_rgb_property) {
+         *val = nv_connector_state->broadcast_rgb;
+         return 0;
++    } else if (property == nv_dev->nv_connector_underscan_property) {
++        *val = nv_connector_state->underscan;
++        return 0;
++    } else if (property == nv_dev->nv_connector_underscan_hborder_property) {
++        *val = nv_connector_state->underscan_hborder;
++        return 0;
++    } else if (property == nv_dev->nv_connector_underscan_vborder_property) {
++        *val = nv_connector_state->underscan_vborder;
++        return 0;
+     } else if (property == nv_dev->nv_hdcp_level_property) {
+         *val = nv_conn->cp;
+         return 0;
+@@ -839,11 +865,18 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
+     }
+ 
+     /*
+-     * Handle "scaling mode". It decides the raster timings and the viewport
+-     * the encoder check derives from the mode, so it needs a modeset.
++     * Handle "scaling mode" and underscan. They decide the raster timings
++     * and the viewport the encoder check derives from the mode, so they need
++     * a modeset.
+      */
+-    if (old_connector_state->scaling_mode !=
+-        new_connector_state->scaling_mode) {
++    if ((old_connector_state->scaling_mode !=
++         new_connector_state->scaling_mode) ||
++        (nv_old_connector_state->underscan !=
++         nv_new_connector_state->underscan) ||
++        (nv_old_connector_state->underscan_hborder !=
++         nv_new_connector_state->underscan_hborder) ||
++        (nv_old_connector_state->underscan_vborder !=
++         nv_new_connector_state->underscan_vborder)) {
+         crtc_state->mode_changed = true;
+     }
+ 
+@@ -1118,6 +1151,22 @@ nv_drm_connector_new(struct drm_device *dev,
+             "Failed to attach the scaling mode property to connector created from physical index %u",
+             nv_connector->physicalIndex);
+     }
++
++    /*
++     * Underscan, for TVs that crop the picture edges: the head scaler
++     * shrinks the image by the borders, like on amdgpu.
++     */
++    if (nv_drm_scaling_mode_module_param) {
++        drm_object_attach_property(&nv_connector->base.base,
++                                   nv_dev->nv_connector_underscan_property,
++                                   NV_DRM_UNDERSCAN_OFF);
++        drm_object_attach_property(&nv_connector->base.base,
++                                   nv_dev->nv_connector_underscan_hborder_property,
++                                   0);
++        drm_object_attach_property(&nv_connector->base.base,
++                                   nv_dev->nv_connector_underscan_vborder_property,
++                                   0);
++    }
+ #endif
+ 
+     /* Attach dithering mode property */
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.h b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+index c6340eaf..1f67e248 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+@@ -99,6 +99,9 @@ struct nv_drm_connector_state {
+        struct drm_connector_state base;
+        enum nv_drm_dithering_mode dithering_mode;
+        enum nv_drm_broadcast_rgb broadcast_rgb;
++       enum nv_drm_underscan underscan;
++       u32 underscan_hborder;
++       u32 underscan_vborder;
+        struct drm_property_blob *hdcp_topology_blob;
+        struct drm_property_blob *hdmi_vsif_metadata;
+ };
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index 7b979153..863d8d34 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -518,6 +518,15 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "Limited 16:235" },
+     };
+ 
++    const struct drm_prop_enum_list underscan_enum_list[] = {
++        { .type = NV_DRM_UNDERSCAN_OFF,
++          .name = "off" },
++        { .type = NV_DRM_UNDERSCAN_ON,
++          .name = "on" },
++        { .type = NV_DRM_UNDERSCAN_AUTO,
++          .name = "auto" },
++    };
++
+     const struct drm_prop_enum_list hdcp_level_enum_list[] = {
+         { .type = NVKMS_CONTENT_PROTECTION_OFF,
+           .name = "HDCP_OFF" },
+@@ -691,6 +700,26 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+         return -ENOMEM;
+     }
+ 
++    nv_dev->nv_connector_underscan_property =
++        drm_property_create_enum(nv_dev->dev, 0,
++                                 "underscan",
++                                 underscan_enum_list,
++                                 ARRAY_SIZE(underscan_enum_list));
++    nv_dev->nv_connector_underscan_hborder_property =
++        drm_property_create_range(nv_dev->dev, 0,
++                                  "underscan hborder",
++                                  0, NV_DRM_UNDERSCAN_BORDER_MAX);
++    nv_dev->nv_connector_underscan_vborder_property =
++        drm_property_create_range(nv_dev->dev, 0,
++                                  "underscan vborder",
++                                  0, NV_DRM_UNDERSCAN_BORDER_MAX);
++    if ((nv_dev->nv_connector_underscan_property == NULL) ||
++        (nv_dev->nv_connector_underscan_hborder_property == NULL) ||
++        (nv_dev->nv_connector_underscan_vborder_property == NULL)) {
++        NV_DRM_LOG_ERR("Failed to create underscan properties");
++        return -ENOMEM;
++    }
++
+     // Color Pipeline Passthrough Properties
+     nv_dev->nv_plane_color_passthrough_property =
+         drm_property_create_bool(nv_dev->dev, 0,
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-encoder.c b/kernel-open/nvidia-drm/nvidia-drm-encoder.c
+index 63ba1f78..7e395c2d 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-encoder.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-encoder.c
+@@ -60,12 +60,20 @@ static const struct drm_encoder_funcs nv_encoder_funcs = {
+ };
+ 
+ /*
+- * Implement "scaling mode": show a mode smaller than the display's native
+- * resolution by driving the native timings with the closest refresh rate and
+- * scaling the mode's area with the head scaler. Displays such as laptop
+- * panels often accept no other timings. The CRTC's mode keeps the requested
+- * size, which is what the layers are positioned in; the adjusted mode gets
+- * the timings that are driven.
++ * Implement "scaling mode" and underscan with the head scaler.
++ *
++ * "scaling mode": show a mode smaller than the display's native resolution
++ * by driving the native timings with the closest refresh rate and scaling
++ * the mode's area. Displays such as laptop panels often accept no other
++ * timings.
++ *
++ * Underscan, for TVs that crop the picture edges: shrink the image by
++ * "underscan hborder" pixels on the left and on the right and "underscan
++ * vborder" pixels at the top and at the bottom, keeping its aspect ratio,
++ * like nouveau and radeon.
++ *
++ * The CRTC's mode keeps the requested size, which is what the layers are
++ * positioned in; the adjusted mode gets the timings that are driven.
+  */
+ static int nv_drm_encoder_atomic_check(struct drm_encoder *encoder,
+                                        struct drm_crtc_state *crtc_state,
+@@ -73,11 +81,21 @@ static int nv_drm_encoder_atomic_check(struct drm_encoder *encoder,
+ {
+     struct nv_drm_connector *nv_connector =
+         to_nv_connector(conn_state->connector);
++    const struct nv_drm_connector_state *nv_conn_state =
++        to_nv_drm_connector_state(conn_state);
+     struct nv_drm_crtc_state *nv_crtc_state = to_nv_crtc_state(crtc_state);
+     struct NvKmsKapiHeadModeSetConfig *config =
+         &nv_crtc_state->req_config.modeSetConfig;
+     const struct drm_display_mode *mode = &crtc_state->mode;
++    const bool underscan =
++        (nv_conn_state->underscan != NV_DRM_UNDERSCAN_OFF) &&
++        ((nv_conn_state->underscan_hborder != 0) ||
++         (nv_conn_state->underscan_vborder != 0));
++    unsigned int scaling_mode = conn_state->scaling_mode;
+     struct drm_display_mode native = { };
++    bool scale = false;
++    u32 raster_width, raster_height;
++    u32 area_width, area_height;
+     struct NvKmsRect out;
+ 
+     /* DRM core only resets the adjusted mode in these cases */
+@@ -88,61 +106,81 @@ static int nv_drm_encoder_atomic_check(struct drm_encoder *encoder,
+     config->viewPort.enabled = NV_FALSE;
+ 
+     if (!crtc_state->enable ||
+-        (conn_state->scaling_mode == DRM_MODE_SCALE_NONE) ||
+         (hweight32(crtc_state->connector_mask) != 1) ||
+-        (mode->flags & (DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN))) {
+-        return 0;
+-    }
+-
+-    if (!nv_drm_connector_get_native_mode(nv_connector,
+-                                          drm_mode_vrefresh(mode),
+-                                          &native)) {
+-        return 0;
+-    }
+-
+-    /*
+-     * Drive the native size as requested, and leave larger modes to mode
+-     * validation; the head scaler only upscales here.
+-     */
+-    if (((mode->hdisplay == native.hdisplay) &&
+-         (mode->vdisplay == native.vdisplay)) ||
+-        (mode->hdisplay > native.hdisplay) ||
+-        (mode->vdisplay > native.vdisplay) ||
++        (mode->flags & (DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN)) ||
+         (mode->hdisplay == 0) || (mode->vdisplay == 0)) {
+         return 0;
+     }
+ 
+-    switch (conn_state->scaling_mode) {
++    /*
++     * Scale modes smaller than the native size. Drive the native size as
++     * requested, and leave larger modes to mode validation.
++     */
++    if ((scaling_mode != DRM_MODE_SCALE_NONE) &&
++        nv_drm_connector_get_native_mode(nv_connector,
++                                         drm_mode_vrefresh(mode),
++                                         &native) &&
++        (mode->hdisplay <= native.hdisplay) &&
++        (mode->vdisplay <= native.vdisplay) &&
++        ((mode->hdisplay != native.hdisplay) ||
++         (mode->vdisplay != native.vdisplay))) {
++        scale = true;
++    }
++
++    if (!scale && !underscan) {
++        return 0;
++    }
++
++    raster_width = scale ? native.hdisplay : mode->hdisplay;
++    raster_height = scale ? native.vdisplay : mode->vdisplay;
++    area_width = raster_width;
++    area_height = raster_height;
++
++    if (underscan) {
++        if ((2 * nv_conn_state->underscan_hborder >= raster_width) ||
++            (2 * nv_conn_state->underscan_vborder >= raster_height)) {
++            return -EINVAL;
++        }
++        area_width -= 2 * nv_conn_state->underscan_hborder;
++        area_height -= 2 * nv_conn_state->underscan_vborder;
++    }
++
++    /* Underscan alone keeps the image's aspect ratio */
++    if (!scale) {
++        scaling_mode = DRM_MODE_SCALE_ASPECT;
++    }
++
++    switch (scaling_mode) {
+     case DRM_MODE_SCALE_CENTER:
+-        out.width = mode->hdisplay;
+-        out.height = mode->vdisplay;
++        out.width = min_t(u32, mode->hdisplay, area_width);
++        out.height = min_t(u32, mode->vdisplay, area_height);
+         break;
+     case DRM_MODE_SCALE_ASPECT:
+-        if ((u32)mode->hdisplay * native.vdisplay >
+-            (u32)mode->vdisplay * native.hdisplay) {
+-            /* Wider than the display: fill the width */
+-            out.width = native.hdisplay;
+-            out.height = DIV_ROUND_CLOSEST((u32)mode->vdisplay *
+-                                           native.hdisplay,
++        if ((u32)mode->hdisplay * area_height >
++            (u32)mode->vdisplay * area_width) {
++            /* Wider than the area: fill the width */
++            out.width = area_width;
++            out.height = DIV_ROUND_CLOSEST((u32)mode->vdisplay * area_width,
+                                            mode->hdisplay);
+         } else {
+-            out.width = DIV_ROUND_CLOSEST((u32)mode->hdisplay *
+-                                          native.vdisplay,
++            out.width = DIV_ROUND_CLOSEST((u32)mode->hdisplay * area_height,
+                                           mode->vdisplay);
+-            out.height = native.vdisplay;
++            out.height = area_height;
+         }
+         break;
+     case DRM_MODE_SCALE_FULLSCREEN:
+     default:
+-        out.width = native.hdisplay;
+-        out.height = native.vdisplay;
++        out.width = area_width;
++        out.height = area_height;
+         break;
+     }
+ 
+-    out.x = (native.hdisplay - out.width) / 2;
+-    out.y = (native.vdisplay - out.height) / 2;
++    out.x = (raster_width - out.width) / 2;
++    out.y = (raster_height - out.height) / 2;
+ 
+-    drm_mode_copy(&crtc_state->adjusted_mode, &native);
++    if (scale) {
++        drm_mode_copy(&crtc_state->adjusted_mode, &native);
++    }
+ 
+     config->viewPort.enabled = NV_TRUE;
+     config->viewPort.sizeIn.width = mode->hdisplay;
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-linux.c b/kernel-open/nvidia-drm/nvidia-drm-linux.c
+index 80060217..ebc73ffa 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-linux.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-linux.c
+@@ -63,8 +63,8 @@ module_param_named(deadline_boost, nv_drm_deadline_boost_module_param, bool, 064
+ 
+ MODULE_PARM_DESC(
+     scaling_mode,
+-    "Add the \"scaling mode\" connector property, to show modes below the "
+-    "native resolution with the display scaler (1 = enable (default), 0 = disable)");
++    "Add the \"scaling mode\" and underscan connector properties, which use "
++    "the display scaler (1 = enable (default), 0 = disable)");
+ module_param_named(scaling_mode, nv_drm_scaling_mode_module_param, bool, 0444);
+ 
+ #endif /* NV_DRM_AVAILABLE */
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-os-interface.h b/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
+index 2d6237bf..40d11b08 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
+@@ -72,7 +72,7 @@ extern bool nv_drm_color_pipeline_module_param;
+ #endif
+ /* Set to true when fence deadlines may boost GPU clocks. */
+ extern bool nv_drm_deadline_boost_module_param;
+-/* Set to true when connectors get the "scaling mode" property. */
++/* Set to true when connectors get the "scaling mode" and underscan properties. */
+ extern bool nv_drm_scaling_mode_module_param;
+ 
+ void *nv_drm_calloc(size_t nmemb, size_t size);
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-priv.h b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+index fd3bc313..9386605d 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-priv.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+@@ -129,6 +129,17 @@ enum nv_drm_broadcast_rgb {
+     NV_DRM_BROADCAST_RGB_MAX
+ };
+ 
++/* Values match the "underscan" property of amdgpu and radeon */
++enum nv_drm_underscan {
++    NV_DRM_UNDERSCAN_OFF = 0,
++    NV_DRM_UNDERSCAN_ON,
++    NV_DRM_UNDERSCAN_AUTO,
++    NV_DRM_UNDERSCAN_MAX
++};
++
++/* Range of the "underscan hborder" and "underscan vborder" properties (per side) */
++#define NV_DRM_UNDERSCAN_BORDER_MAX 128
++
+ struct nv_drm_fence_context;
+ 
+ #if defined(NV_DMA_FENCE_OPS_HAS_SET_DEADLINE)
+@@ -282,6 +293,9 @@ struct nv_drm_device {
+ 
+     struct drm_property *nv_connector_dithering_mode_property;
+     struct drm_property *nv_connector_broadcast_rgb_property;
++    struct drm_property *nv_connector_underscan_property;
++    struct drm_property *nv_connector_underscan_hborder_property;
++    struct drm_property *nv_connector_underscan_vborder_property;
+ 
+     struct drm_property *nv_connector_hdmi_vsif_metadata_property;
+ 

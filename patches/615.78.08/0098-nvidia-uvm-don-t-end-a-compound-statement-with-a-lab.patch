@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 16:45:56 +0100
+Subject: [PATCH] nvidia-uvm: don't end a compound statement with a label
+
+uvm_gpu_map_cpu_pages_for_egm() has a label right before #else, which
+compilers without C23 label rules (GCC < 11, e.g. on EL8) reject: "label at
+end of compound statement". Add an empty statement.
+
+Fixes upstream issue 1390.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-uvm/uvm_gpu.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/kernel-open/nvidia-uvm/uvm_gpu.c b/kernel-open/nvidia-uvm/uvm_gpu.c
+index ffff835d..6d42f184 100644
+--- a/kernel-open/nvidia-uvm/uvm_gpu.c
++++ b/kernel-open/nvidia-uvm/uvm_gpu.c
+@@ -4108,6 +4108,7 @@ NV_STATUS uvm_gpu_map_cpu_pages_for_egm(uvm_parent_gpu_t *parent_gpu,
+         atomic64_add(size, &parent_gpu->mapped_cpu_pages_size);
+ 
+ done:
++        ;
+ #else
+         status = NV_ERR_NOT_SUPPORTED;
+ #endif

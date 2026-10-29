@@ -1,0 +1,147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pacopedraza <pacopedraza@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 16:45:38 +0100
+Subject: [PATCH] nvidia: apply D-Notifier events deferred while the GPU was
+ not at full power
+
+The SBIOS may send D-Notifier events on system resume before RM has resumed
+the GPU. NV2080_CTRL_CMD_PERF_SET_AUX_POWER_STATE then fails with
+NV_ERR_GPU_NOT_FULL_POWER ("Failed to handle ACPI D-Notifier event,
+status=0x11"), and if the SBIOS doesn't implement GPS_FUNC_REQUESTDXSTATE
+the event is never sent again, so the GPU can stay at the wrong aux power
+state until the next notification.
+
+Remember an event rejected that way, and apply it on resume next to the
+power source update. Any newer event replaces it.
+
+Upstream PR 1493 (related to upstream issue 1372).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../arch/nvalloc/unix/include/nv-priv.h       |  2 +
+ src/nvidia/arch/nvalloc/unix/include/osapi.h  |  1 +
+ .../arch/nvalloc/unix/src/dynamic-power.c     |  1 +
+ src/nvidia/arch/nvalloc/unix/src/osapi.c      | 57 ++++++++++++++++++-
+ 4 files changed, 60 insertions(+), 1 deletion(-)
+
+diff --git a/src/nvidia/arch/nvalloc/unix/include/nv-priv.h b/src/nvidia/arch/nvalloc/unix/include/nv-priv.h
+index a3dcebfd..2cfa3525 100644
+--- a/src/nvidia/arch/nvalloc/unix/include/nv-priv.h
++++ b/src/nvidia/arch/nvalloc/unix/include/nv-priv.h
+@@ -56,6 +56,8 @@ typedef struct nv_pm_state_s
+ {
+     NvU32  IntrEn;
+     NvBool InHibernate;
++    NvBool DNotifierPending;
++    NvU32  DNotifierAuxPowerState;
+ } nv_pm_state_t;
+ 
+ /*
+diff --git a/src/nvidia/arch/nvalloc/unix/include/osapi.h b/src/nvidia/arch/nvalloc/unix/include/osapi.h
+index 3ff254c4..8776ce79 100644
+--- a/src/nvidia/arch/nvalloc/unix/include/osapi.h
++++ b/src/nvidia/arch/nvalloc/unix/include/osapi.h
+@@ -129,6 +129,7 @@ void       RmFreeX86EmuState(OBJGPU *);
+ NV_STATUS  RmPowerSourceChangeEvent(nv_state_t *, NvU32);
+ 
+ void       RmRequestDNotifierState(nv_state_t *);
++void       RmApplyPendingDNotifierState(nv_state_t *);
+ 
+ const NvU8 *RmGetGpuUuidRaw(nv_state_t *);
+ 
+diff --git a/src/nvidia/arch/nvalloc/unix/src/dynamic-power.c b/src/nvidia/arch/nvalloc/unix/src/dynamic-power.c
+index 8bf8a344..ba773abe 100644
+--- a/src/nvidia/arch/nvalloc/unix/src/dynamic-power.c
++++ b/src/nvidia/arch/nvalloc/unix/src/dynamic-power.c
+@@ -2380,6 +2380,7 @@ RmPowerManagement(
+                         //
+                         RmPowerSourceChangeEvent(nv, !ac_plugged);
+                     }
++                    RmApplyPendingDNotifierState(nv);
+                     RmRequestDNotifierState(nv);
+                 }
+                 break;
+diff --git a/src/nvidia/arch/nvalloc/unix/src/osapi.c b/src/nvidia/arch/nvalloc/unix/src/osapi.c
+index 7379fe04..1a534421 100644
+--- a/src/nvidia/arch/nvalloc/unix/src/osapi.c
++++ b/src/nvidia/arch/nvalloc/unix/src/osapi.c
+@@ -1360,6 +1360,46 @@ void RmRequestDNotifierState(
+     }
+ }
+ 
++/*!
++ * @brief Apply a D-Notifier event that was deferred because it arrived
++ * while the GPU was not at full power.
++ *
++ * The SBIOS may send D-Notifier events on system resume before RM has
++ * resumed the GPU. Those are rejected with NV_ERR_GPU_NOT_FULL_POWER and,
++ * if the SBIOS does not implement GPS_FUNC_REQUESTDXSTATE, never re-sent.
++ * Caller must hold the API and GPU locks.
++ *
++ * @param[in]   pNv   nv_state_t pointer.
++ */
++void RmApplyPendingDNotifierState(
++    nv_state_t *pNv
++)
++{
++    nv_priv_t *nvp = NV_GET_NV_PRIV(pNv);
++    NV2080_CTRL_PERF_SET_AUX_POWER_STATE_PARAMS params = { 0 };
++    RM_API    *pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
++    NV_STATUS  status;
++
++    if (!nvp->pm_state.DNotifierPending)
++    {
++        return;
++    }
++
++    nvp->pm_state.DNotifierPending = NV_FALSE;
++    params.powerState = nvp->pm_state.DNotifierAuxPowerState;
++
++    status = pRmApi->Control(pRmApi, pNv->rmapi.hClient,
++                             pNv->rmapi.hSubDevice,
++                             NV2080_CTRL_CMD_PERF_SET_AUX_POWER_STATE,
++                             &params, sizeof(params));
++    if (status != NV_OK)
++    {
++        NV_PRINTF(LEVEL_ERROR,
++                  "%s: Failed to apply deferred D-Notifier event, status=0x%x\n",
++                  __FUNCTION__, status);
++    }
++}
++
+ /*!
+  * @brief Deal with D-notifier events to apply a performance
+  * level based on the requested auxiliary power-state.
+@@ -1374,6 +1414,7 @@ static void RmHandleDNotifierEvent(
+ )
+ {
+     NV2080_CTRL_PERF_SET_AUX_POWER_STATE_PARAMS params = { 0 };
++    nv_priv_t         *nvp = NV_GET_NV_PRIV(pNv);
+     RM_API            *pRmApi;
+     THREAD_STATE_NODE  threadState;
+     NV_STATUS          rmStatus = NV_OK;
+@@ -1410,9 +1451,23 @@ static void RmHandleDNotifierEvent(
+                                NV2080_CTRL_CMD_PERF_SET_AUX_POWER_STATE,
+                                &params, sizeof(params));
+ 
++    //
++    // Remember a request the GPU could not take yet (e.g. sent by the SBIOS
++    // during system resume) so RmApplyPendingDNotifierState() can apply it.
++    // Any newer event replaces it.
++    //
++    nvp->pm_state.DNotifierPending = (rmStatus == NV_ERR_GPU_NOT_FULL_POWER);
++    nvp->pm_state.DNotifierAuxPowerState = params.powerState;
++
+     RmUnixRmApiEpilogue(pNv, &threadState);
+ 
+-    if (rmStatus != NV_OK)
++    if (rmStatus == NV_ERR_GPU_NOT_FULL_POWER)
++    {
++        NV_PRINTF(LEVEL_INFO,
++                  "%s: GPU not at full power, deferring ACPI D-Notifier event\n",
++                  __FUNCTION__);
++    }
++    else if (rmStatus != NV_OK)
+     {
+         NV_PRINTF(LEVEL_ERROR,
+                   "%s: Failed to handle ACPI D-Notifier event, status=0x%x\n",

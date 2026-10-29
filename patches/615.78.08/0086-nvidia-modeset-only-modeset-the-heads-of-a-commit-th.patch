@@ -1,0 +1,372 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 09:59:13 +0100
+Subject: [PATCH] nvidia-modeset: only modeset the heads of a commit that need
+ a modeset
+
+DRM decides per CRTC whether an atomic commit needs a modeset
+(drm_atomic_crtc_needs_modeset()); the helpers and drivers like amdgpu
+and i915 only disable and re-enable those CRTCs and just update the
+planes and color state of the others in the commit. KAPI instead turns
+"some head needs a modeset" into an NVKMS modeset request for every head
+in the commit, and NVKMS marks every requested head as changed: it shuts
+it down and programs it again, which for DP and eDP also retrains the
+link. Compositors commit all their outputs together when they change the
+output configuration, so plugging in, unplugging or changing the mode of
+one monitor blanks the others too.
+
+Modeset only the heads that need it and flip the others afterwards.
+NVKMS keeps heads that a modeset request leaves out as they are, as the
+X driver relies on. The TEST_ONLY check still validates the final state
+of all heads with one modeset request; the commit passes through the
+intermediate state of the modesetted heads with the other heads' old
+layers, which wasn't validated. NVKMS validates a modeset before it
+touches the hardware, so if that fails, modeset all heads as before; if
+the flip of the other heads fails, apply their state with a modeset
+after all.
+
+NVKMS can't keep unrequested heads in the first modeset after a modeset
+ownership or sub-ownership change, it shuts them down. KAPI tracks its
+own ownership and sub-ownership changes and modesets all heads until the
+next committed modeset. Ownership changes KAPI doesn't see (another
+client's sub-ownership ending) end up in the flip fallback above.
+
+The new nvidia-modeset parameter modeset_changed_heads_only (default on,
+writable at runtime) switches back to modesetting all heads.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../nvidia-modeset/nvidia-modeset-linux.c     |  11 ++
+ .../nvidia-modeset-os-interface.h             |   1 +
+ .../kapi/include/nvkms-kapi-internal.h        |   7 +
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 183 ++++++++++++++----
+ .../include/nvidia-modeset-os-interface.h     |   1 +
+ 5 files changed, 167 insertions(+), 36 deletions(-)
+
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+index 2a220083..a9343726 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+@@ -104,6 +104,12 @@ module_param_named(debug_force_color_space, debug_force_color_space, uint, 0444)
+ static bool enable_overlay_layers = true;
+ module_param_named(enable_overlay_layers, enable_overlay_layers, bool, 0444);
+ 
++static bool modeset_changed_heads_only = true;
++module_param_named(modeset_changed_heads_only, modeset_changed_heads_only, bool, 0644);
++MODULE_PARM_DESC(modeset_changed_heads_only,
++                 "When a DRM commit needs a modeset, only modeset the CRTCs that "
++                 "need one and flip the others, instead of modesetting all of them");
++
+ /* These parameters are used for fault injection tests.  Normally the defaults
+  * should be used. */
+ MODULE_PARM_DESC(fail_malloc, "Fail the Nth call to nvkms_alloc");
+@@ -284,6 +290,11 @@ NvBool nvkms_enable_overlay_layers(void)
+     return enable_overlay_layers;
+ }
+ 
++NvBool nvkms_modeset_changed_heads_only(void)
++{
++    return READ_ONCE(modeset_changed_heads_only);
++}
++
+ NvBool nvkms_debug_logging(void)
+ {
+     return debug != 0;
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+index a0524edc..93efa4be 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+@@ -128,6 +128,7 @@ NvU32 nvkms_max_output_color_bpc(void);
+ NvBool nvkms_opportunistic_display_sync(void);
+ enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void);
+ NvBool nvkms_enable_overlay_layers(void);
++NvBool nvkms_modeset_changed_heads_only(void);
+ NvBool nvkms_debug_logging(void);
+ void nvkms_extcon_report_hdmi(NvBool state);
+ void nvkms_extcon_report_hdmi_audio(NvBool state);
+diff --git a/src/nvidia-modeset/kapi/include/nvkms-kapi-internal.h b/src/nvidia-modeset/kapi/include/nvkms-kapi-internal.h
+index 2d3bc33c..7c0fa8cf 100644
+--- a/src/nvidia-modeset/kapi/include/nvkms-kapi-internal.h
++++ b/src/nvidia-modeset/kapi/include/nvkms-kapi-internal.h
+@@ -128,6 +128,13 @@ struct NvKmsKapiDevice {
+ 
+     NvBool coherentGpuMemory;
+ 
++    /*
++     * Modeset ownership or sub-ownership changed since the last committed
++     * modeset. NVKMS can't keep the heads a modeset doesn't request then, it
++     * shuts them down, so modeset all heads of a commit.
++     */
++    NvBool modesetOwnershipChanged;
++
+     /* SMG state */
+ 
+     MIGDeviceId migDevice;
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index 8c4bf4a4..911552ce 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -1088,10 +1088,15 @@ static NvBool GrabOwnership(struct NvKmsKapiDevice *device)
+ 
+     paramsGrab.request.deviceHandle = device->hKmsDevice;
+ 
+-    return nvkms_ioctl_from_kapi(device->pKmsOpen,
+-                                 NVKMS_IOCTL_GRAB_OWNERSHIP,
+-                                 &paramsGrab, sizeof(paramsGrab));
++    if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
++                               NVKMS_IOCTL_GRAB_OWNERSHIP,
++                               &paramsGrab, sizeof(paramsGrab))) {
++        return NV_FALSE;
++    }
+ 
++    device->modesetOwnershipChanged = NV_TRUE;
++
++    return NV_TRUE;
+ }
+ 
+ static void ReleaseOwnership(struct NvKmsKapiDevice *device)
+@@ -1107,6 +1112,8 @@ static void ReleaseOwnership(struct NvKmsKapiDevice *device)
+     nvkms_ioctl_from_kapi(device->pKmsOpen,
+                           NVKMS_IOCTL_RELEASE_OWNERSHIP,
+                           &paramsRelease, sizeof(paramsRelease));
++
++    device->modesetOwnershipChanged = NV_TRUE;
+ }
+ 
+ static NvBool GrantPermissions
+@@ -1188,6 +1195,8 @@ static NvBool GrantSubOwnership
+     paramsGrant.request.fd = fd;
+     paramsGrant.request.deviceHandle = device->hKmsDevice;
+ 
++    device->modesetOwnershipChanged = NV_TRUE;
++
+     return nvkms_ioctl_from_kapi(device->pKmsOpen,
+                                  NVKMS_IOCTL_GRANT_PERMISSIONS, &paramsGrant,
+                                  sizeof(paramsGrant));
+@@ -1210,6 +1219,8 @@ static NvBool RevokeSubOwnership
+         NVBIT(NV_KMS_PERMISSIONS_TYPE_SUB_OWNER);
+     paramsRevoke.request.deviceHandle = device->hKmsDevice;
+ 
++    device->modesetOwnershipChanged = NV_TRUE;
++
+     return nvkms_ioctl_from_kapi(device->pKmsOpen,
+                                  NVKMS_IOCTL_REVOKE_PERMISSIONS, &paramsRevoke,
+                                  sizeof(paramsRevoke));
+@@ -3875,6 +3886,11 @@ static NvBool KmsSetMode(
+         status = NV_FALSE;
+     }
+ 
++    /* A committed modeset lets NVKMS keep unrequested heads again */
++    if (status && commit) {
++        device->modesetOwnershipChanged = NV_FALSE;
++    }
++
+ done:
+ 
+     if (params != NULL) {
+@@ -4135,14 +4151,125 @@ done:
+     return status;
+ }
+ 
++/*
++ * Whether a head of a commit needs the NVKMS modeset ioctl rather than a flip.
++ */
++static NvBool HeadRequiresModeset(
++    const struct NvKmsKapiDevice *device,
++    const struct NvKmsKapiHeadRequestedConfig *headRequestedConfig,
++    const NvBool commit)
++{
++    const struct NvKmsKapiHeadModeSetConfig *headModeSetConfig =
++        &headRequestedConfig->modeSetConfig;
++    NvBool bRequiredModeset =
++        headRequestedConfig->flags.activeChanged       ||
++        headRequestedConfig->flags.displaysChanged     ||
++        headRequestedConfig->flags.modeChanged;
++
++    if (!device->caps.supportsFlipSynchronizedInfoframes) {
++        bRequiredModeset |=
++            headRequestedConfig->flags.hdrInfoFrameChanged ||
++            headRequestedConfig->flags.colorimetryChanged  ||
++            headRequestedConfig->flags.hdmiVsifMetadataChanged;
++    }
++
++    /*
++     * NVKMS flip ioctl could not validate flip configuration for an
++     * inactive head, therefore use modeset ioctl if configuration contain
++     * any such head.
++     */
++    if (!commit &&
++        headModeSetConfig->numDisplays != 0 && !headModeSetConfig->bActive) {
++        bRequiredModeset = NV_TRUE;
++    }
++
++    return bRequiredModeset;
++}
++
++/*
++ * Run KmsSetMode() or KmsFlip() on a subset of the heads of a commit.
++ */
++static NvBool KmsSetModeOrFlipHeads(
++    struct NvKmsKapiDevice *device,
++    const struct NvKmsKapiRequestedModeSetConfig *requestedConfig,
++    const NvU32 headsMask,
++    struct NvKmsKapiModeSetReplyConfig *replyConfig,
++    const NvBool commit,
++    const NvBool bModeset)
++{
++    struct NvKmsKapiRequestedModeSetConfig *pSubConfig;
++    NvBool status;
++
++    pSubConfig = nvKmsKapiCalloc(1, sizeof(*pSubConfig));
++    if (pSubConfig == NULL) {
++        return NV_FALSE;
++    }
++
++    nvkms_memcpy(pSubConfig, requestedConfig, sizeof(*pSubConfig));
++    pSubConfig->headsMask = headsMask;
++
++    status = bModeset ?
++        KmsSetMode(device, pSubConfig, replyConfig, commit) :
++        KmsFlip(device, pSubConfig, replyConfig, commit);
++
++    nvKmsKapiFree(pSubConfig);
++
++    return status;
++}
++
++/*
++ * Commit a modeset that only some of the heads in the commit need.
++ *
++ * DRM decides per CRTC whether a commit needs a modeset; the other CRTCs of
++ * the commit only update their planes and color state. NVKMS on the other
++ * hand fully reprograms every head in a modeset request, which for DP and
++ * eDP includes shutting the link down and training it again. So modeset
++ * only the heads that need it, which leaves the others as they are, and
++ * flip the others afterwards.
++ *
++ * The TEST_ONLY check validated the final state of all heads with one
++ * modeset request. The modeset of the subset passes through an
++ * intermediate state, the other heads still with their old layers, that
++ * was not validated; NVKMS validates a modeset before it touches the
++ * hardware, so if that fails, modeset all heads as before. If the flip of
++ * the other heads fails, apply their state with a modeset after all.
++ */
++static NvBool KmsSetModeChangedHeads(
++    struct NvKmsKapiDevice *device,
++    const struct NvKmsKapiRequestedModeSetConfig *requestedConfig,
++    const NvU32 modesetHeadsMask,
++    struct NvKmsKapiModeSetReplyConfig *replyConfig)
++{
++    const NvU32 flipHeadsMask = requestedConfig->headsMask & ~modesetHeadsMask;
++
++    if (!KmsSetModeOrFlipHeads(device, requestedConfig, modesetHeadsMask,
++                               replyConfig, NV_TRUE, NV_TRUE)) {
++        nvKmsKapiLogDeviceDebug(device,
++            "Modeset of heads 0x%x alone failed, modesetting all heads 0x%x",
++            modesetHeadsMask, requestedConfig->headsMask);
++        return KmsSetMode(device, requestedConfig, replyConfig, NV_TRUE);
++    }
++
++    if (!KmsSetModeOrFlipHeads(device, requestedConfig, flipHeadsMask,
++                               replyConfig, NV_TRUE, NV_FALSE)) {
++        nvKmsKapiLogDeviceDebug(device,
++            "Flip of heads 0x%x after a modeset failed, modesetting them",
++            flipHeadsMask);
++        return KmsSetModeOrFlipHeads(device, requestedConfig, flipHeadsMask,
++                                     replyConfig, NV_TRUE, NV_TRUE);
++    }
++
++    return NV_TRUE;
++}
++
+ static NvBool ApplyModeSetConfig(
+     struct NvKmsKapiDevice *device,
+     const struct NvKmsKapiRequestedModeSetConfig *requestedConfig,
+     struct NvKmsKapiModeSetReplyConfig *replyConfig,
+     const NvBool commit)
+ {
+-    NvBool bRequiredModeset = NV_FALSE;
+-    NvU32  head;
++    NvU32 modesetHeadsMask = 0;
++    NvU32 head;
+ 
+     if (device == NULL || requestedConfig == NULL) {
+         return NV_FALSE;
+@@ -4151,38 +4278,14 @@ static NvBool ApplyModeSetConfig(
+     for (head = 0;
+          head < ARRAY_LEN(requestedConfig->headRequestedConfig); head++) {
+ 
+-        const struct NvKmsKapiHeadRequestedConfig *headRequestedConfig =
+-            &requestedConfig->headRequestedConfig[head];
+-        const struct NvKmsKapiHeadModeSetConfig *headModeSetConfig =
+-            &headRequestedConfig->modeSetConfig;
+-
+         if ((requestedConfig->headsMask & (1 << head)) == 0x0) {
+             continue;
+         }
+ 
+-        bRequiredModeset =
+-            headRequestedConfig->flags.activeChanged       ||
+-            headRequestedConfig->flags.displaysChanged     ||
+-            headRequestedConfig->flags.modeChanged;
+-
+-        if (!device->caps.supportsFlipSynchronizedInfoframes) {
+-            bRequiredModeset |=
+-                headRequestedConfig->flags.hdrInfoFrameChanged ||
+-                headRequestedConfig->flags.colorimetryChanged  ||
+-                headRequestedConfig->flags.hdmiVsifMetadataChanged;
+-        }
+-        /*
+-         * NVKMS flip ioctl could not validate flip configuration for an
+-         * inactive head, therefore use modeset ioctl if configuration contain
+-         * any such head.
+-         */
+-        if (!commit &&
+-            headModeSetConfig->numDisplays != 0 && !headModeSetConfig->bActive) {
+-            bRequiredModeset = TRUE;
+-        }
+-
+-        if (bRequiredModeset) {
+-            break;
++        if (HeadRequiresModeset(device,
++                                &requestedConfig->headRequestedConfig[head],
++                                commit)) {
++            modesetHeadsMask |= 1 << head;
+         }
+     }
+ 
+@@ -4197,11 +4300,19 @@ static NvBool ApplyModeSetConfig(
+         SetRequestedColorBpcMax(device, requestedConfig);
+     }
+ 
+-    if (bRequiredModeset) {
+-        return KmsSetMode(device, requestedConfig, replyConfig, commit);
++    if (modesetHeadsMask == 0x0) {
++        return KmsFlip(device, requestedConfig, replyConfig, commit);
+     }
+ 
+-    return KmsFlip(device, requestedConfig, replyConfig, commit);
++    if (commit &&
++        (modesetHeadsMask != requestedConfig->headsMask) &&
++        !device->modesetOwnershipChanged &&
++        nvkms_modeset_changed_heads_only()) {
++        return KmsSetModeChangedHeads(device, requestedConfig,
++                                      modesetHeadsMask, replyConfig);
++    }
++
++    return KmsSetMode(device, requestedConfig, replyConfig, commit);
+ }
+ 
+ /*
+diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+index a0524edc..93efa4be 100644
+--- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
++++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+@@ -128,6 +128,7 @@ NvU32 nvkms_max_output_color_bpc(void);
+ NvBool nvkms_opportunistic_display_sync(void);
+ enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void);
+ NvBool nvkms_enable_overlay_layers(void);
++NvBool nvkms_modeset_changed_heads_only(void);
+ NvBool nvkms_debug_logging(void);
+ void nvkms_extcon_report_hdmi(NvBool state);
+ void nvkms_extcon_report_hdmi_audio(NvBool state);

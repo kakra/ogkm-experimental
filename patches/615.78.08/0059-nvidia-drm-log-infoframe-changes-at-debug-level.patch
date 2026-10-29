@@ -18,10 +18,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-modeset.c b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
-index ba0b169a..df82b119 100644
+index 724581e2..ec805876 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-modeset.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
-@@ -689,7 +689,7 @@ int nv_drm_atomic_check(struct drm_device *dev,
+@@ -680,7 +680,7 @@ int nv_drm_atomic_check(struct drm_device *dev,
  
                  /* Check if HDR metadata or colorspace changed */
                  if (hdr_changed || colorspace_changed || vsif_metadata_changed) {

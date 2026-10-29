@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 09:06:06 +0100
+Subject: [PATCH] nvidia: free the CeUtils completion event before tearing down
+ its channel
+
+With completion callbacks enabled (the sysmem scrubber's CeUtils),
+_memmgrMemUtilsScrubInitRegisterCallback() registers a
+NV2080_NOTIFIERS_FIFO_EVENT_MTHD nonstall event whose callback,
+_ceutilsSemaphoreEventCallback(), reads the finish payload semaphore and
+runs the completion callbacks. That event fires for any channel's nonstall
+interrupt and is delivered from the lockless nonstall bottom half.
+
+ceutilsDestruct() ends the USERD, pushbuffer and notifier mappings and
+clears pFinishPayloadSemaMemDesc before it frees the client, and with it
+the event. A nonstall interrupt from any other channel in that window runs
+the callback against the torn-down channel state.
+
+Free the event right after the final completion processing, before the
+teardown. Freeing a nonstall event waits for notifications already in
+progress, so no callback runs after that point. Only the SoCs with sysmem
+compression create a sysmem scrubber.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/src/kernel/gpu/mem_mgr/ce_utils.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/nvidia/src/kernel/gpu/mem_mgr/ce_utils.c b/src/nvidia/src/kernel/gpu/mem_mgr/ce_utils.c
+index 1be22271..cd6088ea 100644
+--- a/src/nvidia/src/kernel/gpu/mem_mgr/ce_utils.c
++++ b/src/nvidia/src/kernel/gpu/mem_mgr/ce_utils.c
+@@ -440,6 +440,17 @@ ceutilsDestruct_IMPL
+     // make sure no new work was queued from callbacks
+     NV_ASSERT(pCeUtils->lastCompletedPayload == lastSubmittedPayload);
+ 
++    //
++    // The completion callback runs from the nonstall interrupt path for any
++    // channel's FIFO_EVENT_MTHD, without locks, and reads the finish payload
++    // semaphore. Free its event before tearing down the channel mappings
++    // below; freeing a nonstall event waits for notifications in flight.
++    //
++    if (pCeUtils->bCompletionCallbackEnabled)
++    {
++        NV_ASSERT_OK(pRmApi->Free(pRmApi, pChannel->hClient, pChannel->eventId));
++    }
++
+     if ((pChannel->bClientUserd) && (pChannel->pControlGPFifo != NULL))
+     {
+         if (kbusIsBarAccessBlocked(GPU_GET_KERNEL_BUS(pGpu)))

@@ -100,7 +100,7 @@ index 635ab3ac..5071540b 100644
           * To prevent NVKMS from implicitly configuring CSC matrices in ways the
           * client may not expect, force all CTMs to default to the identity if
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
-index 5d1b1067..5ef21b4c 100644
+index ef62d5ec..69e37fb8 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
 @@ -2275,6 +2275,11 @@ nv_drm_plane_atomic_duplicate_state(struct drm_plane *plane)

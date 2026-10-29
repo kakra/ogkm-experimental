@@ -31,10 +31,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  3 files changed, 21 insertions(+)
 
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
-index 5ef21b4c..89e87239 100644
+index 69e37fb8..70331cc6 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
-@@ -3775,6 +3775,19 @@ static void nv_drm_vblank_disable_fn(void *t)
+@@ -3724,6 +3724,19 @@ static void nv_drm_vblank_disable_fn(void *t)
      mutex_unlock(&nv_crtc->vblank_q_lock);
  }
  
@@ -55,10 +55,10 @@ index 5ef21b4c..89e87239 100644
   * Add drm crtc for given head and supported enum NvKmsSurfaceMemoryFormats.
   */
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.h b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
-index b3e07e24..1ae83a12 100644
+index 2d34b9c9..8ee71975 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-crtc.h
 +++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
-@@ -397,6 +397,8 @@ bool nv_drm_crtc_defer_flip_to_pending(struct nv_drm_crtc *nv_crtc,
+@@ -373,6 +373,8 @@ bool nv_drm_crtc_defer_flip_to_pending(struct nv_drm_crtc *nv_crtc,
  void nv_drm_crtc_set_vblank_duration(struct nv_drm_crtc *nv_crtc,
                                       const struct drm_crtc_state *crtc_state);
  
@@ -68,7 +68,7 @@ index b3e07e24..1ae83a12 100644
   * CRTCs are static objects, list does not change once after initialization and
   * before teardown of device. Initialization/teardown paths are single
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
-index 932e625e..d50a29f7 100644
+index ff99ada9..7b979153 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
 @@ -983,7 +983,13 @@ static void nv_drm_dev_unload(struct drm_device *dev)

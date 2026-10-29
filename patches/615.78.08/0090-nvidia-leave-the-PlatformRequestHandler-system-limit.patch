@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 16:45:17 +0100
+Subject: [PATCH] nvidia: leave the PlatformRequestHandler system limit update
+ to runtime
+
+_pfmreqhndlrCallPshareStatus() handled a pending system parameter limit update
+during init too, before PSHAREPARAMS has set up the TGPU and PPMD counters, so
+both limit queries failed with NV_ERR_INVALID_DATA at every boot ("failed to
+get target temp from SBIOS", "failed to get platform power mode from SBIOS").
+Every other update in that function is either init-only or skipped at init;
+skip this one at init as well. PSHAREPARAMS samples the initial PPMD limit
+itself, and the TGPU limit counter is sampled on request.
+
+Fixes upstream issue 1360.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/kernel/platform/platform_request_handler_ctrl.c   | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/nvidia/src/kernel/platform/platform_request_handler_ctrl.c b/src/nvidia/src/kernel/platform/platform_request_handler_ctrl.c
+index 803f3d1b..17eba1eb 100644
+--- a/src/nvidia/src/kernel/platform/platform_request_handler_ctrl.c
++++ b/src/nvidia/src/kernel/platform/platform_request_handler_ctrl.c
+@@ -2477,7 +2477,13 @@ _pfmreqhndlrCallPshareStatus
+             }
+         }
+ 
+-        if (pPfmreqhndlrData->PFMREQHNDLRACPIData.bSystemParamLimitUpdate)
++        //
++        // 4. System parameter limit update. At init, the TGPU and PPMD
++        // counters aren't set up before PSHAREPARAMS has been called, which
++        // also samples the initial PPMD limit. Like the other updates, leave
++        // it to the runtime PSHARESTATUS calls.
++        //
++        if (pPfmreqhndlrData->PFMREQHNDLRACPIData.bSystemParamLimitUpdate && !bInit)
+         {
+             timeStamp = _pfmreqhndlrGetTimeStamp(pPlatformRequestHandler);
+             _pfmreqhndlrResetCounter(pPfmreqhndlrData, PFM_REQ_HNDLR_LIMIT(PFM_REQ_HNDLR_TGPU_SENSOR), timeStamp);

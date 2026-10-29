@@ -5,7 +5,35 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 615.78.08
 
-Fork branch `ogkm/615.78.08`, 73 patches on the upstream tag `615.78.08`.
+Fork branch `ogkm/615.78.08`, 99 patches on the upstream tag `615.78.08`.
+
+### 2026-10-29: the series follows Tom Englund's set (all 99 patches)
+
+Tom's `gulafaran/patches` now carries our own patches too, so the series is
+his branch in his order, without the speculation barrier change, the hwmon
+device (two patches) and fdinfo usage stats. Our patches moved from the
+middle to 71 to 80. Built against 6.18.58, installed for a reboot; not
+tested yet.
+
+- 71: Tom fixed a use-after-free in our patch: it wrote `kick_time` into a
+  flip that the flip event handler may already have freed. It is now set
+  only under `flip_list_lock` while the flip is still queued. The fix is
+  folded into our patch, with a note naming Tom. The 73-patch series of
+  2026-10-28 has this bug.
+- 72: Tom folded the underscan enum list (patch 66) into our `static const`
+  fix.
+- 64 to 70: properties for KWin (scaling mode, underscan, MST PATH, content
+  type), fewer modesets on max bpc changes, and the full range YUV chroma
+  offset fix.
+- 81 to 86, 95: use-after-free and locking fixes (MemoryMapper worker,
+  semaphore surface fence context, CeUtils event, display ISR callback
+  lists against the unlocked low latency path, non-stall event list), and
+  a modeset only on the heads that need one.
+- 87 to 94, 96 to 99: mostly laptops, hibernation, vfio, confidential
+  computing and build fixes for other kernels, each for an upstream issue
+  (see `patches/615.78.08/README.md`); upstream PR [#1493][pr-1493].
+- 34 and 53 (upstream PRs [#1483][pr-1483] and [#1368][pr-1368]) are now
+  Tom's copies: same code, reworded messages.
 
 ### 2026-10-28: Tom Englund's set of 2026-10-28 (patches 1 to 63)
 
@@ -122,4 +150,5 @@ no longer logged as errors.
 [pr-1432]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1432
 [pr-1466]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1466
 [pr-1483]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1483
+[pr-1493]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1493
 [pr-1498]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1498

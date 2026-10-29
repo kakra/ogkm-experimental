@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 16:45:56 +0100
+Subject: [PATCH] nvidia: don't start AEAD scatterlists with a zero-length
+ entry
+
+libspdm_aead_prealloced() and libspdm_aead() always put the associated data
+first in the source and destination scatterlists, also when there is none.
+<crypto/aead.h> doesn't allow zero-length entries in the used part of the
+lists, and the generic gcm template indeed hashes no ciphertext then: the
+ciphertext is right but the tag is wrong. With Confidential Computing on,
+memmgrVerifyGspDmaOps() then fails with NV_ERR_INVALID_DATA whenever gcm(aes)
+resolves to gcm_base(ctr(aes-generic),ghash-generic) (AES-NI implementations
+aren't affected).
+
+Without associated data, start the lists at the text, or at the tag if there
+is no text either.
+
+Fixes upstream issue 1448.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia/libspdm_aead.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/kernel-open/nvidia/libspdm_aead.c b/kernel-open/nvidia/libspdm_aead.c
+index df3fb158..9684fc74 100644
+--- a/kernel-open/nvidia/libspdm_aead.c
++++ b/kernel-open/nvidia/libspdm_aead.c
+@@ -145,6 +145,19 @@ static int lkca_aead_internal(struct crypto_aead *aead,
+         return -EINVAL;
+     }
+ 
++    /*
++     * Zero-length scatterlist entries aren't allowed in the used part of an
++     * AEAD scatterlist: without associated data, the lists have to start at
++     * the text, or at the tag if there is no text either. The generic gcm
++     * template otherwise computes a wrong tag.
++     */
++    if (a_data_size == 0) {
++        int first = (data_in_size == 0) ? SG_AEAD_SIG : SG_AEAD_TEXT;
++
++        sg_in = &sg_in[first];
++        sg_out = &sg_out[first];
++    }
++
+     aead_request_set_ad(req, a_data_size);
+ 
+     aead_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG |

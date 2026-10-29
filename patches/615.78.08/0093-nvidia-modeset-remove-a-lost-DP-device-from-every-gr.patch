@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 16:45:38 +0100
+Subject: [PATCH] nvidia-modeset: remove a lost DP device from every group
+ before freeing it
+
+When the DP library loses a device it calls the client's lostDevice() and then
+deletes the device. NVKMS only removes the device from
+Device::getOwningGroup(), i.e. the group whose head is attached, and not at
+all if it doesn't know the device; a device in a group without an attached
+head stays in that group's member list. The check that no group still holds
+the device was DEBUG only, so release builds freed it anyway, and the next
+modeset that enumerates the group dereferences the freed device: seen as a
+NULL vtable call in nvDPLibSetAdaptiveSync() from nvDisableVrr() after DP
+hot-replugs through a Thunderbolt dock.
+
+Remove the device from any active or inactive group it is still in before
+deleting it.
+
+Fixes upstream issue 1454.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/displayport/inc/dp_connectorimpl.h |  3 +
+ .../displayport/src/dp_connectorimpl.cpp      | 60 +++++++++++++------
+ 2 files changed, 46 insertions(+), 17 deletions(-)
+
+diff --git a/src/common/displayport/inc/dp_connectorimpl.h b/src/common/displayport/inc/dp_connectorimpl.h
+index 230c79bd..523efc1a 100644
+--- a/src/common/displayport/inc/dp_connectorimpl.h
++++ b/src/common/displayport/inc/dp_connectorimpl.h
+@@ -747,6 +747,9 @@ namespace DisplayPort
+         // Re-enable DSC on a device that rejoins an active stream after a sink reset
+         void restoreDscOnReappearedDevice(DeviceImpl * dev);
+ 
++        // Remove a lost device from the groups the client left it in before it is freed
++        void removeLostDeviceFromGroups(DeviceImpl * dev);
++
+         // the lowest level function(nearest to the hal) for the connector.
+         bool rawTrain(const LinkConfiguration &lConfig, bool force, LinkTrainingType linkTrainingType,
+                       bool bAllowFullFallback = false);
+diff --git a/src/common/displayport/src/dp_connectorimpl.cpp b/src/common/displayport/src/dp_connectorimpl.cpp
+index e4b291a7..da9c284e 100644
+--- a/src/common/displayport/src/dp_connectorimpl.cpp
++++ b/src/common/displayport/src/dp_connectorimpl.cpp
+@@ -3324,23 +3324,7 @@ void ConnectorImpl::fireEventsInternal()
+             NV_DPTRACE_WARNING(LOST_DEVICE, dev->address.size(), addrBuffer[0], addrBuffer[1],
+                                    addrBuffer[2], addrBuffer[3]);
+             sink->lostDevice(dev);
+-#if defined(DEBUG)
+-            // Assert that this device is not contained in any groups.
+-            List* groupLists[] = {
+-                &activeGroups,
+-                &inactiveGroups
+-            };
+-
+-            for (unsigned i = 0; i < sizeof(groupLists) / sizeof(groupLists[0]); i++)
+-            {
+-                List *groupList = groupLists[i];
+-                for (ListElement *e = groupList->begin(); e != groupList->end(); e = e->next)
+-                {
+-                    GroupImpl *g = (GroupImpl *)e;
+-                    DP_ASSERT(!g->contains(dev));
+-                }
+-            }
+-#endif
++            removeLostDeviceFromGroups(dev);
+             // Remove device from dscEnabledDevices list before deletion to prevent dangling pointer
+             if (dscEnabledDevices.contains(dev))
+             {
+@@ -4109,6 +4093,48 @@ void ConnectorImpl::restoreDscOnReappearedDevice(DeviceImpl * dev)
+     }
+ }
+ 
++//
++// The client removes a lost device from its group in lostDevice(), but only
++// from the group of an attached head (Device::getOwningGroup()), and not at
++// all if it doesn't know the device. Don't leave the device in any group when
++// it is freed: a later modeset or VRR change on that group would enumerate
++// the freed device.
++//
++void ConnectorImpl::removeLostDeviceFromGroups(DeviceImpl * dev)
++{
++    List * groupLists[] = {
++        &activeGroups,
++        &inactiveGroups
++    };
++
++    for (unsigned i = 0; i < sizeof(groupLists) / sizeof(groupLists[0]); i++)
++    {
++        List * groupList = groupLists[i];
++
++        for (ListElement * e = groupList->begin(); e != groupList->end(); e = e->next)
++        {
++            GroupImpl * g = (GroupImpl *)e;
++
++            if (!g->contains(dev))
++                continue;
++
++            DP_PRINTF(DP_WARNING, "DPCONN> Removing lost device from a group the client left it in");
++
++            if (g->headInFirmware)
++            {
++                // GroupImpl::remove() doesn't support firmware groups
++                g->members.remove(dev);
++            }
++            else
++            {
++                g->remove(dev);
++            }
++        }
++    }
++
++    dev->activeGroup = NULL;
++}
++
+ bool ConnectorImpl::needToEnableFEC(const DpPreModesetParams &params)
+ {
+     for (NvU32 i = 0; i < NV_MAX_HEADS; i++)

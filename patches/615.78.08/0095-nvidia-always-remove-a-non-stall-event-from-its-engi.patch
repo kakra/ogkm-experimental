@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 16:45:56 +0100
+Subject: [PATCH] nvidia: always remove a non-stall event from its engine
+ notification list
+
+unregisterEventNotificationWithData() looked the notifier subdevice up again
+by client handle to find the per-engine non-stall list to remove the event
+from. When that lookup (or the engine type or MIG instance lookup) failed, it
+freed the EVENTNOTIFICATION but left it on the GPU's engine list. The
+non-stall interrupt walks that list without locks, so the next interrupt for
+the engine passes the freed event to osNotifyEvent(): GPFs and page faults in
+postEvent() with SLUB poison (0x6b6b6b6b6b6b6b6b) under concurrent NVDEC/NVENC
+use, where clients come and go.
+
+Remember the list an event was inserted into and remove it from that list.
+
+Fixes upstream issue 1418.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/generated/g_event_api_nvoc.h        |  1 +
+ .../src/kernel/rmapi/event_notification.c      | 18 +++++++++++++++++-
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/src/nvidia/generated/g_event_api_nvoc.h b/src/nvidia/generated/g_event_api_nvoc.h
+index 8a5efb3c..8a1e28b4 100644
+--- a/src/nvidia/generated/g_event_api_nvoc.h
++++ b/src/nvidia/generated/g_event_api_nvoc.h
+@@ -68,6 +68,7 @@ struct EVENTNOTIFICATION
+     NvU32               SubdeviceSpecificValue;   // NV0005_NOTIFY_INDEX_SUBDEVICE
+     NvBool              bEventDataRequired;       // nv_post_event allocates memory for Data.
+     NvBool              bNonStallIntrEvent;
++    struct GpuEngineEventNotificationList *pNonStallIntrEventList; // Engine list a non-stall event is on.
+     NvU32               NotifyTriggerCount;       // Used with bBroadcastEvent.
+     NvP64               Data;
+     OBJGPU             *pGpu;                     // Store to free dynamic memory on teardown.
+diff --git a/src/nvidia/src/kernel/rmapi/event_notification.c b/src/nvidia/src/kernel/rmapi/event_notification.c
+index 4a18cffa..1ce3160d 100644
+--- a/src/nvidia/src/kernel/rmapi/event_notification.c
++++ b/src/nvidia/src/kernel/rmapi/event_notification.c
+@@ -743,6 +743,9 @@ NV_STATUS registerEventNotification
+         if (rmStatus != NV_OK)
+             goto free_entry;
+ 
++        (*ppEventNotification)->pNonStallIntrEventList =
++            pGpu->engineNonstallIntrEventNotifications[rmEngineId];
++
+         return rmStatus;
+     }
+ 
+@@ -830,6 +833,7 @@ static NV_STATUS _insertEventNotification
+ 
+     EventNotify->bNonStallIntrEvent =
+         ((NotifyIndex & NV01_EVENT_NONSTALL_INTR) ?  NV_TRUE : NV_FALSE);
++    EventNotify->pNonStallIntrEventList = NULL;
+ 
+     // strip the upper bits as they are actually flags
+     NotifyIndex = DRF_VAL(0005, _NOTIFY_INDEX, _INDEX, NotifyIndex);
+@@ -908,7 +912,19 @@ NV_STATUS unregisterEventNotificationWithData
+     if (rmStatus != NV_OK)
+         goto error;
+ 
+-    if (pTargetEvent->bNonStallIntrEvent)
++    //
++    // Remove a non-stall event from the engine list it was inserted into.
++    // The notifier lookup below can fail while the client is torn down, and
++    // the ISR walks the engine list without locks: an event left on it after
++    // it is freed is a use-after-free in the next non-stall interrupt.
++    //
++    if (pTargetEvent->pNonStallIntrEventList != NULL)
++    {
++        _gpuEngineEventNotificationRemove(pTargetEvent->pNonStallIntrEventList,
++                                          pTargetEvent);
++        pTargetEvent->pNonStallIntrEventList = NULL;
++    }
++    else if (pTargetEvent->bNonStallIntrEvent)
+     {
+         //
+         // For non-stall interrupt, the event parent type is NV20_SUBDEVICE, so we can locate

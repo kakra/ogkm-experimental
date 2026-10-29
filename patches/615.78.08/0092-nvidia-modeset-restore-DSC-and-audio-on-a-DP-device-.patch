@@ -1,0 +1,245 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: chilogen <chilogen@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 16:45:27 +0100
+Subject: [PATCH] nvidia-modeset: restore DSC and audio on a DP device that
+ reappears
+
+A DSC monitor that resets itself after waking (long HPD, DPCD back at
+defaults) comes back as the same device while its head is still driven, so
+the stream resumes without a modeset. Two pieces of state that only a modeset
+programs were not restored: the sink's DSC decompression enable (DPCD 0x160),
+so the sink gets a compressed stream it can't decode and stays black, and the
+source audio stream, which stays muted.
+
+Restore DSC where the device rejoins its still driven stream
+(processNewDevice() when it was left in its group, GroupImpl::insert() when
+the client adds it back), restarting an SST stream so the sink sees it begin
+with decompression enabled, and re-run the audio part of a modeset in
+notifyZombieStateChange().
+
+From https://github.com/chilogen/dp-dsc-wake-fix (MIT), patches/615.78.08.patch.
+
+Fixes upstream issue 1487; also covers the DSC half of upstream issue 1405
+that 615.78.08's dpPreModeset() change doesn't.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/displayport/inc/dp_connectorimpl.h |  3 +
+ .../displayport/src/dp_connectorimpl.cpp      | 76 +++++++++++++++++++
+ src/common/displayport/src/dp_groupimpl.cpp   | 12 +++
+ .../src/dp/nvdp-connector-event-sink.cpp      | 42 ++++++++++
+ 4 files changed, 133 insertions(+)
+
+diff --git a/src/common/displayport/inc/dp_connectorimpl.h b/src/common/displayport/inc/dp_connectorimpl.h
+index 920b8510..230c79bd 100644
+--- a/src/common/displayport/inc/dp_connectorimpl.h
++++ b/src/common/displayport/inc/dp_connectorimpl.h
+@@ -744,6 +744,9 @@ namespace DisplayPort
+         // Set Device DSC state based on current DSC state of all active devices on this connector
+         bool setDeviceDscState(Device * dev, bool bEnableDsc);
+ 
++        // Re-enable DSC on a device that rejoins an active stream after a sink reset
++        void restoreDscOnReappearedDevice(DeviceImpl * dev);
++
+         // the lowest level function(nearest to the hal) for the connector.
+         bool rawTrain(const LinkConfiguration &lConfig, bool force, LinkTrainingType linkTrainingType,
+                       bool bAllowFullFallback = false);
+diff --git a/src/common/displayport/src/dp_connectorimpl.cpp b/src/common/displayport/src/dp_connectorimpl.cpp
+index e24d1a1d..e4b291a7 100644
+--- a/src/common/displayport/src/dp_connectorimpl.cpp
++++ b/src/common/displayport/src/dp_connectorimpl.cpp
+@@ -630,7 +630,10 @@ void ConnectorImpl::processNewDevice(const ProcessNewDeviceParams &params)
+     // Complete match, make sure its marked as plugged
+     existingDev->plugged = true;
+     if (existingDev->isActive())
++    {
++        restoreDscOnReappearedDevice(existingDev);
+         existingDev->activeGroup->update(existingDev, true);
++    }
+ 
+     fireEvents();
+     return;
+@@ -4033,6 +4036,79 @@ bool ConnectorImpl::setDeviceDscState(Device * dev, bool bEnableDsc)
+     return true;
+ }
+ 
++//
++// A device that reappears while its head is still driven gets the active
++// stream back without a modeset, so notifyAttachBegin() does not run again.
++// Depending on the client this happens either in processNewDevice(), when the
++// device was left in its group, or in GroupImpl::insert(), when the client
++// removed the zombie device from its group and adds it back. The HPD that
++// brought the device back may come from a sink reset, which clears DSC_ENABLE
++// along with the rest of the sink configuration. Link training restores
++// FEC_READY, but nothing else re-enables decompression, and a compressed stream
++// sent to a sink with decompression disabled stays blank until the next
++// modeset. This is the DSC counterpart of the zombie VRR re-enablement in
++// notifyLongPulseInternal().
++//
++void ConnectorImpl::restoreDscOnReappearedDevice(DeviceImpl * dev)
++{
++    bool bDscEnabled = false;
++
++    if (bPConConnected || !dev->activeGroup ||
++        !dev->activeGroup->lastModesetInfo.bEnableDsc || !dev->isDSCPossible())
++    {
++        return;
++    }
++
++    if (!dev->getDscEnable(&bDscEnabled))
++    {
++        DP_PRINTF(DP_WARNING, "DP-CONN> Not able to get DSC Enable State of reappeared device!");
++        return;
++    }
++
++    if (!bDscEnabled)
++    {
++        DP_PRINTF(DP_NOTICE, "DP-CONN> DSC decompression was lost on reappeared device, restoring it");
++    }
++
++    //
++    // Also needed when the sink kept DSC enabled: GroupImpl::remove() dropped
++    // the device from dscEnabledDevices. Only the bits that differ are written.
++    //
++    if (!setDeviceDscState(dev, true /*bEnableDsc*/))
++    {
++        DP_PRINTF(DP_ERROR, "DP-CONN> Failed to restore DSC decompression on reappeared device!");
++        return;
++    }
++
++    // The sink kept its configuration, the stream does not need a restart.
++    if (bDscEnabled)
++    {
++        return;
++    }
++
++    //
++    // In MST the stream reaches the device only once its payload is allocated
++    // again, which the caller does next. In SST link assessment has already
++    // restored the stream, so restart it the way a link loss is recovered and
++    // the sink sees it begin with decompression enabled, as after
++    // notifyAttachBegin().
++    //
++    if (!linkUseMultistream())
++    {
++        LinkConfiguration originalActiveLinkConfig = activeLinkConfig;
++
++        if (originalActiveLinkConfig.isValid() && enableFlush())
++        {
++            if (!train(originalActiveLinkConfig, false))
++            {
++                DP_PRINTF(DP_ERROR, "DP-CONN> Link config could not be restored after DSC restore. Forcing config");
++                train(originalActiveLinkConfig, true);
++            }
++            disableFlush();
++        }
++    }
++}
++
+ bool ConnectorImpl::needToEnableFEC(const DpPreModesetParams &params)
+ {
+     for (NvU32 i = 0; i < NV_MAX_HEADS; i++)
+diff --git a/src/common/displayport/src/dp_groupimpl.cpp b/src/common/displayport/src/dp_groupimpl.cpp
+index 33071c50..2c959203 100644
+--- a/src/common/displayport/src/dp_groupimpl.cpp
++++ b/src/common/displayport/src/dp_groupimpl.cpp
+@@ -144,6 +144,7 @@ void GroupImpl::insert(Device * dev)
+ {
+     DP_ASSERT(!headInFirmware && "Cannot add or remove from a firmware group.  You must perform a modeset away from the device");
+     DeviceImpl * di = (DeviceImpl *)dev;
++    bool bJoinsActiveStream = false;
+ 
+     if (isHeadAttached())
+     {
+@@ -152,6 +153,7 @@ void GroupImpl::insert(Device * dev)
+             DP_ASSERT(0 && "Device already in active group, cannot add to another active group!");
+             return;
+         }
++        bJoinsActiveStream = (di->activeGroup == NULL);
+         di->activeGroup = this;
+     }
+ 
+@@ -201,6 +203,16 @@ void GroupImpl::insert(Device * dev)
+         this->hdcpEnabled = false;
+     }
+ 
++    //
++    // The device joins a stream that is already driven, e.g. a zombie device
++    // the client adds back after it reappeared. No modeset follows, so restore
++    // its DSC state, which remove() dropped, before the stream is mapped to it.
++    //
++    if (bJoinsActiveStream)
++    {
++        parent->restoreDscOnReappearedDevice(di);
++    }
++
+     update(dev, true);
+ }
+ 
+diff --git a/src/nvidia-modeset/src/dp/nvdp-connector-event-sink.cpp b/src/nvidia-modeset/src/dp/nvdp-connector-event-sink.cpp
+index 21f5252f..0d4e0897 100644
+--- a/src/nvidia-modeset/src/dp/nvdp-connector-event-sink.cpp
++++ b/src/nvidia-modeset/src/dp/nvdp-connector-event-sink.cpp
+@@ -33,6 +33,7 @@
+ #include "nvkms-dpy.h"
+ #include "nvkms-utils.h"
+ #include "nvkms-vrr.h"
++#include "nvkms-hdmi.h"
+ 
+ #include "nvkms-attributes.h"
+ #include "nvkms-private.h"
+@@ -223,6 +224,46 @@ static void nvDPAddDeviceToActiveGroup(NVDpyEvoPtr pDpyEvo)
+     }
+ }
+ 
++//
++// A zombie device that reappears while its heads are still driven gets its
++// stream back from the DP library without a modeset, but the HPD that brought
++// it back leaves the source audio stream muted, and audio stays silent until
++// the next modeset. Run the audio part of a modeset again for those heads:
++// disable as before a modeset, then enable as after one.
++//
++static void nvDPRestoreAudioOnReappearedDpy(NVDpyEvoPtr pDpyEvo)
++{
++    const NVDispEvoRec *pDispEvo = pDpyEvo->pDispEvo;
++    const NVDevEvoRec *pDevEvo = pDispEvo->pDevEvo;
++    NvU32 apiHead, head;
++
++    if (pDpyEvo->pConnectorEvo->pDpLibConnector->headInFirmware) {
++        return;
++    }
++
++    for (apiHead = 0; apiHead < pDevEvo->numApiHeads; apiHead++) {
++        const NVDispApiHeadStateEvoRec *pApiHeadState =
++            &pDispEvo->apiHeadState[apiHead];
++
++        if (!nvDpyIdIsInDpyIdList(pDpyEvo->id, pApiHeadState->activeDpys)) {
++            continue;
++        }
++
++        if (nvDoDebugLogging()) {
++            nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                         "Restoring audio on reappeared %s, heads 0x%x",
++                         pDpyEvo->name, pApiHeadState->hwHeadsMask);
++        }
++
++        FOR_EACH_EVO_HW_HEAD_IN_MASK(pApiHeadState->hwHeadsMask, head) {
++            nvHdmiDpEnableDisableAudio(pDispEvo, head, FALSE /* enable */);
++        }
++        FOR_EACH_EVO_HW_HEAD_IN_MASK(pApiHeadState->hwHeadsMask, head) {
++            nvHdmiDpEnableDisableAudio(pDispEvo, head, TRUE /* enable */);
++        }
++    }
++}
++
+ static bool DpyHasGsyncEDID(NVDpyEvoPtr pDpyEvo)
+ {
+     return pDpyEvo->parsedEdid.valid &&
+@@ -510,6 +551,7 @@ void ConnectorEventSink::notifyZombieStateChange(DisplayPort::Device *dev,
+         EnableVRR(pDpyEvo);
+ 
+         nvDPAddDeviceToActiveGroup(pDpyEvo);
++        nvDPRestoreAudioOnReappearedDpy(pDpyEvo);
+     }
+ 
+     if (sendEvent) {

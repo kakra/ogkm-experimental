@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 16:45:17 +0100
+Subject: [PATCH] nvidia-modeset: don't register a backlight for an internal
+ panel muxed away
+
+On laptops with a mux switched to the integrated GPU, RM still lists the
+internal panel, so nvRmRegisterBacklight() registered nvidia_0 for a panel
+the GPU doesn't drive. Writing it changes nothing but resumes the GPU from
+RTD3 (2.8 s on the boot critical path through systemd-backlight, and on every
+brightness change), next to the iGPU's real backlight.
+
+Only consider internal displays that are connected, or that a dynamic mux can
+switch to this GPU later. Decide that once per display: the core channel is
+also reallocated on resume and console restore, when a powered off eDP panel
+may not be reported as connected.
+
+Fixes upstream issue 1413.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/include/nvkms-types.h |  7 ++++++
+ src/nvidia-modeset/src/nvkms-rm.c        | 29 +++++++++++++++++++++++-
+ 2 files changed, 35 insertions(+), 1 deletion(-)
+
+diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
+index 8311422e..d8c5cb38 100644
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -2194,6 +2194,13 @@ typedef struct _NVDispEvoRec {
+ 
+     struct nvkms_backlight_device *backlightDevice;
+ 
++    /*
++     * Internal displays that a backlight may be registered for, determined
++     * by the first nvRmRegisterBacklight() call; see there.
++     */
++    NvU32 backlightDisplayMask;
++    NvBool backlightDisplayMaskValid;
++
+     /*
+      * Per-API-head RG semaphore callback lists for vblank interrupts with
+      * precise timestamp tracking. This uses RG (Raster Generator) semaphore
+diff --git a/src/nvidia-modeset/src/nvkms-rm.c b/src/nvidia-modeset/src/nvkms-rm.c
+index 62b80ea2..8a12852d 100644
+--- a/src/nvidia-modeset/src/nvkms-rm.c
++++ b/src/nvidia-modeset/src/nvkms-rm.c
+@@ -5921,8 +5921,35 @@ void nvRmRegisterBacklight(NVDispEvoRec *pDispEvo)
+         return;
+     }
+ 
++    /*
++     * On laptops with a mux switched to the integrated GPU, the internal
++     * panel is listed but not connected to this GPU: setting its "backlight"
++     * does nothing, but resumes the GPU from RTD3. Skip internal displays
++     * that aren't connected, unless a dynamic mux can switch them to this
++     * GPU later.
++     *
++     * This is only decided once: the core channel is also reallocated on
++     * resume and console restore, when an eDP panel that is powered off
++     * may not be reported as connected.
++     */
++    if (!pDispEvo->backlightDisplayMaskValid) {
++        const NVDpyIdList internalDpys =
++            nvNvU32ToDpyIdList(dispParams.availableInternalDisplaysMask);
++        const NVDpyIdList connectedDpys =
++            nvRmGetConnectedDpys(pDispEvo, internalDpys);
++        const NVDpyIdList muxDpys =
++            nvIntersectDpyIdListAndDpyIdList(GetValidMuxDpys(pDispEvo),
++                                             internalDpys);
++
++        pDispEvo->backlightDisplayMask =
++            nvDpyIdListToNvU32(nvAddDpyIdListToDpyIdList(connectedDpys,
++                                                         muxDpys));
++        pDispEvo->backlightDisplayMaskValid = TRUE;
++    }
++
+     /* Find a display with a backlight */
+-    displayMask = dispParams.availableInternalDisplaysMask;
++    displayMask = dispParams.availableInternalDisplaysMask &
++                  pDispEvo->backlightDisplayMask;
+     for (; displayMask; displayMask &= ~LOWESTBIT(displayMask))
+     {
+         NV0073_CTRL_SPECIFIC_BACKLIGHT_BRIGHTNESS_PARAMS params = { 0 };

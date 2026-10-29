@@ -13,14 +13,16 @@ grows to 1072 bytes, past the 1024 byte -Wframe-larger-than limit.
 drm_property_create_enum() only reads the lists while creating the
 property, so make them static const.
 
+[Tom Englund: also make the underscan enum list static.]
+
 Fixes: 76d3b11502fd ("nvidia-drm: add the Broadcast RGB connector property")
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ---
- kernel-open/nvidia-drm/nvidia-drm-drv.c | 10 +++++-----
- 1 file changed, 5 insertions(+), 5 deletions(-)
+ kernel-open/nvidia-drm/nvidia-drm-drv.c | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
 
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
-index ff99ada9..932e625e 100644
+index 863d8d34..ad5e3941 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
 @@ -476,7 +476,7 @@ static void nv_drm_enumerate_encoders_and_connectors
@@ -61,6 +63,15 @@ index ff99ada9..932e625e 100644
          { .type = NV_DRM_BROADCAST_RGB_FULL,
 @@ -518,7 +518,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
            .name = "Limited 16:235" },
+     };
+ 
+-    const struct drm_prop_enum_list underscan_enum_list[] = {
++    static const struct drm_prop_enum_list underscan_enum_list[] = {
+         { .type = NV_DRM_UNDERSCAN_OFF,
+           .name = "off" },
+         { .type = NV_DRM_UNDERSCAN_ON,
+@@ -527,7 +527,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "auto" },
      };
  
 -    const struct drm_prop_enum_list hdcp_level_enum_list[] = {
