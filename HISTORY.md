@@ -30,7 +30,15 @@ Apple Thunderbolt, ACPI AC state, Mellanox, 16K page kernels and
 linux-next builds.
 
 Patches 100 to 102 of the entry below are now 125 to 127, after Tom's
-patches. Built against 6.18.59, not installed yet.
+patches. Built against 6.18.59.
+
+Installed on 2026-10-30 (all 127 patches, kernel 6.18.59). The boot was
+clean: no NVRM messages and no warnings from the nvidia modules. First
+impressions, not measured: new desktop windows open faster, without the
+lag felt before; games now fill all 12 GB of VRAM (MangoHUD at 100 %),
+where frame rate drops or crashes used to start from about 11.5 GB.
+Both cover several changes since the 73-patch series, they can't be
+attributed to a single patch.
 
 ### 2026-10-30: rate limit and back off failed GEM allocations (now patches 125 to 127)
 
@@ -50,7 +58,7 @@ the failed allocations caused them is not measured yet.
   for 100 ms doubling up to 2 s; a success resets it. Failed scanout
   allocations don't hold back offscreen ones.
 
-Built against 6.18.59, not installed yet.
+Built against 6.18.59; installed on 2026-10-30, see above.
 
 ### 2026-10-29: the series follows Tom Englund's set (all 99 patches)
 
