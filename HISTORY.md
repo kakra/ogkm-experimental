@@ -61,7 +61,9 @@ from 19:06, kernel log of the boot). The game ran stable.
   logged), up to 26 per second from one thread, while a working back-off
   allows one every 2 s per file. Likely cause, not verified: a
   successful smaller or offscreen allocation between the attempts resets
-  the back-off. A fix is on a local branch, built, not installed.
+  the back-off. Fixed in patch 127 on 2026-10-30 (folded in): only a
+  success that the back-off would have held back resets it. Built, not
+  installed yet.
 - 35 known "can't update VA space" blocks (user space driver), five
   explicit 64 KB-page sysmem allocations fell back to 4 KB pages, and one
   20 MB Xwayland GEM allocation fell back to sysmem.

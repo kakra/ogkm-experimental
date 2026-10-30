@@ -15,22 +15,25 @@ Remember the last failed allocation per file. Until its back-off
 expires, fail an allocation of this file that is not smaller with
 -ENOMEM without calling into NVKMS. The back-off starts at 100 ms,
 doubles with every failure up to 2 s and is reset by a successful
-allocation, so a client that keeps retrying makes one real attempt
-every 2 seconds instead of one per frame, and other clients are not
-affected. A failed scanout allocation doesn't hold back offscreen
-allocations, which can still fall back to sysmem.
+allocation that it would have held back, so a client that keeps retrying
+makes one real attempt every 2 seconds instead of one per frame, and
+other clients are not affected. A smaller or offscreen allocation
+succeeding in between doesn't reset it: a client that falls back to such
+a buffer after each failure would otherwise get every retry through. A
+failed scanout allocation doesn't hold back offscreen allocations, which
+can still fall back to sysmem.
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ---
- .../nvidia-drm/nvidia-drm-gem-nvkms-memory.c  | 43 ++++++++++++++++++-
- kernel-open/nvidia-drm/nvidia-drm-priv.h      | 10 +++++
- 2 files changed, 51 insertions(+), 2 deletions(-)
+ .../nvidia-drm/nvidia-drm-gem-nvkms-memory.c  | 61 ++++++++++++++++++-
+ kernel-open/nvidia-drm/nvidia-drm-priv.h      | 10 +++
+ 2 files changed, 69 insertions(+), 2 deletions(-)
 
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
-index cd1a836e..1be57a09 100644
+index cd1a836e..639b92e3 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
-@@ -635,11 +635,30 @@ done:
+@@ -635,11 +635,41 @@ done:
      return ret;
  }
  
@@ -51,6 +54,17 @@ index cd1a836e..1be57a09 100644
 +    nv_file->gem_alloc_fail_until = jiffies + msecs_to_jiffies(delay_ms);
 +}
 +
++/*
++ * Whether an allocation of size bytes is at least as hard to satisfy as the
++ * last failed one of this file: not smaller, and scanout if that one was.
++ */
++static bool nv_drm_gem_alloc_covers_failed(const struct nv_drm_file *nv_file,
++                                           u64 size, bool scanout)
++{
++    return size >= nv_file->gem_alloc_fail_size &&
++           (scanout || !nv_file->gem_alloc_fail_scanout);
++}
++
  int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
                                          void *data, struct drm_file *filep)
  {
@@ -61,7 +75,7 @@ index cd1a836e..1be57a09 100644
      struct nv_drm_gem_nvkms_memory *nv_nvkms_memory = NULL;
      struct NvKmsKapiMemory *pMemory;
      struct NvKmsKapiAllocateMemoryParams allocParams = { };
-@@ -662,6 +681,23 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+@@ -662,6 +692,22 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
          goto failed;
      }
  
@@ -70,13 +84,12 @@ index cd1a836e..1be57a09 100644
 +     * which stalls other clients such as a running game, and fails the same
 +     * way as long as nothing was freed. Fail an allocation that is not
 +     * smaller than the last failed one of this file right away until the
-+     * back-off expires; it doubles with every failure and a success resets
-+     * it. A failed scanout allocation doesn't hold back offscreen ones, which
-+     * can still fall back to sysmem.
++     * back-off expires; it doubles with every failure and a success of such
++     * an allocation resets it. A failed scanout allocation doesn't hold back
++     * offscreen ones, which can still fall back to sysmem.
 +     */
 +    if (nv_file->gem_alloc_fail_size != 0 &&
-+        p->memory_size >= nv_file->gem_alloc_fail_size &&
-+        (scanout || !nv_file->gem_alloc_fail_scanout) &&
++        nv_drm_gem_alloc_covers_failed(nv_file, p->memory_size, scanout) &&
 +        time_before(jiffies, nv_file->gem_alloc_fail_until)) {
 +        ret = -ENOMEM;
 +        goto failed;
@@ -85,7 +98,7 @@ index cd1a836e..1be57a09 100644
      if ((nv_nvkms_memory =
              nv_drm_calloc(1, sizeof(*nv_nvkms_memory))) == NULL) {
          ret = -ENOMEM;
-@@ -712,13 +748,16 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+@@ -712,13 +758,24 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
              NV_DRM_DEV_LOG_ERR(nv_dev,
                                 "Failed to allocate NVKMS memory of size %" NvU64_fmtu " for %s GEM object of %s[%d]",
                                 p->memory_size,
@@ -98,8 +111,16 @@ index cd1a836e..1be57a09 100644
          goto nvkms_alloc_memory_failed;
      }
  
-+    nv_file->gem_alloc_fail_size = 0;
-+    nv_file->gem_alloc_fail_delay_ms = 0;
++    /*
++     * Only a success that the back-off would have held back shows that
++     * memory was freed. A client that falls back to an offscreen or smaller
++     * buffer after each failed allocation would otherwise reset it every
++     * time and let every retry through again.
++     */
++    if (nv_drm_gem_alloc_covers_failed(nv_file, p->memory_size, scanout)) {
++        nv_file->gem_alloc_fail_size = 0;
++        nv_file->gem_alloc_fail_delay_ms = 0;
++    }
 +
      ret = __nv_drm_nvkms_gem_obj_init(nv_dev, nv_nvkms_memory, pMemory,
                                        p->memory_size);
