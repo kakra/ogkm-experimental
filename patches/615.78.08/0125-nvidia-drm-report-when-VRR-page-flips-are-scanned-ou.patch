@@ -1,0 +1,363 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Fri, 30 Oct 2026 20:25:28 +0100
+Subject: [PATCH] nvidia-drm: report when VRR page flips are scanned out
+
+With VRR the raster stops at the end of the front porch after each scanout
+and waits for a flip. Vblank timestamps assume a blanking interval of the
+mode's length, so they are too early by as long as the wait lasted, and flip
+events carried them: on a 240 Hz panel at about 60 fps, about 11 ms early, and
+about 16.6 ms early for flips arriving during the scanout, whose events are
+sent just before their vblank is handled.
+
+A flip kicked off during the wait restarts the raster right away, so report
+the kick time plus the rest of the blanking interval (from the start of vsync
+to the first active line). Measured against the raster position: the first
+active line follows nv_drm_atomic_commit() by 512-554 us, of which 456 us is
+that part of the interval. A flip kicked off during the scanout happens at the
+next vblank without a wait, so hold its event until that vblank is handled, as
+at a fixed refresh rate.
+
+Scanouts forced by the panel's minimum refresh rate aren't known here, but a
+flip kicked off during one doesn't restart the raster, so its event arrives late:
+measured within 275 us of the commit for flips that did, from 1.3 ms for those
+that didn't. Hold an event that took over 500 us until the next vblank too. A
+flip kicked off in the last 500 us of a forced scanout is still reported up to
+about that much too early.
+
+Flips NVKMS hasn't reported VRR active for keep the previous behaviour, as do
+all flips with vrr_flip_timestamps=0, which can be changed at runtime. Tearing
+flips are unchanged. This only corrects flip events: vblank timestamps from
+CRTC_GET_SEQUENCE and WAIT_VBLANK stay early under VRR, since correcting them
+would mean moving the RG semaphore interrupt past the front porch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-crtc.c      | 106 ++++++++++++++----
+ kernel-open/nvidia-drm/nvidia-drm-crtc.h      |  31 +++++
+ kernel-open/nvidia-drm/nvidia-drm-linux.c     |   6 +
+ kernel-open/nvidia-drm/nvidia-drm-modeset.c   |  30 ++++-
+ .../nvidia-drm/nvidia-drm-os-interface.c      |   1 +
+ .../nvidia-drm/nvidia-drm-os-interface.h      |   2 +
+ 6 files changed, 153 insertions(+), 23 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+index 8d393db3..7e898d78 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -3308,13 +3308,30 @@ failed:
+  * hasn't been handled yet, hold the event until it is.
+  *
+  * Flips that may happen later than that are left without a submit time and
+- * reported at the current vblank like before: tearing flips, flips waiting
+- * on an unsignaled acquire fence, and flips with VRR enabled (see
+- * nv_drm_crtc_set_vblank_duration()).
++ * reported at the current vblank like before: tearing flips and flips waiting
++ * on an unsignaled acquire fence.
++ *
++ * With VRR, the raster stops at the end of the front porch after each scanout
++ * and waits for a flip. A vblank timestamp assumes a blanking interval of the
++ * mode's length, so while the raster waits it is too early by as long as the
++ * wait lasted. A flip that arrives during the wait restarts the raster right
++ * away, so its first active line is the time the flip was kicked off plus the
++ * rest of the blanking interval. A flip that arrives during the scanout
++ * happens at the next vblank without a wait, and is reported at that vblank
++ * like at a fixed refresh rate. So is a flip whose event took longer than
++ * NV_DRM_VRR_FLIP_RESTART_EVENT_NS: it didn't restart the raster, so it arrived
++ * during a scanout the panel's minimum refresh rate forced without a flip,
++ * which aren't known here otherwise.
+  */
+ 
+ #define NV_DRM_PENDING_FLIP_EVENTS_TIMEOUT_MS 50
+ 
++/*
++ * The event of a flip that restarted the raster arrives within about 300 us of
++ * the kick; one latched at the end of a scanout usually takes milliseconds.
++ */
++#define NV_DRM_VRR_FLIP_RESTART_EVENT_NS 500000ULL
++
+ static void __nv_drm_crtc_send_flip_event_at(struct drm_crtc *crtc,
+                                              struct drm_pending_vblank_event *e,
+                                              u64 count, NvU64 time)
+@@ -3340,6 +3357,8 @@ static void __nv_drm_crtc_send_flip_events_at(struct nv_drm_crtc *nv_crtc,
+ {
+     struct nv_drm_flip *nv_deferred_flip, *nv_next_deferred_flip;
+ 
++    nv_crtc->last_flip_first_active = time;
++
+     if (nv_flip->event != NULL) {
+         __nv_drm_crtc_send_flip_event_at(&nv_crtc->base, nv_flip->event,
+                                          count, time);
+@@ -3485,6 +3504,41 @@ static void __nv_drm_crtc_process_pending_flip_events(struct nv_drm_crtc *nv_crt
+     }
+ }
+ 
++/*
++ * Find when a VRR flip is scanned out, see the comment above
++ * __nv_drm_crtc_send_flip_event_at(). Returns false if the flip happens at a
++ * vblank that hasn't been handled yet. Called with dev->event_lock and
++ * dev->vblank_time_lock held.
++ */
++static bool __nv_drm_crtc_find_vrr_flip_time(struct nv_drm_crtc *nv_crtc,
++                                             const struct nv_drm_flip *nv_flip,
++                                             u64 *count, NvU64 *time)
++{
++    NvU64 kick_time = READ_ONCE(nv_flip->kick_time);
++
++    if (nv_crtc->vblank_history_len > 0 &&
++        __nv_drm_crtc_find_flip_vblank(nv_crtc, nv_flip, count, time)) {
++        return true;
++    }
++
++    /* The event can be handled before applyModeSetConfig() returns */
++    if (kick_time == 0 || kick_time > nv_flip->event_time) {
++        kick_time = nv_flip->event_time;
++    }
++
++    /* A scanout is still running: wait for its vblank */
++    if (kick_time < nv_crtc->last_flip_first_active +
++                    nv_crtc->vblank_active_ns ||
++        nv_flip->event_time - kick_time > NV_DRM_VRR_FLIP_RESTART_EVENT_NS) {
++        return false;
++    }
++
++    *count = drm_crtc_vblank_count(&nv_crtc->base);
++    *time = kick_time + nv_crtc->vblank_restart_to_active_ns;
++
++    return true;
++}
++
+ /*
+  * Called with dev->event_lock held, after nv_flip has been dequeued from the
+  * flip list. Returns false if the caller should send the flip's events
+@@ -3511,13 +3565,26 @@ bool nv_drm_crtc_handle_flip_events(struct nv_drm_crtc *nv_crtc,
+     nv_flip->event_time = event_time;
+ 
+     spin_lock_irqsave(&dev->vblank_time_lock, irqflags);
+-    usable = nv_crtc->vblank_intr_fired &&
+-             nv_crtc->vblank_history_len > 0 &&
+-             nv_crtc->vblank_duration_ns != 0 &&
+-             READ_ONCE(nv_flip->submit_time) != 0;
+-    if (usable) {
+-        found = __nv_drm_crtc_find_flip_vblank(nv_crtc, nv_flip,
+-                                               &count, &time);
++    if (nv_flip->vrr) {
++        /* Flips waiting on an acquire fence happened about now */
++        if (READ_ONCE(nv_flip->submit_time) == 0) {
++            WRITE_ONCE(nv_flip->submit_time, event_time);
++        }
++        usable = nv_crtc->vblank_duration_ns != 0 &&
++                 nv_crtc->vblank_active_ns != 0;
++        if (usable) {
++            found = __nv_drm_crtc_find_vrr_flip_time(nv_crtc, nv_flip,
++                                                     &count, &time);
++        }
++    } else {
++        usable = nv_crtc->vblank_intr_fired &&
++                 nv_crtc->vblank_history_len > 0 &&
++                 nv_crtc->vblank_duration_ns != 0 &&
++                 READ_ONCE(nv_flip->submit_time) != 0;
++        if (usable) {
++            found = __nv_drm_crtc_find_flip_vblank(nv_crtc, nv_flip,
++                                                   &count, &time);
++        }
+     }
+     spin_unlock_irqrestore(&dev->vblank_time_lock, irqflags);
+ 
+@@ -3636,7 +3703,7 @@ void nv_drm_crtc_set_vblank_duration(struct nv_drm_crtc *nv_crtc,
+     struct drm_device *dev = nv_crtc->base.dev;
+     const struct drm_display_mode *mode = &crtc_state->adjusted_mode;
+     unsigned long irqflags;
+-    NvU64 duration = 0, period = 0;
++    NvU64 duration = 0, period = 0, active = 0, restart_to_active = 0;
+ 
+     if (mode->clock > 0 && mode->vtotal > mode->vdisplay) {
+         /* mode->clock is in kHz */
+@@ -3644,22 +3711,17 @@ void nv_drm_crtc_set_vblank_duration(struct nv_drm_crtc *nv_crtc,
+                            mode->htotal * 1000000ULL, mode->clock);
+         period = div_u64((u64)mode->vtotal * mode->htotal * 1000000ULL,
+                          mode->clock);
++        active = div_u64((u64)mode->vdisplay * mode->htotal * 1000000ULL,
++                         mode->clock);
++        restart_to_active = div_u64((u64)(mode->vtotal - mode->vsync_start) *
++                                    mode->htotal * 1000000ULL, mode->clock);
+     }
+ 
+-#if defined(NV_DRM_CRTC_STATE_HAS_VRR_ENABLED)
+-    /*
+-     * With VRR the blanking interval stretches until a flip arrives, so the
+-     * mode's vblank length doesn't tell when the vblank a flip ended started.
+-     * A zero duration makes flip events use the current vblank instead.
+-     */
+-    if (crtc_state->vrr_enabled) {
+-        duration = 0;
+-    }
+-#endif
+-
+     spin_lock_irqsave(&dev->vblank_time_lock, irqflags);
+     nv_crtc->vblank_duration_ns = duration;
+     nv_crtc->vblank_period_ns = period;
++    nv_crtc->vblank_active_ns = active;
++    nv_crtc->vblank_restart_to_active_ns = restart_to_active;
+     spin_unlock_irqrestore(&dev->vblank_time_lock, irqflags);
+ }
+ 
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.h b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
+index c15ec1be..2306362a 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
+@@ -78,6 +78,21 @@ struct nv_drm_crtc {
+      */
+     NvU64 vblank_period_ns;
+ 
++    /*
++     * With VRR the raster waits at the end of the front porch until a flip
++     * arrives, see nv_drm_crtc_handle_flip_events(). These are the length of
++     * the active scanout, and the time from the end of that wait to the first
++     * active line. Protected by dev->vblank_time_lock.
++     */
++    NvU64 vblank_active_ns;
++    NvU64 vblank_restart_to_active_ns;
++
++    /*
++     * First active line of the last flip whose event was sent, and with it
++     * when its scanout ends. Protected by dev->event_lock.
++     */
++    NvU64 last_flip_first_active;
++
+     /*
+      * Flips whose completion event arrived before the vblank they happened
+      * at was handled; their DRM events are sent from the vblank callback.
+@@ -99,6 +114,13 @@ struct nv_drm_crtc {
+      */
+     bool vblank_intr_fired;
+ 
++    /*
++     * NVKMS reported VRR active for a flip on this CRTC, and the
++     * VRR_ENABLED property has stayed set since. Only used from commits,
++     * which the CRTC's modeset lock serializes.
++     */
++    bool vrr_active;
++
+     /**
+      * @flip_list:
+      *
+@@ -216,6 +238,15 @@ struct nv_drm_flip {
+      * flip happened before this. Protected by &drm_device.event_lock.
+      */
+     NvU64 event_time;
++
++    /*
++     * @vrr:
++     *
++     * The raster may be waiting for this flip, so the vblank timestamps
++     * don't tell when it is scanned out. See
++     * nv_drm_crtc_handle_flip_events().
++     */
++    bool vrr;
+ };
+ 
+ struct nv_drm_crtc_state {
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-linux.c b/kernel-open/nvidia-drm/nvidia-drm-linux.c
+index ebc73ffa..b5b63739 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-linux.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-linux.c
+@@ -67,6 +67,12 @@ MODULE_PARM_DESC(
+     "the display scaler (1 = enable (default), 0 = disable)");
+ module_param_named(scaling_mode, nv_drm_scaling_mode_module_param, bool, 0444);
+ 
++MODULE_PARM_DESC(
++    vrr_flip_timestamps,
++    "Report when VRR page flips are scanned out instead of the last vblank "
++    "(1 = enable (default), 0 = disable)");
++module_param_named(vrr_flip_timestamps, nv_drm_vrr_flip_timestamps_module_param, bool, 0644);
++
+ #endif /* NV_DRM_AVAILABLE */
+ 
+ /*************************************************************************
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-modeset.c b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+index 27078860..745bd4a4 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-modeset.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+@@ -420,6 +420,15 @@ static bool __nv_drm_crtc_state_async_flip(const struct drm_crtc_state *crtc_sta
+ #endif
+ }
+ 
++static bool __nv_drm_crtc_state_vrr_enabled(const struct drm_crtc_state *crtc_state)
++{
++#if defined(NV_DRM_CRTC_STATE_HAS_VRR_ENABLED)
++    return crtc_state->vrr_enabled;
++#else
++    return false;
++#endif
++}
++
+ /*
+  * Whether a plane flipped on crtc waits on an acquire fence that hasn't
+  * signaled yet, which may delay the flip past the next vblank.
+@@ -527,10 +536,17 @@ nv_drm_atomic_apply_modeset_config(struct drm_device *dev,
+                  * Tearing flips happen right away rather than at a vblank,
+                  * and flips waiting on an acquire fence may happen vblanks
+                  * later; leave their submit time unset so their events are
+-                 * reported at the vblank they arrive at.
++                 * reported at the vblank they arrive at. So do flips with
++                 * VRR enabled that NVKMS hasn't reported VRR active for yet.
+                  */
+                 nv_new_crtc_state->nv_flip->submit_time = 0;
++                nv_new_crtc_state->nv_flip->vrr =
++                    nv_drm_vrr_flip_timestamps_module_param &&
++                    nv_crtc->vrr_active &&
++                    !__nv_drm_crtc_state_async_flip(new_crtc_state);
+                 if (!__nv_drm_crtc_state_async_flip(new_crtc_state) &&
++                    (nv_new_crtc_state->nv_flip->vrr ||
++                     !__nv_drm_crtc_state_vrr_enabled(new_crtc_state)) &&
+                     !__nv_drm_crtc_has_unsignaled_in_fence(state, crtc) &&
+                     num_submitted_flips < ARRAY_SIZE(submitted_flips)) {
+                     submitted_crtcs[num_submitted_flips] = nv_crtc;
+@@ -617,9 +633,21 @@ nv_drm_atomic_apply_modeset_config(struct drm_device *dev,
+ 
+     if (commit && nv_drm_vblank_module_param) {
+         for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state, new_crtc_state, i) {
++            struct nv_drm_crtc *nv_crtc = to_nv_crtc(crtc);
++
+             if (old_crtc_state->active && !new_crtc_state->active) {
+                 drm_crtc_vblank_off(crtc);
+             }
++
++            /*
++             * NVKMS reports no VRR for flips that only update the cursor, so
++             * only VRR_ENABLED turns this off.
++             */
++            if (!__nv_drm_crtc_state_vrr_enabled(new_crtc_state)) {
++                nv_crtc->vrr_active = false;
++            } else if (reply_config.vrrFlip) {
++                nv_crtc->vrr_active = true;
++            }
+         }
+     }
+ 
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-os-interface.c b/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
+index 5a2a04cc..c375d84a 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
+@@ -48,6 +48,7 @@ bool nv_drm_vblank_module_param = true;
+ bool nv_drm_color_pipeline_module_param = true;
+ bool nv_drm_deadline_boost_module_param = true;
+ bool nv_drm_scaling_mode_module_param = true;
++bool nv_drm_vrr_flip_timestamps_module_param = true;
+ 
+ void *nv_drm_calloc(size_t nmemb, size_t size)
+ {
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-os-interface.h b/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
+index 40d11b08..ab5b0209 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
+@@ -74,6 +74,8 @@ extern bool nv_drm_color_pipeline_module_param;
+ extern bool nv_drm_deadline_boost_module_param;
+ /* Set to true when connectors get the "scaling mode" and underscan properties. */
+ extern bool nv_drm_scaling_mode_module_param;
++/* Set to true when VRR flip events report when the flip is scanned out. */
++extern bool nv_drm_vrr_flip_timestamps_module_param;
+ 
+ void *nv_drm_calloc(size_t nmemb, size_t size);
+ 

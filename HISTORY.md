@@ -5,7 +5,22 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 615.78.08
 
-Fork branch `ogkm/615.78.08`, 127 patches on the upstream tag `615.78.08`.
+Fork branch `ogkm/615.78.08`, 129 patches on the upstream tag `615.78.08`.
+
+### 2026-10-30: VRR flip events (patches 125, 126)
+
+Two more patches from Tom's set, before our GEM allocation patches, which
+are now 127 to 129 (the numbers in the entries below are the old ones).
+
+- 125: with VRR, flip events carried vblank timestamps that were too early
+  by the time the raster waited in the front porch (about 11 ms at 60 fps
+  on a 240 Hz panel). Flips are now reported at the kick time plus the rest
+  of the blanking interval; `nvidia_drm.vrr_flip_timestamps=0` restores the
+  old behaviour at runtime.
+- 126: moving the cursor only unstalls the VRR head it is on, not every
+  VRR head (found by code reading).
+
+Built against 6.18.59, not installed yet.
 
 ### 2026-10-30: Tom Englund's set of 2026-10-30 (patches 100 to 124)
 

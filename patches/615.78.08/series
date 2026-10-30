@@ -122,6 +122,8 @@
 0122-nvkms-allocate-Blackwell-physical-windows-by-validat.patch
 0123-nvidia-drm-expose-opt-in-per-connector-MST-DDC-adapt.patch
 0124-nvidia-clear-the-hibernation-marker-when-the-PM-noti.patch
-0125-nvidia-drm-rate-limit-GEM-allocation-failure-message.patch
-0126-nvidia-drm-keep-per-file-data-in-a-struct-nv_drm_fil.patch
-0127-nvidia-drm-back-off-repeated-failed-GEM-allocations-.patch
+0125-nvidia-drm-report-when-VRR-page-flips-are-scanned-ou.patch
+0126-nvkms-only-unstall-the-VRR-head-the-cursor-moved-on.patch
+0127-nvidia-drm-rate-limit-GEM-allocation-failure-message.patch
+0128-nvidia-drm-keep-per-file-data-in-a-struct-nv_drm_fil.patch
+0129-nvidia-drm-back-off-repeated-failed-GEM-allocations-.patch

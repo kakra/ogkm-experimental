@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Fri, 30 Oct 2026 20:44:14 +0100
+Subject: [PATCH] nvkms: only unstall the VRR head the cursor moved on
+
+Moving a visible cursor on any head marked every active VRR head and started
+the 33 ms unstall timer, so moving it on a second monitor forced refreshes on
+a VRR monitor whose screen hadn't changed. Mark only the VRR head the cursor is
+on, and don't start the timer if that head isn't VRR.
+
+This matters when a VRR head flips slower than 30 fps and its panel's minimum
+refresh rate is below 30 Hz: above that, a flip or the panel's own timeout
+comes first. Not reproduced: found by reading the code, and the panel available
+for testing has a minimum refresh rate of about 60 Hz.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/include/nvkms-vrr.h |  2 +-
+ src/nvidia-modeset/src/nvkms-cursor.c  |  2 +-
+ src/nvidia-modeset/src/nvkms-vrr.c     | 27 ++++++++++++++++++--------
+ 3 files changed, 21 insertions(+), 10 deletions(-)
+
+diff --git a/src/nvidia-modeset/include/nvkms-vrr.h b/src/nvidia-modeset/include/nvkms-vrr.h
+index b00b1db8..477a8f26 100644
+--- a/src/nvidia-modeset/include/nvkms-vrr.h
++++ b/src/nvidia-modeset/include/nvkms-vrr.h
+@@ -53,7 +53,7 @@ void nvApplyVrrBaseFlipOverrides(const NVDispEvoRec *pDispEvo, NvU32 head,
+                                  const NVFlipChannelEvoHwState *pOld,
+                                  NVFlipChannelEvoHwState *pNew);
+ enum NvKmsVrrFlipType nvGetActiveVrrType(const NVDevEvoRec *pDevEvo);
+-void nvTriggerVrrUnstallMoveCursor(NVDispEvoPtr pDispEvo);
++void nvTriggerVrrUnstallMoveCursor(NVDispEvoPtr pDispEvo, const NvU32 head);
+ void nvTriggerVrrUnstallSetCursorImage(NVDispEvoPtr pDispEvo,
+                                        NvBool elvReleased);
+ void nvGetDpyMinRefreshRateValidValues(
+diff --git a/src/nvidia-modeset/src/nvkms-cursor.c b/src/nvidia-modeset/src/nvkms-cursor.c
+index 8277089c..15f3f746 100644
+--- a/src/nvidia-modeset/src/nvkms-cursor.c
++++ b/src/nvidia-modeset/src/nvkms-cursor.c
+@@ -273,7 +273,7 @@ void nvEvoMoveCursorInternal(NVDispEvoPtr pDispEvo,
+     /* If the cursor is visible, trigger VRR unstall to display the
+      * cursor at the new postion */
+     if (pEvoSubDev->headState[head].cursor.pSurfaceEvo) {
+-        nvTriggerVrrUnstallMoveCursor(pDispEvo);
++        nvTriggerVrrUnstallMoveCursor(pDispEvo, head);
+     }
+ }
+ 
+diff --git a/src/nvidia-modeset/src/nvkms-vrr.c b/src/nvidia-modeset/src/nvkms-vrr.c
+index ae628db5..43a218c6 100644
+--- a/src/nvidia-modeset/src/nvkms-vrr.c
++++ b/src/nvidia-modeset/src/nvkms-vrr.c
+@@ -970,26 +970,37 @@ VrrUnstallTimer(void *dataPtr, NvU32 dataU32)
+  * for some time in the future in order to give the application some time to
+  * respond, but force a minimum refresh rate if it doesn't.
+  *
++ * Only the VRR head the cursor moved on needs this: the other heads' screens
++ * didn't change, and an unstall would add a refresh to their refresh rate. The
++ * timer is shared, so a head that moves its cursor while it is running gets
++ * less than the full timeout.
++ *
+  * On nvdisplay, this schedules an nvkms timer and uses a method to trigger an
+  * unstall. On EVO, it calls into RM to do something equivalent.
+  */
+-void nvTriggerVrrUnstallMoveCursor(NVDispEvoPtr pDispEvo)
++void nvTriggerVrrUnstallMoveCursor(NVDispEvoPtr pDispEvo, const NvU32 head)
+ {
+-    NVDevEvoPtr pDevEvo = pDispEvo->pDevEvo;
+     const NvU32 timeoutMs = 33; // 30 fps
+ 
+     NvU32 apiHead;
++    NvBool pending = NV_FALSE;
+ 
+-    if (!AnyActiveVrrHeads(pDevEvo)) {
++    for (apiHead = 0; apiHead < NVKMS_MAX_HEADS_PER_DISP; apiHead++) {
++        NVDispApiHeadStateEvoRec *pApiHeadState =
++            &pDispEvo->apiHeadState[apiHead];
++
++        if (pApiHeadState->vrr.active &&
++            ((pApiHeadState->hwHeadsMask & NVBIT(head)) != 0)) {
++            pApiHeadState->vrr.pendingCursorMotion = NV_TRUE;
++            pending = NV_TRUE;
++        }
++    }
++
++    if (!pending) {
+         return;
+     }
+ 
+     if (!pDispEvo->vrr.unstallTimer) {
+-        for (apiHead = 0; apiHead < NVKMS_MAX_HEADS_PER_DISP; apiHead++) {
+-            if (pDispEvo->apiHeadState[apiHead].vrr.active) {
+-                pDispEvo->apiHeadState[apiHead].vrr.pendingCursorMotion = NV_TRUE;
+-            }
+-        }
+         pDispEvo->vrr.unstallTimer =
+             nvkms_alloc_timer(VrrUnstallTimer, pDispEvo, 0, timeoutMs * 1000);
+     }
