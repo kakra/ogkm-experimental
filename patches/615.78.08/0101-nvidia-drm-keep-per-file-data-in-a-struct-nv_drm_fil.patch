@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Fri, 30 Oct 2026 02:13:51 +0100
+Subject: [PATCH] nvidia-drm: keep per file data in a struct nv_drm_file
+
+drm_file::driver_priv only held a unique id, stored in the pointer
+itself. Allocate a struct nv_drm_file in nv_drm_open() instead, keep the
+id in it and free it in nv_drm_postclose(), so that per client state
+can be added. DRM_IOCTL_NVIDIA_GET_DRM_FILE_UNIQUE_ID returns the same
+id as before.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-drv.c  | 15 +++++++++++----
+ kernel-open/nvidia-drm/nvidia-drm-priv.h |  9 +++++++++
+ 2 files changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index ad5e3941..568a0f5c 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -1212,7 +1212,7 @@ static int nv_drm_get_drm_file_unique_id_ioctl(struct drm_device *dev,
+                                                void *data, struct drm_file *filep)
+ {
+     struct drm_nvidia_get_drm_file_unique_id_params *params = data;
+-    params->id = (u64)(filep->driver_priv);
++    params->id = to_nv_drm_file(filep)->id;
+     return 0;
+ }
+ 
+@@ -1691,15 +1691,22 @@ static void nv_drm_postclose(struct drm_device *dev, struct drm_file *filep)
+         dev->mode_config.connector_list.prev != NULL) {
+         nv_drm_revoke_modeset_permission(dev, filep, 0);
+     }
++
++    nv_drm_free(filep->driver_priv);
++    filep->driver_priv = NULL;
+ }
+ 
+ static int nv_drm_open(struct drm_device *dev, struct drm_file *filep)
+ {
+-    _Static_assert(sizeof(filep->driver_priv) >= sizeof(u64),
+-                   "filep->driver_priv can not hold an u64");
+     static atomic64_t id = ATOMIC_INIT(0);
++    struct nv_drm_file *nv_file = nv_drm_calloc(1, sizeof(*nv_file));
+ 
+-    filep->driver_priv = (void *)atomic64_inc_return(&id);
++    if (nv_file == NULL) {
++        return -ENOMEM;
++    }
++
++    nv_file->id = atomic64_inc_return(&id);
++    filep->driver_priv = nv_file;
+ 
+     return 0;
+ }
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-priv.h b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+index 9386605d..5769a930 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-priv.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+@@ -365,6 +365,15 @@ static inline struct nv_drm_device *to_nv_device(
+     return dev->dev_private;
+ }
+ 
++/* Per open file data, in drm_file::driver_priv */
++struct nv_drm_file {
++    /* Returned by DRM_IOCTL_NVIDIA_GET_DRM_FILE_UNIQUE_ID */
++    u64 id;
++};
++
++/* A macro, struct drm_file is not defined in every file including this one */
++#define to_nv_drm_file(filep) ((struct nv_drm_file *)(filep)->driver_priv)
++
+ extern const struct NvKmsKapiFunctionsTable* const nvKms;
+ 
+ #endif /* defined(NV_DRM_AVAILABLE) */

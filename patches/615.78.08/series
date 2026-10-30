@@ -97,3 +97,6 @@
 0097-nvidia-only-define-struct-nv_cxl-with-the-CXL-bring-.patch
 0098-nvidia-uvm-don-t-end-a-compound-statement-with-a-lab.patch
 0099-nvidia-uvm-check-for-dma_buf_invalidate_mappings-its.patch
+0100-nvidia-drm-rate-limit-GEM-allocation-failure-message.patch
+0101-nvidia-drm-keep-per-file-data-in-a-struct-nv_drm_fil.patch
+0102-nvidia-drm-back-off-repeated-failed-GEM-allocations-.patch

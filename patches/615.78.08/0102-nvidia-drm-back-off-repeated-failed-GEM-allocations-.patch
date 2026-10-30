@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Fri, 30 Oct 2026 02:14:33 +0100
+Subject: [PATCH] nvidia-drm: back off repeated failed GEM allocations of a
+ client
+
+While video memory is full, Chrome asks for the same 3.2 MB NV12 video
+scanout buffer on every frame, 30 to 60 times per second for half an
+hour in a game session. Scanout memory can't fall back to sysmem, so
+each attempt fails, but only after NVKMS and RM searched video memory
+for a contiguous block under their locks. The game running at the same
+time showed frame drops and lag spikes during these failures.
+
+Remember the last failed allocation per file. Until its back-off
+expires, fail an allocation of this file that is not smaller with
+-ENOMEM without calling into NVKMS. The back-off starts at 100 ms,
+doubles with every failure up to 2 s and is reset by a successful
+allocation, so a client that keeps retrying makes one real attempt
+every 2 seconds instead of one per frame, and other clients are not
+affected. A failed scanout allocation doesn't hold back offscreen
+allocations, which can still fall back to sysmem.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../nvidia-drm/nvidia-drm-gem-nvkms-memory.c  | 43 ++++++++++++++++++-
+ kernel-open/nvidia-drm/nvidia-drm-priv.h      | 10 +++++
+ 2 files changed, 51 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
+index cd1a836e..1be57a09 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
+@@ -635,11 +635,30 @@ done:
+     return ret;
+ }
+ 
++#define NV_DRM_GEM_ALLOC_BACKOFF_MIN_MS 100
++#define NV_DRM_GEM_ALLOC_BACKOFF_MAX_MS 2000
++
++static void nv_drm_gem_alloc_failed(struct nv_drm_file *nv_file,
++                                    u64 size, bool scanout)
++{
++    unsigned int delay_ms = nv_file->gem_alloc_fail_delay_ms;
++
++    delay_ms = (delay_ms == 0) ? NV_DRM_GEM_ALLOC_BACKOFF_MIN_MS :
++               min(delay_ms * 2, (unsigned int)NV_DRM_GEM_ALLOC_BACKOFF_MAX_MS);
++
++    nv_file->gem_alloc_fail_size = size;
++    nv_file->gem_alloc_fail_scanout = scanout;
++    nv_file->gem_alloc_fail_delay_ms = delay_ms;
++    nv_file->gem_alloc_fail_until = jiffies + msecs_to_jiffies(delay_ms);
++}
++
+ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+                                         void *data, struct drm_file *filep)
+ {
+     struct nv_drm_device *nv_dev = to_nv_device(dev);
+     struct drm_nvidia_gem_alloc_nvkms_memory_params *p = data;
++    struct nv_drm_file *nv_file = to_nv_drm_file(filep);
++    const bool scanout = !(p->flags & NV_GEM_ALLOC_NO_SCANOUT);
+     struct nv_drm_gem_nvkms_memory *nv_nvkms_memory = NULL;
+     struct NvKmsKapiMemory *pMemory;
+     struct NvKmsKapiAllocateMemoryParams allocParams = { };
+@@ -662,6 +681,23 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+         goto failed;
+     }
+ 
++    /*
++     * Each attempt searches video memory in NVKMS and RM under their locks,
++     * which stalls other clients such as a running game, and fails the same
++     * way as long as nothing was freed. Fail an allocation that is not
++     * smaller than the last failed one of this file right away until the
++     * back-off expires; it doubles with every failure and a success resets
++     * it. A failed scanout allocation doesn't hold back offscreen ones, which
++     * can still fall back to sysmem.
++     */
++    if (nv_file->gem_alloc_fail_size != 0 &&
++        p->memory_size >= nv_file->gem_alloc_fail_size &&
++        (scanout || !nv_file->gem_alloc_fail_scanout) &&
++        time_before(jiffies, nv_file->gem_alloc_fail_until)) {
++        ret = -ENOMEM;
++        goto failed;
++    }
++
+     if ((nv_nvkms_memory =
+             nv_drm_calloc(1, sizeof(*nv_nvkms_memory))) == NULL) {
+         ret = -ENOMEM;
+@@ -712,13 +748,16 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+             NV_DRM_DEV_LOG_ERR(nv_dev,
+                                "Failed to allocate NVKMS memory of size %" NvU64_fmtu " for %s GEM object of %s[%d]",
+                                p->memory_size,
+-                               (p->flags & NV_GEM_ALLOC_NO_SCANOUT) ?
+-                                   "offscreen" : "scanout",
++                               scanout ? "scanout" : "offscreen",
+                                current->comm, task_pid_nr(current));
+         }
++        nv_drm_gem_alloc_failed(nv_file, p->memory_size, scanout);
+         goto nvkms_alloc_memory_failed;
+     }
+ 
++    nv_file->gem_alloc_fail_size = 0;
++    nv_file->gem_alloc_fail_delay_ms = 0;
++
+     ret = __nv_drm_nvkms_gem_obj_init(nv_dev, nv_nvkms_memory, pMemory,
+                                       p->memory_size);
+     if (ret) {
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-priv.h b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+index 5769a930..087814b0 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-priv.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+@@ -369,6 +369,16 @@ static inline struct nv_drm_device *to_nv_device(
+ struct nv_drm_file {
+     /* Returned by DRM_IOCTL_NVIDIA_GET_DRM_FILE_UNIQUE_ID */
+     u64 id;
++
++    /*
++     * Back-off after a failed GEM allocation, see
++     * nv_drm_gem_alloc_nvkms_memory_ioctl(). Updated without a lock; a race
++     * between ioctls on the same file only shifts the back-off.
++     */
++    u64 gem_alloc_fail_size;
++    unsigned long gem_alloc_fail_until;
++    unsigned int gem_alloc_fail_delay_ms;
++    bool gem_alloc_fail_scanout;
+ };
+ 
+ /* A macro, struct drm_file is not defined in every file including this one */
