@@ -5,9 +5,34 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 615.78.08
 
-Fork branch `ogkm/615.78.08`, 102 patches on the upstream tag `615.78.08`.
+Fork branch `ogkm/615.78.08`, 127 patches on the upstream tag `615.78.08`.
 
-### 2026-10-30: rate limit and back off failed GEM allocations (patches 100 to 102)
+### 2026-10-30: Tom Englund's set of 2026-10-30 (patches 100 to 124)
+
+25 new patches from `gulafaran/patches`, most of them open upstream pull
+requests by other authors (see `patches/615.78.08/README.md`). Left out:
+"nvidia-uvm: reserve the least busy channel of a pool" (channel half of
+upstream PR [#1375][pr-1375]) together with Tom's revert of it. Tom's
+audit found it correct but costly: rotating on ties puts consecutive
+pushes on different channels even on an idle pool, so most dependencies
+become cross-channel semaphore acquires, block trackers need heap
+allocations and `uvm_tracker_add_push()` can fail with `NV_ERR_NO_MEMORY`;
+the pull request shows no measured benefit. The TLB batch half of the same
+pull request (patch 117) is kept.
+
+Relevant here: static BAR1 updates of noncontiguous allocations coalesced
+(upstream PR [#1500][pr-1500], with 16 GiB Resizable BAR), no assert or
+reference leak on a failed BAR1 mapping, HDMI DSC max slices at 400 MHz
+(the TV), chunked I2C-over-AUX for i2c-dev (ddcutil on DisplayPort), DP
+head detaches during detection, and lifetime fixes for the NVKMS revoke
+and `nv_drm_device`. The rest is Turing RTD3, Blackwell, hibernation,
+Apple Thunderbolt, ACPI AC state, Mellanox, 16K page kernels and
+linux-next builds.
+
+Patches 100 to 102 of the entry below are now 125 to 127, after Tom's
+patches. Built against 6.18.59, not installed yet.
+
+### 2026-10-30: rate limit and back off failed GEM allocations (now patches 125 to 127)
 
 In a 72-minute session of Guardians of the Galaxy without workarounds,
 Chrome's GPU process asked for the same 3.2 MB NV12 video scanout buffer on
@@ -16,11 +41,11 @@ size 3342336 for scanout GEM object" errors in 28 minutes, up to 60 per
 second. Frame drops and lag spikes were reported at the same time; that
 the failed allocations caused them is not measured yet.
 
-- 100: the three GEM allocation messages are rate limited together (5 per
+- 125: the three GEM allocation messages are rate limited together (5 per
   10 s) and name the calling process and PID.
-- 101: `drm_file::driver_priv` points to a `struct nv_drm_file` instead of
+- 126: `drm_file::driver_priv` points to a `struct nv_drm_file` instead of
   holding the file id itself.
-- 102: per file back-off: after a failed allocation, allocations of that
+- 127: per file back-off: after a failed allocation, allocations of that
   file that are not smaller fail with `-ENOMEM` without calling into NVKMS,
   for 100 ms doubling up to 2 s; a success resets it. Failed scanout
   allocations don't hold back offscreen ones.
@@ -168,6 +193,7 @@ no longer logged as errors.
 [pr-1278]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1278
 [pr-1286]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1286
 [pr-1368]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368
+[pr-1375]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1375
 [pr-1383]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1383
 [pr-1424]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1424
 [pr-1430]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1430
@@ -176,3 +202,4 @@ no longer logged as errors.
 [pr-1483]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1483
 [pr-1493]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1493
 [pr-1498]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1498
+[pr-1500]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1500

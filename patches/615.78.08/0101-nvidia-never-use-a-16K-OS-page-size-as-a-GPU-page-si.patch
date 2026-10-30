@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Fri, 30 Oct 2026 12:01:18 +0100
+Subject: [PATCH] nvidia: never use a 16K OS page size as a GPU page size
+
+On a kernel with 16K pages, RM init fails with NV_ERR_INVALID_STATE:
+_memmgrPickDefaultSysmemPageSize() returns the OS page size, the final switch
+in memmgrDeterminePageSize() doesn't know 16K and returns 0, and every
+system memory allocation through it fails, the scrubber's among them.
+
+Upstream PR 1480 by Joshua Warren adds a 16K case to that switch which keeps
+returning 16K and reports the 4K attribute. That gets the GPU up, but the OS
+page size can become a GPU page size in two more places, neither of which
+goes through that switch:
+
+- memdescGetAdjustedPageSize() stores it in a memdesc with no page size set.
+- memmgrSetMemDescPageSize_GM107() uses it as the default at map time.
+
+A default mapping then takes 16K from the memdesc, and
+mmuFmtFindLevelWithPageShift() finds no level for it, so the map target
+gets a NULL level format. The only check on the way is a debug assert.
+
+Convert the OS page size with RM_OS_PAGE_SIZE_TO_GPU() in all of these
+places instead, so that 16K never exists as a GPU page size: the memory is
+mapped with small pages, as the 4K attribute already implied. The picker
+returning 4K also means video_mem.c, the one caller that uses the returned
+size, gets its 4K->64K PMA rewrite instead of passing 16K on.
+
+memdescGetAdjustedPageSize() still returns the OS page size for the OS
+allocation. The order is the same either way, since get_order() is 0 for both.
+
+_sysmemGetNextSmallestPageSize() stopped on pageSize == OS page size, which
+can't match on these kernels, so a failed 4K retry logged "Invalid page size:
+0x1000" on top of the real error. Stop at or below the OS page size.
+
+4K and 64K kernels get the same page sizes as before. The one difference is
+on 64K kernels, where a failed retry at the 4K attribute no longer logs that
+bogus message. Built for x86-64 only, not run on a 16K kernel. Separate
+upstream PR 1481 (arm64 DMA submap alignment for 16K and 64K pages) is
+not part of this.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/inc/kernel/gpu/mem_mgr/rm_page_size.h         | 9 +++++++++
+ .../src/kernel/gpu/mem_mgr/arch/maxwell/mem_mgr_gm107.c  | 2 +-
+ src/nvidia/src/kernel/gpu/mem_mgr/mem_desc.c             | 2 +-
+ src/nvidia/src/kernel/gpu/mem_mgr/mem_mgr.c              | 4 ++--
+ src/nvidia/src/kernel/mem_mgr/system_mem.c               | 2 +-
+ 5 files changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/src/nvidia/inc/kernel/gpu/mem_mgr/rm_page_size.h b/src/nvidia/inc/kernel/gpu/mem_mgr/rm_page_size.h
+index f25795ea..6925e1c2 100644
+--- a/src/nvidia/inc/kernel/gpu/mem_mgr/rm_page_size.h
++++ b/src/nvidia/inc/kernel/gpu/mem_mgr/rm_page_size.h
+@@ -39,6 +39,15 @@
+ #define RM_PAGE_SIZE_64K     (64 * 1024)
+ #define RM_PAGE_SIZE_128K    (128 * 1024)
+ #define RM_PAGE_MASK         0x0FFF
++
++//
++// GPU page size to use for memory carved at the OS page size. An OS page size
++// below the big page size (16K on some arm64 and loongarch kernels) isn't a size
++// the GMMU can map, so such memory is mapped with small pages.
++//
++#define RM_OS_PAGE_SIZE_TO_GPU(osPageSize) \
++    (((osPageSize) < RM_PAGE_SIZE_64K) ? (NvU64)RM_PAGE_SIZE : (NvU64)(osPageSize))
++
+ #define RM_PAGE_SHIFT        12
+ #define RM_PAGE_SHIFT_64K    16
+ #define RM_PAGE_SHIFT_128K   17
+diff --git a/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/mem_mgr_gm107.c b/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/mem_mgr_gm107.c
+index 3a254a74..8619051d 100644
+--- a/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/mem_mgr_gm107.c
++++ b/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/mem_mgr_gm107.c
+@@ -1262,7 +1262,7 @@ memmgrSetMemDescPageSize_GM107
+ 
+     if (ADDR_SYSMEM == addrSpace)
+     {
+-        NvU64 sysmemPageSize = osGetPageSize();
++        NvU64 sysmemPageSize = RM_OS_PAGE_SIZE_TO_GPU(osGetPageSize());
+         RmPhysAddr physAddr = memdescGetPte(pMemDesc, addressTranslation, 0);
+         switch (pageSizeAttr)
+         {
+diff --git a/src/nvidia/src/kernel/gpu/mem_mgr/mem_desc.c b/src/nvidia/src/kernel/gpu/mem_mgr/mem_desc.c
+index c7bdccb2..b0080868 100644
+--- a/src/nvidia/src/kernel/gpu/mem_mgr/mem_desc.c
++++ b/src/nvidia/src/kernel/gpu/mem_mgr/mem_desc.c
+@@ -4804,7 +4804,7 @@ NvU64 memdescGetAdjustedPageSize(
+         if (pageSize == 0)
+         {
+             pageSize = osGetPageSize();
+-            memdescSetPageSize(pMemDesc, AT_GPU, pageSize);
++            memdescSetPageSize(pMemDesc, AT_GPU, RM_OS_PAGE_SIZE_TO_GPU(pageSize));
+         }
+     }
+ 
+diff --git a/src/nvidia/src/kernel/gpu/mem_mgr/mem_mgr.c b/src/nvidia/src/kernel/gpu/mem_mgr/mem_mgr.c
+index 73bebf97..ed34b6d9 100644
+--- a/src/nvidia/src/kernel/gpu/mem_mgr/mem_mgr.c
++++ b/src/nvidia/src/kernel/gpu/mem_mgr/mem_mgr.c
+@@ -1736,7 +1736,7 @@ _memmgrPickDefaultSysmemPageSize
+     // If large pages are not supported, return the OS page size.
+     if (!bDefaultAllowLargePages)
+     {
+-        return osGetPageSize();
++        return RM_OS_PAGE_SIZE_TO_GPU(osGetPageSize());
+     }
+ 
+     // Choose largest page size that fits the allocation
+@@ -1754,7 +1754,7 @@ _memmgrPickDefaultSysmemPageSize
+     }
+     else
+     {
+-        pageSize = osGetPageSize();
++        pageSize = RM_OS_PAGE_SIZE_TO_GPU(osGetPageSize());
+     }
+ 
+     return pageSize;
+diff --git a/src/nvidia/src/kernel/mem_mgr/system_mem.c b/src/nvidia/src/kernel/mem_mgr/system_mem.c
+index 4fe65a18..09267fbd 100644
+--- a/src/nvidia/src/kernel/mem_mgr/system_mem.c
++++ b/src/nvidia/src/kernel/mem_mgr/system_mem.c
+@@ -112,7 +112,7 @@ _sysmemGetNextSmallestPageSize
+     }
+ 
+     // Reached smallest page size. Return 0 to stop retrying.
+-    if (pageSize == osGetPageSize())
++    if (pageSize <= osGetPageSize())
+     {
+         return 0ULL;
+     }

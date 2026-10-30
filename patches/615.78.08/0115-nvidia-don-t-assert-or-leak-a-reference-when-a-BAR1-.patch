@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lain <atericparker@gmail.com>
+Date: Fri, 30 Oct 2026 12:37:25 +0100
+Subject: [PATCH] nvidia: don't assert or leak a reference when a BAR1 mapping
+ fails
+
+Running out of BAR1 is an expected failure without Resizable BAR, for example with
+media decoding on Wayland, but reusemappingdbMap() and kbusMapFbAperture_GM107() logged
+it as an assertion each time. Log it at INFO instead. A failed allocation of
+the reused range array also left the entry's reference count raised and the memory area
+with a range count but no ranges: take the reference last and start from an empty area.
+
+The rest of upstream PR 1426 (atericparker). Its contiguous mapping fix and map cleanup
+are in this branch in other forms, and its tests aren't taken.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/kernel/gpu/bus/arch/maxwell/kern_bus_gm107.c     | 2 +-
+ src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c   | 9 ++++++---
+ 2 files changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm107.c b/src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm107.c
+index 79df5d84..8522a218 100644
+--- a/src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm107.c
++++ b/src/nvidia/src/kernel/gpu/bus/arch/maxwell/kern_bus_gm107.c
+@@ -3181,7 +3181,7 @@ kbusMapFbAperture_GM107
+         }
+     }
+ 
+-    NV_ASSERT_OK_OR_GOTO(rmStatus, reusemappingdbMap(&pBar1VaInfo->reuseDb, pMappingType,
++    NV_CHECK_OK_OR_GOTO(rmStatus, LEVEL_INFO, reusemappingdbMap(&pBar1VaInfo->reuseDb, pMappingType,
+             mapRange, pMemArea, cachingFlags), err_mapping);
+ 
+     pMappingType->refCount++;
+diff --git a/src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c b/src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c
+index 8295c7fe..e18c377a 100644
+--- a/src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c
++++ b/src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c
+@@ -234,6 +234,9 @@ reusemappingdbMap
+     NvBool bAddToMap = !bNoReuse;
+     NV_STATUS status = NV_OK;
+ 
++    pMemoryArea->pRanges = NULL;
++    pMemoryArea->numRanges = 0;
++
+     // TODO: Remove when we support multi-range reuse
+     NV_ASSERT_OR_RETURN( bSingleRange || bNoReuse, NV_ERR_NOT_SUPPORTED);
+ 
+@@ -271,11 +274,11 @@ reusemappingdbMap
+                     // Only return exact match
+                     if (physRange.start == range.start && physRange.size == range.size)
+                     {
+-                        pMemoryArea->numRanges = 1;
+-                        pEntry->refCount++;
+                         pMemoryArea->pRanges = PORT_ALLOC(pReuseMappingDb->pAllocator, sizeof(MemoryRange));
+                         NV_ASSERT_OR_RETURN(pMemoryArea->pRanges != NULL, NV_ERR_NO_MEMORY);
+                         pMemoryArea->pRanges[0] = mrangeMake(virtualOffset, range.size);
++                        pMemoryArea->numRanges = 1;
++                        pEntry->refCount++;
+                         return NV_OK;
+                     }
+                 }
+@@ -296,7 +299,7 @@ reusemappingdbMap
+     token.pList = NULL;
+ 
+     // Get new mappings, added to linked list
+-    NV_ASSERT_OK_OR_GOTO(status, pReuseMappingDb->pMapCb(pReuseMappingDb->pGlobalCtx, pAllocCtx,
++    NV_CHECK_OK_OR_GOTO(status, LEVEL_INFO, pReuseMappingDb->pMapCb(pReuseMappingDb->pGlobalCtx, pAllocCtx,
+                                      range, cachingFlags, &token, _reusemappingdbAddMappingCallback), err_unmap);
+     
+     pMemoryArea->pRanges = PORT_ALLOC(pReuseMappingDb->pAllocator, sizeof(MemoryRange) * token.numNewEntries);

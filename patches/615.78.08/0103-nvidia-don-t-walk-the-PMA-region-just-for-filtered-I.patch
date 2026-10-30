@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bryant Ly <bly@coreweave.com>
+Date: Fri, 30 Oct 2026 12:30:58 +0100
+Subject: [PATCH] nvidia: don't walk the PMA region just for filtered INFO logs
+
+pmaRegionPrint() reads the state of every frame of the region to print blocks at
+LEVEL_INFO, and the messages are dropped unless RmMsg selects them. The eviction
+paths of the allocator call it for each attempt under the PMA spinlock with
+interrupts off. Return before the walk when the messages wouldn't be printed, like
+memdescPrintMemdesc() does.
+
+Upstream PR 1428 (Bryant Ly).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../mem_mgr/phys_mem_allocator/phys_mem_allocator_util.c   | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/nvidia/src/kernel/gpu/mem_mgr/phys_mem_allocator/phys_mem_allocator_util.c b/src/nvidia/src/kernel/gpu/mem_mgr/phys_mem_allocator/phys_mem_allocator_util.c
+index 9c061ced..72cdf9e6 100644
+--- a/src/nvidia/src/kernel/gpu/mem_mgr/phys_mem_allocator/phys_mem_allocator_util.c
++++ b/src/nvidia/src/kernel/gpu/mem_mgr/phys_mem_allocator/phys_mem_allocator_util.c
+@@ -131,6 +131,7 @@ pmaPrintBlockStatus(PMA_PAGESTATUS blockStatus)
+ void
+ pmaRegionPrint(PMA *pPma, PMA_REGION_DESCRIPTOR *pRegion, void *pMap)
+ {
++#if NV_PRINTF_ENABLED
+     NvU32 i;
+     PMA_PAGESTATUS currStatus, blockStatus = STATE_FREE;
+     NvU64 addrBase, addrLimit, numFrames, blockStart = 0;
+@@ -138,6 +139,11 @@ pmaRegionPrint(PMA *pPma, PMA_REGION_DESCRIPTOR *pRegion, void *pMap)
+     NV_ASSERT(pRegion != NULL);
+     NV_ASSERT(pMap != NULL);
+ 
++    if (DBG_RMMSG_CHECK(LEVEL_INFO) == 0)
++    {
++        return;
++    }
++
+     (void)blockStart; //Silence the compiler
+ 
+     addrBase = pRegion->base;
+@@ -167,6 +173,7 @@ pmaRegionPrint(PMA *pPma, PMA_REGION_DESCRIPTOR *pRegion, void *pMap)
+     }
+     NV_PRINTF(LEVEL_INFO, "%8llx..%8x: ", blockStart, i-1);
+     pmaPrintBlockStatus(blockStatus);
++#endif // NV_PRINTF_ENABLED
+ }
+ 
+ NvBool

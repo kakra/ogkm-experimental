@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Elaheh Dehghani <edehghani@microsoft.com>
+Date: Fri, 30 Oct 2026 12:46:57 +0100
+Subject: [PATCH] kernel-open: allow overriding MLNX_OFED_KERNEL_DIR and
+ KBUILD_EXTRA_SYMBOLS
+
+MOFED installed outside /usr/src/ofa_kernel couldn't be used to build nvidia-peermem.
+Honour MLNX_OFED_KERNEL_DIR and pass KBUILD_EXTRA_SYMBOLS through to Kbuild.
+
+Upstream PR 1441 (Elaheh Dehghani), which only changed the conftest. Also take the
+directory in nvidia-peermem.Kbuild, otherwise the conftest would find the symbols
+and the build would then not get the include path.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/Makefile                             | 3 +++
+ kernel-open/conftest.sh                          | 2 +-
+ kernel-open/nvidia-peermem/nvidia-peermem.Kbuild | 2 +-
+ 3 files changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/Makefile b/kernel-open/Makefile
+index 341d55ba..ff6ab246 100644
+--- a/kernel-open/Makefile
++++ b/kernel-open/Makefile
+@@ -107,6 +107,9 @@ else
+   KBUILD_PARAMS += NV_KERNEL_MODULES="$(NV_KERNEL_MODULES)"
+   KBUILD_PARAMS += INSTALL_MOD_DIR="$(INSTALL_MOD_DIR)"
+   KBUILD_PARAMS += NV_SPECTRE_V2=$(SPECTRE_V2_RETPOLINE)
++  ifneq ($(KBUILD_EXTRA_SYMBOLS),)
++    KBUILD_PARAMS += KBUILD_EXTRA_SYMBOLS="$(KBUILD_EXTRA_SYMBOLS)"
++  endif
+ 
+   export ORIG_PAHOLE := $(PAHOLE)
+ 
+diff --git a/kernel-open/conftest.sh b/kernel-open/conftest.sh
+index d0a39b80..9f4f5e4d 100755
+--- a/kernel-open/conftest.sh
++++ b/kernel-open/conftest.sh
+@@ -3535,7 +3535,7 @@ compile_test() {
+             # Note: KERNELRELEASE and ARCH are defined by Kbuild and automatically
+             # passed down to conftest.sh as env vars.
+ 
+-            MLNX_OFED_KERNEL_DIR=/usr/src/ofa_kernel
++            MLNX_OFED_KERNEL_DIR="${MLNX_OFED_KERNEL_DIR:-/usr/src/ofa_kernel}"
+             VAR_DKMS_SOURCES_DIR=$(test -d /var/lib/dkms/mlnx-ofed-kernel &&
+                                    ls -d /var/lib/dkms/mlnx-ofed-kernel/*/build 2>/dev/null)
+ 
+diff --git a/kernel-open/nvidia-peermem/nvidia-peermem.Kbuild b/kernel-open/nvidia-peermem/nvidia-peermem.Kbuild
+index a12128f1..585f4267 100644
+--- a/kernel-open/nvidia-peermem/nvidia-peermem.Kbuild
++++ b/kernel-open/nvidia-peermem/nvidia-peermem.Kbuild
+@@ -42,7 +42,7 @@ else ifeq ($(ARCH), x86)
+ else
+     OFA_ARCH := $(ARCH)
+ endif
+-OFA_DIR := /usr/src/ofa_kernel
++OFA_DIR := $(if $(MLNX_OFED_KERNEL_DIR),$(MLNX_OFED_KERNEL_DIR),/usr/src/ofa_kernel)
+ OFA_DKMS_DIR := $(OFA_DIR)-dkms
+ OFA_CANDIDATES = $(OFA_DKMS_DIR)/$(OFA_ARCH)/$(KERNELRELEASE) $(OFA_DIR)/$(OFA_ARCH)/$(KERNELRELEASE) $(OFA_DIR)/$(KERNELRELEASE) $(OFA_DIR)/default
+ MLNX_OFED_KERNEL := $(firstword $(wildcard $(OFA_CANDIDATES)))

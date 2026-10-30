@@ -1,0 +1,775 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Boukje Maria Darago <ik.ben@bouk.je>
+Date: Fri, 30 Oct 2026 12:49:40 +0100
+Subject: [PATCH] nvidia-drm: expose opt-in per-connector MST DDC adapters
+
+An MST chain can expose the physical connector's I2C path without per-display adapters
+for the downstream sinks, so ddcutil and KDE PowerDevil can't address each monitor. With
+nvidia_drm.mst_ddc=1, register an adapter named DPMST per MST connector and route its
+transfers through NVKMS to the DP library's remote I2C sideband messages.
+
+Messages are posted asynchronously: KAPI polls outside the NVKMS and PM locks, so a slow
+monitor doesn't block display updates. Requests belong to the DP device and are identified
+by unique tokens, callbacks detach the message on completion and failure, and timeouts
+cancel it.
+
+Also fixes RemoteI2cReadMessage::parseResponseAck() in the DP library for everyone: the
+reply length from the branch device wasn't bounded before filling the 128 byte buffer.
+
+Upstream PR 1400 (Boukje Maria Darago), both commits, on top of the
+NVKMS_IOCTL_GET_NEXT_EVENTS addition in this branch. Off by default. Hotplug is known to be
+incomplete according to the PR. Not tested here, no MST hardware.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nvkms-api-types.h      |  11 ++
+ kernel-open/common/inc/nvkms-kapi.h           |   5 +
+ kernel-open/nvidia-drm/nvidia-drm-connector.c | 144 +++++++++++++++++-
+ kernel-open/nvidia-drm/nvidia-drm-connector.h |  10 +-
+ kernel-open/nvidia-drm/nvidia-drm-encoder.c   |   2 +-
+ src/common/displayport/inc/dp_connector.h     |   7 +
+ src/common/displayport/inc/dp_deviceimpl.h    |  10 ++
+ src/common/displayport/src/dp_deviceimpl.cpp  | 100 +++++++++++-
+ .../displayport/src/dp_messagecodings.cpp     |   3 +
+ src/nvidia-modeset/include/dp/nvdp-device.h   |   3 +
+ .../interface/nvkms-api-types.h               |  11 ++
+ src/nvidia-modeset/interface/nvkms-api.h      |  25 +++
+ .../kapi/interface/nvkms-kapi.h               |   5 +
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      |  49 ++++++
+ src/nvidia-modeset/src/dp/nvdp-device.cpp     |  35 +++++
+ src/nvidia-modeset/src/nvkms.c                |  26 ++++
+ 16 files changed, 440 insertions(+), 6 deletions(-)
+
+diff --git a/kernel-open/common/inc/nvkms-api-types.h b/kernel-open/common/inc/nvkms-api-types.h
+index 50b7a14a..b57fca96 100644
+--- a/kernel-open/common/inc/nvkms-api-types.h
++++ b/kernel-open/common/inc/nvkms-api-types.h
+@@ -823,4 +823,15 @@ struct NvKmsHdmiVsifMetadata {
+     NvU8 payload[NVKMS_HDMI_VSIF_METADATA_MAX_PAYLOAD_SIZE];
+ };
+ 
++/* One MST I2C write, read, or combined write/read transaction. */
++#define NVKMS_MST_I2C_MAX_DATA 128
++struct NvKmsMstI2cTransfer {
++    NvU8 writeAddress; /* 7-bit address */
++    NvU8 readAddress;
++    NvU16 writeSize;
++    NvU16 readSize;
++    NvU8 writeData[NVKMS_MST_I2C_MAX_DATA];
++    NvU8 readData[NVKMS_MST_I2C_MAX_DATA];
++};
++
+ #endif /* NVKMS_API_TYPES_H */
+diff --git a/kernel-open/common/inc/nvkms-kapi.h b/kernel-open/common/inc/nvkms-kapi.h
+index 1aec355b..7e22d796 100644
+--- a/kernel-open/common/inc/nvkms-kapi.h
++++ b/kernel-open/common/inc/nvkms-kapi.h
+@@ -1749,6 +1749,11 @@ struct NvKmsKapiFunctionsTable {
+         NvU32 *pMaxBpc,
+         NvBool *pLimited
+     );
++
++    /* One bounded MST I2C transfer; serialized with modesetting and PM. */
++    NvBool (*mstI2cTransfer)(struct NvKmsKapiDevice *device,
++                             NvKmsKapiDisplay display,
++                             struct NvKmsMstI2cTransfer *transfer);
+ };
+ 
+ /** @} */
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index 0bb3cb4e..9b1b7648 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -102,11 +102,140 @@ nv_drm_connector_translate_dither_mode(enum nv_drm_dithering_mode mode,
+ }
+ #endif /* NV_DRM_CONNECTOR_ATTACH_HDR_OUTPUT_METADATA_PROPERTY_PRESENT */
+ 
++#if IS_ENABLED(CONFIG_I2C)
++/* Experimental until hardware hotplug/suspend validation is complete. */
++static bool nv_drm_mst_ddc;
++module_param_named(mst_ddc, nv_drm_mst_ddc, bool, 0444);
++MODULE_PARM_DESC(mst_ddc, "Expose experimental per-display MST DDC adapters");
++
++static int nv_drm_mst_ddc_xfer(struct i2c_adapter *adapter,
++                              struct i2c_msg *msgs, int num)
++{
++    struct nv_drm_connector *nv_connector =
++        container_of(adapter, struct nv_drm_connector, mst_ddc);
++    struct nv_drm_device *nv_dev = to_nv_device(nv_connector->base.dev);
++    struct NvKmsMstI2cTransfer transfer = { };
++    const unsigned int supported_i2c_flags = I2C_M_RD
++#if defined(I2C_M_DMA_SAFE)
++        | I2C_M_DMA_SAFE
++#endif
++        ;
++    const struct i2c_msg *write = NULL;
++    struct i2c_msg *read = NULL;
++    int i;
++
++    if (num < 1 || num > 2) {
++        return -EOPNOTSUPP;
++    }
++    for (i = 0; i < num; i++) {
++        if ((msgs[i].flags & ~supported_i2c_flags) ||
++            msgs[i].addr > 0x7f || msgs[i].len == 0 ||
++            msgs[i].len > NVKMS_MST_I2C_MAX_DATA) {
++            return -EOPNOTSUPP;
++        }
++    }
++    if (num == 2) {
++        if ((msgs[0].flags & I2C_M_RD) || !(msgs[1].flags & I2C_M_RD)) {
++            return -EOPNOTSUPP;
++        }
++        write = &msgs[0];
++        read = &msgs[1];
++    } else if (msgs[0].flags & I2C_M_RD) {
++        read = &msgs[0];
++    } else {
++        write = &msgs[0];
++    }
++    if (write != NULL) {
++        transfer.writeAddress = write->addr;
++        transfer.writeSize = write->len;
++        memcpy(transfer.writeData, write->buf, write->len);
++    }
++    if (read != NULL) {
++        transfer.readAddress = read->addr;
++        transfer.readSize = read->len;
++    }
++    if (!nvKms->mstI2cTransfer(nv_dev->pDevice,
++                              READ_ONCE(nv_connector->mst_ddc_display), &transfer)) {
++        return -EIO;
++    }
++    if (read != NULL) {
++        memcpy(read->buf, transfer.readData, read->len);
++    }
++    return num;
++}
++
++static u32 nv_drm_mst_ddc_functionality(struct i2c_adapter *adapter)
++{
++    return I2C_FUNC_I2C | I2C_FUNC_SMBUS_BYTE | I2C_FUNC_SMBUS_BYTE_DATA |
++           I2C_FUNC_SMBUS_WORD_DATA | I2C_FUNC_SMBUS_I2C_BLOCK;
++}
++
++static const struct i2c_algorithm nv_drm_mst_ddc_algo = {
++    .master_xfer = nv_drm_mst_ddc_xfer,
++    .functionality = nv_drm_mst_ddc_functionality,
++};
++
++static const struct i2c_adapter_quirks nv_drm_mst_ddc_quirks = {
++    .flags = I2C_AQ_COMB_WRITE_THEN_READ
++#if defined(I2C_AQ_NO_ZERO_LEN)
++        | I2C_AQ_NO_ZERO_LEN
++#endif
++        ,
++    .max_num_msgs = 2,
++    .max_write_len = NVKMS_MST_I2C_MAX_DATA,
++    .max_read_len = NVKMS_MST_I2C_MAX_DATA,
++    .max_comb_1st_msg_len = NVKMS_MST_I2C_MAX_DATA,
++    .max_comb_2nd_msg_len = NVKMS_MST_I2C_MAX_DATA,
++};
++
++static void nv_drm_mst_ddc_init(struct nv_drm_connector *nv_connector,
++                               NvU32 hDisplay)
++{
++    struct drm_connector *connector = &nv_connector->base;
++    struct i2c_adapter *adapter = &nv_connector->mst_ddc;
++    int ret;
++
++    if (!nv_drm_mst_ddc || nv_connector->type != NVKMS_CONNECTOR_TYPE_DP ||
++        nv_connector->dpAddress[0] == '\0') {
++        return;
++    }
++
++    nv_connector->mst_ddc_display = hDisplay;
++    adapter->owner = THIS_MODULE;
++    adapter->algo = &nv_drm_mst_ddc_algo;
++    adapter->quirks = &nv_drm_mst_ddc_quirks;
++    adapter->dev.parent = connector->dev->dev;
++    /* Match the DRM MST adapter name recognized by existing DDC clients. */
++    snprintf(adapter->name, sizeof(adapter->name), "DPMST");
++    ret = i2c_add_adapter(adapter);
++    if (ret != 0) {
++        NV_DRM_LOG_ERR("Failed to register MST DDC adapter: %d", ret);
++        return;
++    }
++    nv_connector->mst_ddc_registered = true;
++    connector->ddc = adapter;
++}
++
++static void nv_drm_mst_ddc_fini(struct nv_drm_connector *nv_connector)
++{
++    if (nv_connector->mst_ddc_registered) {
++        i2c_del_adapter(&nv_connector->mst_ddc);
++        nv_connector->mst_ddc_registered = false;
++        nv_connector->base.ddc = NULL;
++    }
++}
++#else
++static void nv_drm_mst_ddc_init(struct nv_drm_connector *nv_connector,
++                               NvU32 hDisplay) { }
++static void nv_drm_mst_ddc_fini(struct nv_drm_connector *nv_connector) { }
++#endif
++
+ static void nv_drm_connector_destroy(struct drm_connector *connector)
+ {
+     struct nv_drm_connector *nv_connector = to_nv_connector(connector);
+ 
+     drm_connector_unregister(connector);
++    nv_drm_mst_ddc_fini(nv_connector);
+ 
+     drm_connector_cleanup(connector);
+ 
+@@ -1164,7 +1293,8 @@ static struct drm_connector*
+ nv_drm_connector_new(struct drm_device *dev,
+                      NvU32 physicalIndex, NvKmsConnectorType type,
+                      NvBool internal,
+-                     char dpAddress[NVKMS_DP_ADDRESS_STRING_LENGTH])
++                     char dpAddress[NVKMS_DP_ADDRESS_STRING_LENGTH],
++                     NvU32 hDisplay)
+ {
+     struct nv_drm_device *nv_dev = to_nv_device(dev);
+     struct nv_drm_connector *nv_connector = NULL;
+@@ -1341,6 +1471,8 @@ nv_drm_connector_new(struct drm_device *dev,
+                                    NV_DRM_DITHERING_MODE_AUTO);
+     }
+ 
++    nv_drm_mst_ddc_init(nv_connector, hDisplay);
++
+     /* Register connector with DRM subsystem */
+ 
+     nv_drm_connector_set_mst_path(nv_connector);
+@@ -1358,6 +1490,7 @@ nv_drm_connector_new(struct drm_device *dev,
+     return &nv_connector->base;
+ 
+ failed_connector_register:
++    nv_drm_mst_ddc_fini(nv_connector);
+     drm_connector_cleanup(&nv_connector->base);
+ 
+ failed_connector_init:
+@@ -1378,7 +1511,8 @@ struct drm_connector*
+ nv_drm_get_connector(struct drm_device *dev,
+                      NvU32 physicalIndex, NvKmsConnectorType type,
+                      NvBool internal,
+-                     char dpAddress[NVKMS_DP_ADDRESS_STRING_LENGTH])
++                     char dpAddress[NVKMS_DP_ADDRESS_STRING_LENGTH],
++                     NvU32 hDisplay)
+ {
+     struct drm_connector *connector = NULL;
+     struct drm_connector_list_iter conn_iter;
+@@ -1393,6 +1527,10 @@ nv_drm_get_connector(struct drm_device *dev,
+                    nv_connector->internal != internal);
+ 
+             if (strcmp(nv_connector->dpAddress, dpAddress) == 0) {
++#if IS_ENABLED(CONFIG_I2C)
++                /* A reused connector can be associated with a new display. */
++                WRITE_ONCE(nv_connector->mst_ddc_display, hDisplay);
++#endif
+                 goto done;
+             }
+         }
+@@ -1405,7 +1543,7 @@ done:
+     if (!connector) {
+         connector = nv_drm_connector_new(dev,
+                                          physicalIndex, type, internal,
+-                                         dpAddress);
++                                         dpAddress, hDisplay);
+     }
+ 
+     return connector;
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.h b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+index 1f67e248..4ff78005 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+@@ -33,6 +33,7 @@
+ 
+ #include <drm/drm_connector.h>
+ #include <drm/drm_modes.h>
++#include <linux/i2c.h>
+ 
+ #include <linux/spinlock.h>
+ 
+@@ -83,6 +84,12 @@ struct nv_drm_connector {
+     unsigned int num_native_modes;
+     bool native_mode_preferred;
+ 
++#if IS_ENABLED(CONFIG_I2C)
++    struct i2c_adapter mst_ddc;
++    NvU32 mst_ddc_display;
++    bool mst_ddc_registered;
++#endif
++
+     struct drm_connector base;
+ };
+ 
+@@ -137,7 +144,8 @@ struct drm_connector*
+ nv_drm_get_connector(struct drm_device *dev,
+                      NvU32 physicalIndex, NvKmsConnectorType type,
+                      NvBool internal,
+-                     char dpAddress[NVKMS_DP_ADDRESS_STRING_LENGTH]);
++                     char dpAddress[NVKMS_DP_ADDRESS_STRING_LENGTH],
++                     NvU32 hDisplay);
+ 
+ bool nv_drm_connector_revoke_permissions(struct drm_device *dev,
+                                          struct nv_drm_connector *nv_connector);
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-encoder.c b/kernel-open/nvidia-drm/nvidia-drm-encoder.c
+index 7e395c2d..fcbe277e 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-encoder.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-encoder.c
+@@ -338,7 +338,7 @@ nv_drm_add_encoder(struct drm_device *dev, NvKmsKapiDisplay hDisplay)
+         nv_drm_get_connector(dev,
+                                  connectorInfo->physicalIndex,
+                                  connectorInfo->type,
+-                                 displayInfo->internal, displayInfo->dpAddress);
++                                 displayInfo->internal, displayInfo->dpAddress, hDisplay);
+ 
+     if (IS_ERR(connector)) {
+         ret = PTR_ERR(connector);
+diff --git a/src/common/displayport/inc/dp_connector.h b/src/common/displayport/inc/dp_connector.h
+index 9ca5ffd3..a1c6124a 100644
+--- a/src/common/displayport/inc/dp_connector.h
++++ b/src/common/displayport/inc/dp_connector.h
+@@ -326,6 +326,13 @@ namespace DisplayPort
+         // the MOT bit. It is needed for some special cases where the MOT bit shouldn't
+         // be set but some customers need it to please their monitors.
+         //
++        // Start and poll under the caller's lock; wait outside that lock.
++        virtual bool startMstI2cTransfer(NvU64 id, unsigned writeAddress,
++                                        NvU8 *writeData, unsigned writeSize,
++                                        unsigned readAddress, unsigned readSize) = 0;
++        virtual bool pollMstI2cTransfer(NvU64 id, NvU8 *readData,
++                                       unsigned readSize, bool *complete) = 0;
++        virtual void cancelMstI2cTransfer(NvU64 id) = 0;
+         virtual bool getI2cData(unsigned offset, NvU8 * buffer, unsigned sizeRequested, unsigned * sizeCompleted, bool bForceMot = false) = 0;
+         virtual bool setI2cData(unsigned offset, NvU8 * buffer, unsigned sizeRequested, unsigned * sizeCompleted, bool bForceMot = false) = 0;
+ 
+diff --git a/src/common/displayport/inc/dp_deviceimpl.h b/src/common/displayport/inc/dp_deviceimpl.h
+index da7e16a8..98e9899c 100644
+--- a/src/common/displayport/inc/dp_deviceimpl.h
++++ b/src/common/displayport/inc/dp_deviceimpl.h
+@@ -135,6 +135,9 @@ namespace DisplayPort
+         void                inferPathConstraints();
+ 
+ 
++        struct MstI2cRequest;
++        MstI2cRequest   * mstI2cRequest;
++
+         DeviceImpl      * parent;               // Upstream parent device
+         DeviceImpl      * children[16];
+         PortMap         portMap;
+@@ -480,6 +483,13 @@ namespace DisplayPort
+         // the MOT bit. It is needed for some special cases where the MOT bit shouldn't
+         // be set but some customers need it to please their monitors.
+         //
++        // Start and poll under the caller's lock; wait outside that lock.
++        virtual bool startMstI2cTransfer(NvU64 id, unsigned writeAddress,
++                                        NvU8 *writeData, unsigned writeSize,
++                                        unsigned readAddress, unsigned readSize);
++        virtual bool pollMstI2cTransfer(NvU64 id, NvU8 *readData,
++                                       unsigned readSize, bool *complete);
++        virtual void cancelMstI2cTransfer(NvU64 id);
+         virtual bool getI2cData(unsigned offset, NvU8 * buffer, unsigned sizeRequested, unsigned * sizeCompleted, bool bForceMot = false);
+         virtual bool setI2cData(unsigned offset, NvU8 * buffer, unsigned sizeRequested, unsigned * sizeCompleted, bool bForceMot = false);
+         virtual bool getRawEpr(unsigned * totalEpr, unsigned * freeEpr, rawEprState eprState);
+diff --git a/src/common/displayport/src/dp_deviceimpl.cpp b/src/common/displayport/src/dp_deviceimpl.cpp
+index db9be88d..61f6a7f6 100644
+--- a/src/common/displayport/src/dp_deviceimpl.cpp
++++ b/src/common/displayport/src/dp_deviceimpl.cpp
+@@ -36,6 +36,41 @@
+ #include "ctrl/ctrl0073/ctrl0073dp.h"
+ using namespace DisplayPort;
+ 
++// Owned by DeviceImpl, never by the waiting KAPI caller. All accesses and
++// callbacks run under the NVKMS lock. Detach messages in both callbacks so a
++// completed request cannot retain a destroyed/replaced message manager.
++struct DeviceImpl::MstI2cRequest : public virtual Object, public GenericMessageCompletion
++{
++    NvU64 id;
++    unsigned readSize;
++    NvU8 data[REMOTE_READ_BUFFER_SIZE];
++    RemoteI2cReadMessage read;
++    RemoteI2cWriteMessage write;
++
++    MstI2cRequest(NvU64 id, unsigned readSize) : id(id), readSize(readSize) { }
++
++    virtual void messageFailed(MessageManager::Message *from, NakData *nak)
++    {
++        GenericMessageCompletion::messageFailed(from, nak);
++        from->clear();
++    }
++
++    virtual void messageCompleted(MessageManager::Message *from)
++    {
++        GenericMessageCompletion::messageCompleted(from);
++        if (readSize != 0) {
++            unsigned received;
++            unsigned char *reply = read.replyGetI2CData(&received);
++            if (received != readSize) {
++                failed = true;
++            } else {
++                dpMemCopy(data, reply, received);
++            }
++        }
++        from->clear();
++    }
++};
++
+ bool DeviceImpl::isMustDisconnect()
+ {
+     //
+@@ -51,6 +86,9 @@ bool DeviceImpl::isMustDisconnect()
+ 
+ DeviceImpl::~DeviceImpl()
+ {
++    delete mstI2cRequest;
++    mstI2cRequest = NULL;
++
+     if (isDeviceHDCPDetectionAlive && deviceHDCPDetection)
+     {
+         delete deviceHDCPDetection;
+@@ -79,7 +117,8 @@ DeviceImpl::~DeviceImpl()
+ 
+ 
+ DeviceImpl::DeviceImpl(DPCDHAL * hal, ConnectorImpl * connector, DeviceImpl * parent)
+-    : parent(parent),
++    : mstI2cRequest(NULL),
++      parent(parent),
+       hal(hal),
+       activeGroup(0),
+       connector(connector),
+@@ -225,6 +264,65 @@ bool DeviceImpl::isPendingBandwidthChange()
+     return shadow.highestAssessedLC != connector->highestAssessedLC;
+ }
+ 
++bool DeviceImpl::startMstI2cTransfer(NvU64 id, unsigned writeAddress,
++                                      NvU8 *writeData, unsigned writeSize,
++                                      unsigned readAddress, unsigned readSize)
++{
++    if (id == 0 || mstI2cRequest != NULL || !plugged || isZombie() ||
++        address.size() < 2 || connector == NULL ||
++        connector->messageManager == NULL ||
++        writeAddress > 0x7f || readAddress > 0x7f ||
++        writeSize > 255 || readSize > REMOTE_READ_BUFFER_SIZE ||
++        (writeSize == 0 && readSize == 0) ||
++        (writeSize != 0 && writeData == NULL)) {
++        return false;
++    }
++
++    mstI2cRequest = new MstI2cRequest(id, readSize);
++    if (mstI2cRequest == NULL) {
++        return false;
++    }
++    if (readSize != 0) {
++        I2cWriteTransaction write(writeAddress, writeSize, writeData, true);
++        mstI2cRequest->read.set(address.parent(), writeSize != 0 ? 1 : 0,
++                              address.tail(), &write, readAddress, readSize);
++        connector->messageManager->post(&mstI2cRequest->read, mstI2cRequest);
++    } else {
++        mstI2cRequest->write.set(address.parent(), address.tail(), writeAddress,
++                                writeSize, writeData);
++        connector->messageManager->post(&mstI2cRequest->write, mstI2cRequest);
++    }
++    return true;
++}
++
++bool DeviceImpl::pollMstI2cTransfer(NvU64 id, NvU8 *readData,
++                                     unsigned readSize, bool *complete)
++{
++    *complete = false;
++    if (mstI2cRequest == NULL || mstI2cRequest->id != id) {
++        return false;
++    }
++    if (!mstI2cRequest->completed) {
++        return true;
++    }
++    bool success = !mstI2cRequest->failed &&
++                   readSize == mstI2cRequest->readSize;
++    if (success && readSize != 0) {
++        dpMemCopy(readData, mstI2cRequest->data, readSize);
++    }
++    *complete = true;
++    cancelMstI2cTransfer(id);
++    return success;
++}
++
++void DeviceImpl::cancelMstI2cTransfer(NvU64 id)
++{
++    if (mstI2cRequest != NULL && mstI2cRequest->id == id) {
++        delete mstI2cRequest;
++        mstI2cRequest = NULL;
++    }
++}
++
+ bool DeviceImpl::getI2cData(unsigned offset, NvU8 * buffer, unsigned sizeRequested, unsigned * sizeCompleted, bool bForceMot)
+ {
+     unsigned dataCompleted, sizeRemaining;
+diff --git a/src/common/displayport/src/dp_messagecodings.cpp b/src/common/displayport/src/dp_messagecodings.cpp
+index 433b5e3f..6115408c 100644
+--- a/src/common/displayport/src/dp_messagecodings.cpp
++++ b/src/common/displayport/src/dp_messagecodings.cpp
+@@ -564,6 +564,9 @@ ParseResponseStatus RemoteI2cReadMessage::parseResponseAck(EncodedMessage * mess
+     reader->readOrDefault(4 /*zeroes*/, 0);
+     reply.portNumber = reader->readOrDefault(4 /*Port_Number*/, 0xF);
+     reply.numBytesReadI2C = reader->readOrDefault(8 /*Num_Of_Bytes_Read*/, 0x0);
++    if (reply.numBytesReadI2C > sizeof(reply.readData))
++        return ParseResponseWrong;
++
+     for (unsigned i=0; i<reply.numBytesReadI2C; i++)
+     {
+         reply.readData[i] = (NvU8)reader->readOrDefault(8 /*data*/, 0x0);
+diff --git a/src/nvidia-modeset/include/dp/nvdp-device.h b/src/nvidia-modeset/include/dp/nvdp-device.h
+index 1e0c37c3..0a2895a8 100644
+--- a/src/nvidia-modeset/include/dp/nvdp-device.h
++++ b/src/nvidia-modeset/include/dp/nvdp-device.h
+@@ -30,6 +30,9 @@
+ extern "C" {
+ #endif
+ 
++NvBool nvDPMstI2cTransfer(const NVDpyEvoRec *pDpyEvo,
++                           struct NvKmsMstI2cTransferParams *params);
++
+ void nvDPDeviceSetPowerState(NVDpyEvoPtr pDpyEvo, NvBool on);
+ unsigned int nvDPGetEDIDSize(const NVDpyEvoRec *pDpyEvo);
+ NvBool nvDPGetEDID(const NVDpyEvoRec *pDpyEvo, void *buffer, unsigned int size);
+diff --git a/src/nvidia-modeset/interface/nvkms-api-types.h b/src/nvidia-modeset/interface/nvkms-api-types.h
+index 50b7a14a..b57fca96 100644
+--- a/src/nvidia-modeset/interface/nvkms-api-types.h
++++ b/src/nvidia-modeset/interface/nvkms-api-types.h
+@@ -823,4 +823,15 @@ struct NvKmsHdmiVsifMetadata {
+     NvU8 payload[NVKMS_HDMI_VSIF_METADATA_MAX_PAYLOAD_SIZE];
+ };
+ 
++/* One MST I2C write, read, or combined write/read transaction. */
++#define NVKMS_MST_I2C_MAX_DATA 128
++struct NvKmsMstI2cTransfer {
++    NvU8 writeAddress; /* 7-bit address */
++    NvU8 readAddress;
++    NvU16 writeSize;
++    NvU16 readSize;
++    NvU8 writeData[NVKMS_MST_I2C_MAX_DATA];
++    NvU8 readData[NVKMS_MST_I2C_MAX_DATA];
++};
++
+ #endif /* NVKMS_API_TYPES_H */
+diff --git a/src/nvidia-modeset/interface/nvkms-api.h b/src/nvidia-modeset/interface/nvkms-api.h
+index d0c08848..cd245ae9 100644
+--- a/src/nvidia-modeset/interface/nvkms-api.h
++++ b/src/nvidia-modeset/interface/nvkms-api.h
+@@ -274,6 +274,7 @@ enum NvKmsIoctlCommand {
+     NVKMS_IOCTL_REGISTER_VBLANK_INTR_CALLBACK,
+     NVKMS_IOCTL_UNREGISTER_VBLANK_INTR_CALLBACK,
+     NVKMS_IOCTL_GET_NEXT_EVENTS,
++    NVKMS_IOCTL_MST_I2C_TRANSFER,
+ };
+ 
+ 
+@@ -4535,4 +4536,28 @@ struct NvKmsUnregisterVblankIntrCallbackParams {
+ };
+ 
+ 
++/* Each phase holds the normal NVKMS ioctl/PM locks; waits do not. */
++enum NvKmsMstI2cOperation {
++    NVKMS_MST_I2C_START,
++    NVKMS_MST_I2C_POLL,
++    NVKMS_MST_I2C_CANCEL,
++};
++struct NvKmsMstI2cTransferRequest {
++    enum NvKmsMstI2cOperation operation;
++    NvU64 requestId NV_ALIGN_BYTES(8);
++    NvKmsDeviceHandle deviceHandle;
++    NvKmsDispHandle dispHandle;
++    NVDpyId dpyId;
++    struct NvKmsMstI2cTransfer transfer;
++};
++struct NvKmsMstI2cTransferReply {
++    NvU64 requestId NV_ALIGN_BYTES(8);
++    NvBool complete;
++    NvU8 readData[NVKMS_MST_I2C_MAX_DATA];
++};
++struct NvKmsMstI2cTransferParams {
++    struct NvKmsMstI2cTransferRequest request;
++    struct NvKmsMstI2cTransferReply reply;
++};
++
+ #endif /* NVKMS_API_H */
+diff --git a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+index 1aec355b..7e22d796 100644
+--- a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
++++ b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+@@ -1749,6 +1749,11 @@ struct NvKmsKapiFunctionsTable {
+         NvU32 *pMaxBpc,
+         NvBool *pLimited
+     );
++
++    /* One bounded MST I2C transfer; serialized with modesetting and PM. */
++    NvBool (*mstI2cTransfer)(struct NvKmsKapiDevice *device,
++                             NvKmsKapiDisplay display,
++                             struct NvKmsMstI2cTransfer *transfer);
+ };
+ 
+ /** @} */
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index 396590b0..e7245062 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -4615,6 +4615,54 @@ done:
+ }
+ 
+ 
++static NvBool MstI2cTransfer(struct NvKmsKapiDevice *device,
++                             NvKmsKapiDisplay display,
++                             struct NvKmsMstI2cTransfer *transfer)
++{
++    struct NvKmsMstI2cTransferParams params = { };
++    NvU64 startTime;
++
++    if (device == NULL || transfer == NULL ||
++        transfer->readSize > NVKMS_MST_I2C_MAX_DATA ||
++        transfer->writeSize > NVKMS_MST_I2C_MAX_DATA) {
++        return NV_FALSE;
++    }
++    params.request.deviceHandle = device->hKmsDevice;
++    params.request.dispHandle = device->hKmsDisp;
++    params.request.dpyId = nvNvU32ToDpyId(display);
++    params.request.transfer = *transfer;
++    params.request.operation = NVKMS_MST_I2C_START;
++    if (!nvkms_ioctl_from_kapi(device->pKmsOpen, NVKMS_IOCTL_MST_I2C_TRANSFER,
++                               &params, sizeof(params))) {
++        return NV_FALSE;
++    }
++
++    params.request.requestId = params.reply.requestId;
++    params.request.operation = NVKMS_MST_I2C_POLL;
++    startTime = nvkms_get_usec();
++    do {
++        // Like connector detection, wait outside both NVKMS and PM locks.
++        // Only handles/tokens cross this boundary, never DP object pointers.
++        nvkms_usleep(1000);
++        if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
++                NVKMS_IOCTL_MST_I2C_TRANSFER, &params, sizeof(params))) {
++            break;
++        }
++        if (params.reply.complete) {
++            nvkms_memcpy(transfer->readData, params.reply.readData,
++                         transfer->readSize);
++            return NV_TRUE;
++        }
++    } while (nvkms_get_usec() - startTime < 5000000);
++
++    // Also cancel after errors: a display may still exist after disconnect.
++    // Token matching prevents cancelling a request on a reused display ID.
++    params.request.operation = NVKMS_MST_I2C_CANCEL;
++    nvkms_ioctl_from_kapi(device->pKmsOpen, NVKMS_IOCTL_MST_I2C_TRANSFER,
++                         &params, sizeof(params));
++    return NV_FALSE;
++}
++
+ NvBool nvKmsKapiGetFunctionsTableInternal
+ (
+     struct NvKmsKapiFunctionsTable *funcsTable
+@@ -4649,6 +4697,7 @@ NvBool nvKmsKapiGetFunctionsTableInternal
+ 
+     funcsTable->getDeviceResourcesInfo = GetDeviceResourcesInfo;
+     funcsTable->getDisplays            = GetDisplays;
++    funcsTable->mstI2cTransfer          = MstI2cTransfer;
+     funcsTable->getConnectorInfo       = GetConnectorInfo;
+ 
+     funcsTable->getStaticDisplayInfo   = GetStaticDisplayInfo;
+diff --git a/src/nvidia-modeset/src/dp/nvdp-device.cpp b/src/nvidia-modeset/src/dp/nvdp-device.cpp
+index 51aa6a44..6eafd96c 100644
+--- a/src/nvidia-modeset/src/dp/nvdp-device.cpp
++++ b/src/nvidia-modeset/src/dp/nvdp-device.cpp
+@@ -31,6 +31,41 @@
+ 
+ #include "nvctassert.h"
+ 
++NvBool nvDPMstI2cTransfer(const NVDpyEvoRec *pDpyEvo,
++                           struct NvKmsMstI2cTransferParams *params)
++{
++    static NvU64 nextRequestId = 0; // Serialized by the NVKMS lock.
++    struct NvKmsMstI2cTransfer *transfer = &params->request.transfer;
++    if (!nvDpyUsesDPLib(pDpyEvo) || !nvDpyEvoIsDPMST(pDpyEvo) ||
++        pDpyEvo->dp.pDpLibDevice == NULL) {
++        return FALSE;
++    }
++    DisplayPort::Device *device = pDpyEvo->dp.pDpLibDevice->device;
++    switch (params->request.operation) {
++    case NVKMS_MST_I2C_START:
++        // Zero denotes no request. Never reuse a token after wraparound.
++        if (nextRequestId == ~NvU64(0)) {
++            return FALSE;
++        }
++        params->reply.requestId = ++nextRequestId;
++        params->reply.complete = FALSE;
++        return device->startMstI2cTransfer(params->reply.requestId,
++            transfer->writeAddress, transfer->writeData, transfer->writeSize,
++            transfer->readAddress, transfer->readSize);
++    case NVKMS_MST_I2C_POLL: {
++        bool complete = false;
++        bool success = device->pollMstI2cTransfer(params->request.requestId,
++            params->reply.readData, transfer->readSize, &complete);
++        params->reply.complete = complete;
++        return success;
++    }
++    case NVKMS_MST_I2C_CANCEL:
++        device->cancelMstI2cTransfer(params->request.requestId);
++        return TRUE;
++    }
++    return FALSE;
++}
++
+ void nvDPDeviceSetPowerState(NVDpyEvoPtr pDpyEvo, NvBool on)
+ {
+     NVDispEvoPtr pDispEvo = pDpyEvo->pDispEvo;
+diff --git a/src/nvidia-modeset/src/nvkms.c b/src/nvidia-modeset/src/nvkms.c
+index 5d2e98ed..d737bc68 100644
+--- a/src/nvidia-modeset/src/nvkms.c
++++ b/src/nvidia-modeset/src/nvkms.c
+@@ -24,6 +24,7 @@
+ #include "nvkms.h"
+ #include "nvkms-private.h"
+ #include "nvkms-api.h"
++#include "dp/nvdp-device.h"
+ 
+ #include "nvkms-types.h"
+ #include "nvkms-utils.h"
+@@ -5106,6 +5107,30 @@ static NvBool UnregisterVblankIntrCallback(struct NvKmsPerOpen *pOpen,
+     return TRUE;
+ }
+ 
++static NvBool MstI2cTransfer(struct NvKmsPerOpen *pOpen, void *pParamsVoid)
++{
++    struct NvKmsMstI2cTransferParams *pParams = pParamsVoid;
++    struct NvKmsMstI2cTransfer *transfer = &pParams->request.transfer;
++    NVDpyEvoRec *pDpyEvo;
++
++    if (pOpen->clientType != NVKMS_CLIENT_KERNEL_SPACE) {
++        return FALSE;
++    }
++    pDpyEvo = GetPerOpenDpy(pOpen, pParams->request.deviceHandle,
++                           pParams->request.dispHandle, pParams->request.dpyId);
++    if (pDpyEvo == NULL || !nvDpyEvoIsDPMST(pDpyEvo) ||
++        (pParams->request.operation == NVKMS_MST_I2C_START &&
++         !nvDpyIdIsInDpyIdList(pDpyEvo->id,
++                              pDpyEvo->pDispEvo->connectedDisplays)) ||
++        transfer->writeAddress > 0x7f || transfer->readAddress > 0x7f ||
++        transfer->writeSize > NVKMS_MST_I2C_MAX_DATA ||
++        transfer->readSize > NVKMS_MST_I2C_MAX_DATA ||
++        (transfer->writeSize == 0 && transfer->readSize == 0)) {
++        return FALSE;
++    }
++    return nvDPMstI2cTransfer(pDpyEvo, pParams);
++}
++
+ /*!
+  * Perform the ioctl operation requested by the client.
+  *
+@@ -5234,6 +5259,7 @@ NvBool nvKmsIoctl(
+         ENTRY(NVKMS_IOCTL_REGISTER_VBLANK_INTR_CALLBACK, RegisterVblankIntrCallback),
+         ENTRY(NVKMS_IOCTL_UNREGISTER_VBLANK_INTR_CALLBACK, UnregisterVblankIntrCallback),
+         ENTRY(NVKMS_IOCTL_GET_NEXT_EVENTS, GetNextEvents),
++        ENTRY(NVKMS_IOCTL_MST_I2C_TRANSFER, MstI2cTransfer),
+     };
+ 
+     struct NvKmsPerOpen *pOpen = pOpenVoid;

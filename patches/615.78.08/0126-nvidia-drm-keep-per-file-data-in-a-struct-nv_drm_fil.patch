@@ -16,10 +16,10 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
  2 files changed, 20 insertions(+), 4 deletions(-)
 
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
-index ad5e3941..568a0f5c 100644
+index da47acfd..896231c6 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
-@@ -1212,7 +1212,7 @@ static int nv_drm_get_drm_file_unique_id_ioctl(struct drm_device *dev,
+@@ -1219,7 +1219,7 @@ static int nv_drm_get_drm_file_unique_id_ioctl(struct drm_device *dev,
                                                 void *data, struct drm_file *filep)
  {
      struct drm_nvidia_get_drm_file_unique_id_params *params = data;
@@ -28,7 +28,7 @@ index ad5e3941..568a0f5c 100644
      return 0;
  }
  
-@@ -1691,15 +1691,22 @@ static void nv_drm_postclose(struct drm_device *dev, struct drm_file *filep)
+@@ -1748,15 +1748,22 @@ static void nv_drm_postclose(struct drm_device *dev, struct drm_file *filep)
          dev->mode_config.connector_list.prev != NULL) {
          nv_drm_revoke_modeset_permission(dev, filep, 0);
      }

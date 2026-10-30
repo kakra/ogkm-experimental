@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mcmrarm <mcmrarm@gmail.com>
+Date: Fri, 30 Oct 2026 12:36:37 +0100
+Subject: [PATCH] nvidia-modeset: default viewPortPointIn to the merge head
+ offset
+
+With a 2Heads1OR (dual head DSC) mode the default viewport offset of the second head
+was 0, and a client that never pans, like Vulkan direct mode, then fetched the left part
+of the image on both heads. Use the head's section offset, computed the same way as the
+flip and panning paths do.
+
+Upstream PR 1401 (mcmrarm).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/nvkms-evo.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/src/nvidia-modeset/src/nvkms-evo.c b/src/nvidia-modeset/src/nvkms-evo.c
+index 66577ad9..f0c56c4b 100644
+--- a/src/nvidia-modeset/src/nvkms-evo.c
++++ b/src/nvidia-modeset/src/nvkms-evo.c
+@@ -4515,10 +4515,12 @@ void nvSetViewPortsEvo(NVDispEvoPtr pDispEvo,
+     pDevEvo->hal->SetOutputScaler(pDispEvo, head, updateState);
+ 
+     /*
+-     * Specify safe default values of 0 for viewPortPointIn x and y; these
+-     * may be changed when panning out of band of a modeset.
++     * Specify default values for viewPortPointIn x and y; these may be
++     * changed when panning out of band of a modeset.
+      */
+-    EvoSetViewportPointIn(pDispEvo, head, 0 /* x */, 0 /* y */, updateState);
++    EvoSetViewportPointIn(pDispEvo, head,
++                          pViewPort->in.width * pHeadState->mergeHeadSection,
++                          0 /* y */, updateState);
+ }
+ 
+ 

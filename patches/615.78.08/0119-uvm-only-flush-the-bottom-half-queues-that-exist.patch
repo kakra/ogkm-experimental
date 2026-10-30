@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tarik0 <22205836+tarik0@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 12:46:59 +0100
+Subject: [PATCH] uvm: only flush the bottom half queues that exist
+
+The bottom half queue is only created for GPUs with replayable faults. On others
+uvm_suspend() flushed a zeroed queue, a NULL dereference with the queue spinlock held
+that hangs the suspend. The open modules don't support such GPUs, but the code is shared
+with the R580 driver.
+
+Upstream PR 1340 (tarik0). Fixes upstream issue 1212. Added the same guard to
+uvm_parent_gpu_flush_bottom_halves(), which has the same problem when a GPU is released
+and its parent stays.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-uvm/uvm_global.c  | 3 ++-
+ kernel-open/nvidia-uvm/uvm_gpu_isr.c | 7 +++++--
+ 2 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/kernel-open/nvidia-uvm/uvm_global.c b/kernel-open/nvidia-uvm/uvm_global.c
+index f17d806c..185d3ef3 100644
+--- a/kernel-open/nvidia-uvm/uvm_global.c
++++ b/kernel-open/nvidia-uvm/uvm_global.c
+@@ -339,7 +339,8 @@ static NV_STATUS uvm_suspend(void)
+ 
+         uvm_parent_gpu_set_isr_suspended(gpu->parent, true);
+ 
+-        nv_kthread_q_flush(&gpu->parent->isr.bottom_half_q);
++        if (gpu->parent->isr.replayable_faults.handling)
++            nv_kthread_q_flush(&gpu->parent->isr.bottom_half_q);
+ 
+         if (gpu->parent->isr.non_replayable_faults.handling)
+             nv_kthread_q_flush(&gpu->parent->isr.kill_channel_q);
+diff --git a/kernel-open/nvidia-uvm/uvm_gpu_isr.c b/kernel-open/nvidia-uvm/uvm_gpu_isr.c
+index 48f4b541..e5113fa2 100644
+--- a/kernel-open/nvidia-uvm/uvm_gpu_isr.c
++++ b/kernel-open/nvidia-uvm/uvm_gpu_isr.c
+@@ -452,8 +452,11 @@ NV_STATUS uvm_parent_gpu_init_isr(uvm_parent_gpu_t *parent_gpu)
+ 
+ void uvm_parent_gpu_flush_bottom_halves(uvm_parent_gpu_t *parent_gpu)
+ {
+-    nv_kthread_q_flush(&parent_gpu->isr.bottom_half_q);
+-    nv_kthread_q_flush(&parent_gpu->isr.kill_channel_q);
++    if (parent_gpu->isr.replayable_faults.handling)
++        nv_kthread_q_flush(&parent_gpu->isr.bottom_half_q);
++
++    if (parent_gpu->isr.non_replayable_faults.handling)
++        nv_kthread_q_flush(&parent_gpu->isr.kill_channel_q);
+ }
+ 
+ void uvm_parent_gpu_disable_isr(uvm_parent_gpu_t *parent_gpu)

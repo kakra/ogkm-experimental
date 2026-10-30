@@ -1,0 +1,264 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: codeandsolder <codeandsolder@gmail.com>
+Date: Fri, 30 Oct 2026 12:32:38 +0100
+Subject: [PATCH] nvidia: fix Turing RTD3 channel init and share the RMAPI
+ selection
+
+kgraphicsCreateBug4208224Channel_TU102() always released the GPU locks and used
+RMAPI_API_LOCK_INTERNAL, but the RTD3 PM path can't take the API lock, so runtime D3
+resume failed with NV_ERR_INVALID_LOCK_STATE on Turing. Select the interface like the
+golden image channel does, in a helper now shared by both and by the kernel channel
+construct and destruct paths.
+
+Cleanup of both graphics paths now reacquires the GPU locks whenever they aren't held,
+as allocation callees can release them in the RTD3 path too, and always frees with
+RMAPI_GPU_LOCK_INTERNAL. The second allocation block of
+memmgrMemUtilsChannelInitialize_GM107() gets the same RTD3 guard as the first.
+
+Upstream PR 1501 (codeandsolder), adapted to the fix of upstream PR 1498 already in
+this branch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/inc/kernel/rmapi/rmapi.h           | 11 ++++++++
+ .../src/kernel/gpu/fifo/kernel_channel.c      | 28 ++-----------------
+ .../gpu/gr/arch/turing/kgraphics_tu102.c      | 17 ++++++-----
+ .../src/kernel/gpu/gr/kernel_graphics.c       | 24 +++++-----------
+ .../mem_mgr/arch/maxwell/mem_utils_gm107.c    |  2 +-
+ src/nvidia/src/kernel/rmapi/rmapi.c           | 23 +++++++++++++++
+ 6 files changed, 55 insertions(+), 50 deletions(-)
+
+diff --git a/src/nvidia/inc/kernel/rmapi/rmapi.h b/src/nvidia/inc/kernel/rmapi/rmapi.h
+index a2a5c340..aa2b213c 100644
+--- a/src/nvidia/inc/kernel/rmapi/rmapi.h
++++ b/src/nvidia/inc/kernel/rmapi/rmapi.h
+@@ -149,6 +149,17 @@ typedef enum
+  */
+ RM_API *rmapiGetInterface(RMAPI_TYPE rmapiType);
+ 
++/**
++ * Return the internal RMAPI interface appropriate for callers that normally
++ * hold the API lock but may run from the RTD3 PM path instead.
++ *
++ * RTD3 cannot acquire the API lock. Its allocation paths may temporarily
++ * release GPU locks, so interface selection does not imply GPU-lock ownership.
++ * Returns NV_ERR_INVALID_LOCK_STATE without modifying *ppRmApi when neither
++ * calling convention is satisfied.
++ */
++NV_STATUS rmapiGetApiOrRtd3InternalInterface(RM_API **ppRmApi);
++
+ // Flags for RM_API::Alloc
+ #define RMAPI_ALLOC_FLAGS_NONE                    0
+ #define RMAPI_ALLOC_FLAGS_SKIP_RPC                NVBIT(0)
+diff --git a/src/nvidia/src/kernel/gpu/fifo/kernel_channel.c b/src/nvidia/src/kernel/gpu/fifo/kernel_channel.c
+index be2d6c6e..532507fa 100644
+--- a/src/nvidia/src/kernel/gpu/fifo/kernel_channel.c
++++ b/src/nvidia/src/kernel/gpu/fifo/kernel_channel.c
+@@ -186,19 +186,8 @@ kchannelConstruct_IMPL
+     }
+     pKernelChannel->subDeviceId = subDeviceId;
+ 
+-    if (rmapiLockIsOwner())
+-    {
+-        pRmApi = rmapiGetInterface(RMAPI_API_LOCK_INTERNAL);
+-    }
+-    else if (rmapiInRtd3PmPath())
+-    {
+-        pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+-    }
+-    else
+-    {
+-        NV_PRINTF(LEVEL_ERROR, "Caller missing proper locks\n");
+-        return NV_ERR_INVALID_LOCK_STATE;
+-    }
++    NV_CHECK_OK_OR_RETURN(LEVEL_ERROR,
++        rmapiGetApiOrRtd3InternalInterface(&pRmApi));
+ 
+     // We only support physical channels.
+     NV_ASSERT_OR_RETURN(FLD_TEST_DRF(OS04, _FLAGS, _CHANNEL_TYPE, _PHYSICAL, flags),
+@@ -1210,19 +1199,8 @@ kchannelDestruct_IMPL
+     resGetFreeParams(staticCast(pKernelChannel, RsResource), &pCallContext, &pParams);
+     hClient = pCallContext->pClient->hClient;
+ 
+-    if (rmapiLockIsOwner())
+-    {
+-        pRmApi = rmapiGetInterface(RMAPI_API_LOCK_INTERNAL);
+-    }
+-    else if (rmapiInRtd3PmPath())
+-    {
+-        pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+-    }
+-    else
+-    {
+-        NV_PRINTF(LEVEL_ERROR, "Caller missing proper locks\n");
++    if (rmapiGetApiOrRtd3InternalInterface(&pRmApi) != NV_OK)
+         return;
+-    }
+ 
+     if ((pKernelChannel->privilegeLevel == NV_KERNELCHANNEL_ALLOC_INTERNALFLAGS_PRIVILEGE_ADMIN) ||
+         (pKernelChannel->privilegeLevel == NV_KERNELCHANNEL_ALLOC_INTERNALFLAGS_PRIVILEGE_USER))
+diff --git a/src/nvidia/src/kernel/gpu/gr/arch/turing/kgraphics_tu102.c b/src/nvidia/src/kernel/gpu/gr/arch/turing/kgraphics_tu102.c
+index da13ea12..8e4b530f 100644
+--- a/src/nvidia/src/kernel/gpu/gr/arch/turing/kgraphics_tu102.c
++++ b/src/nvidia/src/kernel/gpu/gr/arch/turing/kgraphics_tu102.c
+@@ -315,7 +315,6 @@ kgraphicsCreateBug4208224Channel_TU102
+     RM_API                                *pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+     RsClient                              *pClientId;
+     NvBool                                 bBcStatus;
+-    NvBool                                 bAcquireLock = NV_FALSE;
+     NvU32                                  sliLoopReentrancy;
+     NV_VASPACE_ALLOCATION_PARAMETERS       vaParams;
+     NV_MEMORY_ALLOCATION_PARAMS            memAllocParams;
+@@ -383,9 +382,13 @@ kgraphicsCreateBug4208224Channel_TU102
+     // UVM/CUDA may be holding the GPU locks here and the allocation may subsequently fail
+     // So explicitly release GPU locks before RmVidHeapControl
+     //
+-    rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE, NULL);
+-    bAcquireLock = NV_TRUE;
+-    pRmApi = rmapiGetInterface(RMAPI_API_LOCK_INTERNAL);
++    if (rmapiLockIsOwner())
++    {
++        rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE, NULL);
++    }
++
++    NV_CHECK_OK_OR_GOTO(status, LEVEL_ERROR,
++        rmapiGetApiOrRtd3InternalInterface(&pRmApi), cleanup);
+ 
+     // Create a new VAspace for channel
+     portMemSet(&vaParams, 0, sizeof(NV_VASPACE_ALLOCATION_PARAMETERS));
+@@ -498,7 +501,6 @@ kgraphicsCreateBug4208224Channel_TU102
+     NV_ASSERT_OK_OR_GOTO(status,
+         rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_GR),
+         cleanup);
+-    bAcquireLock = NV_FALSE;
+     pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+ 
+     // Get KernelGraphicsObject class Id
+@@ -514,12 +516,13 @@ kgraphicsCreateBug4208224Channel_TU102
+ 
+ cleanup:
+ 
+-    if (bAcquireLock)
++    // Allocation callees can release GPU locks in the RTD3 path as well.
++    if (!rmGpuLockIsOwner())
+     {
+         NV_ASSERT_OK_OR_CAPTURE_FIRST_ERROR(status,
+             rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_GR));
+-        pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+     }
++    pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+ 
+     if (status != NV_OK)
+     {
+diff --git a/src/nvidia/src/kernel/gpu/gr/kernel_graphics.c b/src/nvidia/src/kernel/gpu/gr/kernel_graphics.c
+index 31d7398e..4c73eaf0 100644
+--- a/src/nvidia/src/kernel/gpu/gr/kernel_graphics.c
++++ b/src/nvidia/src/kernel/gpu/gr/kernel_graphics.c
+@@ -2157,7 +2157,6 @@ kgraphicsCreateGoldenImageChannel_IMPL
+     NvBool                                 bNeedMIGWar;
+     NvBool                                 bRetainGoldenImageChannel;
+     NvBool                                 bBcStatus;
+-    NvBool                                 bAcquireLock = NV_FALSE;
+     NvU32                                  sliLoopReentrancy;
+     NV_VASPACE_ALLOCATION_PARAMETERS       *pVaParams = NULL;
+     NV_MEMORY_ALLOCATION_PARAMS            *pMemAllocParams = NULL;
+@@ -2301,20 +2300,11 @@ kgraphicsCreateGoldenImageChannel_IMPL
+     if (rmapiLockIsOwner())
+     {
+         rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE, NULL);
+-        bAcquireLock = NV_TRUE;
+-        pRmApi = rmapiGetInterface(RMAPI_API_LOCK_INTERNAL);
+-    }
+-    else if (rmapiInRtd3PmPath())
+-    {
+-        pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+-    }
+-    else
+-    {
+-        NV_PRINTF(LEVEL_ERROR, "Caller missing proper locks\n");
+-        status = NV_ERR_INVALID_LOCK_STATE;
+-        goto cleanup;
+     }
+ 
++    NV_CHECK_OK_OR_GOTO(status, LEVEL_ERROR,
++        rmapiGetApiOrRtd3InternalInterface(&pRmApi), cleanup);
++
+     // Create a new VAspace for channel
+     portMemSet(pVaParams, 0, sizeof(NV_VASPACE_ALLOCATION_PARAMETERS));
+     pVaParams->flags |= NV_VASPACE_ALLOCATION_FLAGS_PTETABLE_HEAP_MANAGED;
+@@ -2518,11 +2508,10 @@ kgraphicsCreateGoldenImageChannel_IMPL
+                                   VASPACE_RESERVE_FLAGS_NONE));
+     }
+ 
+-    // Reaquire the GPU locks
++    // VA-space construction also releases the GPU locks in the RTD3 path.
+     NV_ASSERT_OK_OR_GOTO(status,
+         rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_GR),
+         cleanup);
+-    bAcquireLock = NV_FALSE;
+     pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+ 
+     if (kgraphicsIsGFXSupported(pGpu, pKernelGraphics))
+@@ -2554,12 +2543,13 @@ kgraphicsCreateGoldenImageChannel_IMPL
+ 
+ cleanup:
+ 
+-    if (bAcquireLock)
++    // Allocation callees can release GPU locks in the RTD3 path as well.
++    if (!rmGpuLockIsOwner())
+     {
+         NV_ASSERT_OK_OR_CAPTURE_FIRST_ERROR(status,
+             rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_GR));
+-        pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+     }
++    pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+ 
+     if (pVaParams != NULL)
+         portMemFree(pVaParams);
+diff --git a/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/mem_utils_gm107.c b/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/mem_utils_gm107.c
+index 83409eac..6e63df27 100644
+--- a/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/mem_utils_gm107.c
++++ b/src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/mem_utils_gm107.c
+@@ -576,7 +576,7 @@ memmgrMemUtilsChannelInitialize_GM107
+             pChannel->vaStartOffset = vaStartOffset;
+         }
+ 
+-        if (rmDeviceGpuLockIsOwner(pGpu->gpuInstance))
++        if (rmDeviceGpuLockIsOwner(pGpu->gpuInstance) && !rmapiInRtd3PmPath())
+         {
+             rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE, NULL);
+             bAcquireLock = NV_TRUE;
+diff --git a/src/nvidia/src/kernel/rmapi/rmapi.c b/src/nvidia/src/kernel/rmapi/rmapi.c
+index 5a5e2c1f..c7743af7 100644
+--- a/src/nvidia/src/kernel/rmapi/rmapi.c
++++ b/src/nvidia/src/kernel/rmapi/rmapi.c
+@@ -223,6 +223,29 @@ rmapiGetInterface
+     return &g_RmApiList[rmapiType];
+ }
+ 
++NV_STATUS
++rmapiGetApiOrRtd3InternalInterface
++(
++    RM_API **ppRmApi
++)
++{
++    if (rmapiLockIsOwner())
++    {
++        *ppRmApi = rmapiGetInterface(RMAPI_API_LOCK_INTERNAL);
++    }
++    else if (rmapiInRtd3PmPath())
++    {
++        *ppRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
++    }
++    else
++    {
++        NV_PRINTF(LEVEL_ERROR, "Caller missing proper locks\n");
++        return NV_ERR_INVALID_LOCK_STATE;
++    }
++
++    return NV_OK;
++}
++
+ static void
+ _rmapiUnrefGpuAccessNeeded
+ (

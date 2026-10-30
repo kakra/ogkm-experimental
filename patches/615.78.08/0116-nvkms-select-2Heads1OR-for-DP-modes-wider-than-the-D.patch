@@ -1,0 +1,182 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mick Ryan <mick.ryan@me.com>
+Date: Fri, 30 Oct 2026 12:37:50 +0100
+Subject: [PATCH] nvkms: select 2Heads1OR for DP modes wider than the DSC 5120
+ limit
+
+nvEvoUse2Heads1OR() only looks at the pixel clock. 6016x3384@60 on a Pro Display XDR
+fits one head by clock, but a single head can't compress a picture wider than 5120, so
+DSC setup rejects it and the DP bandwidth check fails. For DP modes wider than that,
+with DSC allowed and no hardware YUV420, try single head validation first, which keeps
+wide modes that work uncompressed, and select two heads if it fails.
+
+Upstream PR 1366 (Mick Ryan).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/modeset/timing/nvt_dsc_pps.c |  2 +-
+ src/common/modeset/timing/nvt_dsc_pps.h |  1 +
+ src/nvidia-modeset/include/nvkms-evo.h  |  7 ++++--
+ src/nvidia-modeset/src/nvkms-evo.c      | 33 +++++++++++++++++++++----
+ src/nvidia-modeset/src/nvkms-modepool.c |  5 +++-
+ src/nvidia-modeset/src/nvkms-modeset.c  |  9 +++++++
+ 6 files changed, 48 insertions(+), 9 deletions(-)
+
+diff --git a/src/common/modeset/timing/nvt_dsc_pps.c b/src/common/modeset/timing/nvt_dsc_pps.c
+index ab7cfc56..415dc8c2 100644
+--- a/src/common/modeset/timing/nvt_dsc_pps.c
++++ b/src/common/modeset/timing/nvt_dsc_pps.c
+@@ -1010,7 +1010,7 @@ DSC_PpsCalcBase
+         }
+         else
+         {
+-            RANGE_CHECK("pic_width", in->pic_width, 32, 5120);
++            RANGE_CHECK("pic_width", in->pic_width, 32, DSC_MAX_SINGLE_HEAD_WIDTH);
+         }
+     }
+ 
+diff --git a/src/common/modeset/timing/nvt_dsc_pps.h b/src/common/modeset/timing/nvt_dsc_pps.h
+index ff3d4c0e..55e16a77 100644
+--- a/src/common/modeset/timing/nvt_dsc_pps.h
++++ b/src/common/modeset/timing/nvt_dsc_pps.h
+@@ -34,6 +34,7 @@
+ 
+ /* ------------------------ Macros ----------------------------------------- */
+ #define DSC_MAX_PPS_SIZE_DWORD 32
++#define DSC_MAX_SINGLE_HEAD_WIDTH 5120
+ 
+ /* ------------------------ Datatypes -------------------------------------- */
+ typedef struct
+diff --git a/src/nvidia-modeset/include/nvkms-evo.h b/src/nvidia-modeset/include/nvkms-evo.h
+index a656f7f6..d251ee11 100644
+--- a/src/nvidia-modeset/include/nvkms-evo.h
++++ b/src/nvidia-modeset/include/nvkms-evo.h
+@@ -200,8 +200,8 @@ void nvLimitColorBpcEvo(const NVDpyEvoRec *pDpyEvo,
+                         enum NvKmsDpyAttributeColorBpcValue maxBpc,
+                         NVDpyAttributeColor *pDpyColor);
+ 
+-NvBool nvDPValidateModeEvo(NVDpyEvoPtr pDpyEvo,
+-                           NVHwModeTimingsEvoPtr pTimings,
++NvBool nvDPValidateModeEvo(const NVDpyEvoRec *pDpyEvo,
++                           const NVHwModeTimingsEvo *pTimings,
+                            const NvBool colorFormatSpecified,
+                            const NvBool colorBpcSpecified,
+                            NVDpyAttributeColor *pDpyColor,
+@@ -439,6 +439,9 @@ NvBool nvEvoGetSingleMergeHeadSectionHwModeTimings(
+ 
+ NvBool nvEvoUse2Heads1OR(const NVDpyEvoRec *pDpyEvo,
+                          const NVHwModeTimingsEvo *pTimings,
++                         const NVDpyAttributeColor *pDpyColor,
++                         const NvBool colorFormatSpecified,
++                         const NvBool colorBpcSpecified,
+                          const struct NvKmsModeValidationParams *pParams);
+ 
+ NvU32 nvGetRefreshRate10kHz(const NVHwModeTimingsEvo *pTimings);
+diff --git a/src/nvidia-modeset/src/nvkms-evo.c b/src/nvidia-modeset/src/nvkms-evo.c
+index f0c56c4b..1ed1ffaa 100644
+--- a/src/nvidia-modeset/src/nvkms-evo.c
++++ b/src/nvidia-modeset/src/nvkms-evo.c
+@@ -7070,8 +7070,8 @@ NvBool nvDowngradeColorFormatAndBpc(
+  * the given mode timings.
+  */
+ 
+-NvBool nvDPValidateModeEvo(NVDpyEvoPtr pDpyEvo,
+-                           NVHwModeTimingsEvoPtr pTimings,
++NvBool nvDPValidateModeEvo(const NVDpyEvoRec *pDpyEvo,
++                           const NVHwModeTimingsEvo *pTimings,
+                            const NvBool colorFormatSpecified,
+                            const NvBool colorBpcSpecified,
+                            NVDpyAttributeColor *pDpyColor,
+@@ -9851,6 +9851,9 @@ NvBool nvEvoGetSingleMergeHeadSectionHwModeTimings(
+ 
+ NvBool nvEvoUse2Heads1OR(const NVDpyEvoRec *pDpyEvo,
+                          const NVHwModeTimingsEvo *pTimings,
++                         const NVDpyAttributeColor *pDpyColor,
++                         const NvBool colorFormatSpecified,
++                         const NvBool colorBpcSpecified,
+                          const struct NvKmsModeValidationParams *pParams)
+ {
+     const NVDispEvoRec *pDispEvo = pDpyEvo->pDispEvo;
+@@ -9884,9 +9887,29 @@ NvBool nvEvoUse2Heads1OR(const NVDpyEvoRec *pDpyEvo,
+         return FALSE;
+     }
+ 
+-    /* Use 2Heads1OR mode only if the required pixel clock is greater than the
+-     * maximum pixel clock support by a head. */
+-    return (pTimings->pixelClock > pHeadCaps->maxPClkKHz);
++    if (pTimings->pixelClock > pHeadCaps->maxPClkKHz) {
++        return TRUE;
++    }
++
++    if (!nvDpyUsesDPLib(pDpyEvo) ||
++            (pParams->dscMode == NVKMS_DSC_MODE_FORCE_DISABLE) ||
++            (pTimings->yuv420Mode == NV_YUV420_MODE_HW) ||
++            (nvEvoVisibleWidth(pTimings) <= DSC_MAX_SINGLE_HEAD_WIDTH)) {
++        return FALSE;
++    }
++
++    /*
++     * A wide DSC picture needs two heads even when its pixel clock fits one.
++     * Preserve single-head modes that can already pass DP validation,
++     * including its existing uncompressed color-depth fallbacks.
++     */
++    NVDpyAttributeColor dpyColor = *pDpyColor;
++
++    return !nvDPValidateModeEvo(pDpyEvo, pTimings,
++                                colorFormatSpecified,
++                                colorBpcSpecified,
++                                &dpyColor, FALSE /* b2Heads1Or */,
++                                NULL /* pDscInfo */, pParams);
+ }
+ 
+ NvBool nvIsLockGroupFlipLocked(const NVLockGroup *pLockGroup)
+diff --git a/src/nvidia-modeset/src/nvkms-modepool.c b/src/nvidia-modeset/src/nvkms-modepool.c
+index 59dfd370..6b42ee54 100644
+--- a/src/nvidia-modeset/src/nvkms-modepool.c
++++ b/src/nvidia-modeset/src/nvkms-modepool.c
+@@ -1721,7 +1721,10 @@ static NvBool ValidateMode(NVDpyEvoPtr pDpyEvo,
+         goto done;
+     }
+ 
+-    b2Heads1Or = nvEvoUse2Heads1OR(pDpyEvo, pTimingsEvo, pParams);
++    b2Heads1Or = nvEvoUse2Heads1OR(pDpyEvo, pTimingsEvo, &dpyColor,
++                                   pDpyOutputColorParams->formatSpecified,
++                                   pDpyOutputColorParams->bpcSpecified,
++                                   pParams);
+ 
+     if (nvDpyIsHdmiEvo(pDpyEvo)) {
+         NvBool foundFrlConfig = FALSE;
+diff --git a/src/nvidia-modeset/src/nvkms-modeset.c b/src/nvidia-modeset/src/nvkms-modeset.c
+index 2a240d78..a085c214 100644
+--- a/src/nvidia-modeset/src/nvkms-modeset.c
++++ b/src/nvidia-modeset/src/nvkms-modeset.c
+@@ -845,6 +845,9 @@ static NvBool AssignProposedHwHeadsGeneric(
+             if (!nvEvoUse2Heads1OR(
+                     pDpyEvo,
+                     &pProposedApiHead->timings,
++                    &pProposedApiHead->attributes.color,
++                    pProposedApiHead->colorFormatSpecified,
++                    pProposedApiHead->colorBpcSpecified,
+                     &pProposedApiHead->modeValidationParams)) {
+                 continue;
+             }
+@@ -854,6 +857,9 @@ static NvBool AssignProposedHwHeadsGeneric(
+             nvAssert(!nvEvoUse2Heads1OR(
+                         pDpyEvo,
+                         &pProposedApiHead->timings,
++                        &pProposedApiHead->attributes.color,
++                        pProposedApiHead->colorFormatSpecified,
++                        pProposedApiHead->colorBpcSpecified,
+                         &pProposedApiHead->modeValidationParams));
+ 
+             NvU32 foundHead = GetFreeHeads(pDevEvo, apiHead, pDpyEvo,
+@@ -922,6 +928,9 @@ void ClearIncompatibleHwHeadsMaskOneDisp(const NVDispEvoRec *pDispEvo,
+         const NvBool new2Heads1OrState =
+             nvEvoUse2Heads1OR(pDpyEvo,
+                               &pProposedApiHead->timings,
++                              &pProposedApiHead->attributes.color,
++                              pProposedApiHead->colorFormatSpecified,
++                              pProposedApiHead->colorBpcSpecified,
+                               &pProposedApiHead->modeValidationParams);
+ 
+         if (new2Heads1OrState != current2Heads1OrState) {

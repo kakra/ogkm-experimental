@@ -1,0 +1,152 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Solom Tamawy <40343437+solomspd@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 12:36:05 +0100
+Subject: [PATCH] nvidia-drm, nvidia-uvm: build with the linux-next fbdev
+ helper and hugetlb changes
+
+linux-next (next-20261001) moved the fbdev helper header to
+drm/clients/drm_fbdev_helper.h, removed the VM_SPECIAL mask and renamed
+is_vm_hugetlb_page() to vma_is_hugetlb(). Detect the new header and helper with
+conftests, also in the three fbdev setup probes, where the missing old header would
+report the removed setup functions as present. VM_SPECIAL is expanded to its flags.
+
+From upstream PR 1414 (Solom Tamawy). The dmem_cgroup_register_region() and
+atomic_create_state parts of that PR are already in the 615.78.08 base. Only built
+against 7.3 here, not against linux-next.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/conftest.sh                  | 26 ++++++++++++++++++++++++
+ kernel-open/header-presence-tests.mk     |  1 +
+ kernel-open/nvidia-drm/nvidia-drm-drv.c  |  4 ++++
+ kernel-open/nvidia-uvm/nvidia-uvm.Kbuild |  1 +
+ kernel-open/nvidia-uvm/uvm_hmm.c         |  8 ++++++--
+ 5 files changed, 38 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/conftest.sh b/kernel-open/conftest.sh
+index 52e60297..d0a39b80 100755
+--- a/kernel-open/conftest.sh
++++ b/kernel-open/conftest.sh
+@@ -4560,7 +4560,11 @@ compile_test() {
+             # in v6.11.
+             #
+             CODE="
++            #if defined(NV_DRM_CLIENTS_DRM_FBDEV_HELPER_H_PRESENT)
++            #include <drm/clients/drm_fbdev_helper.h>
++            #else
+             #include <drm/drm_fb_helper.h>
++            #endif
+             #if defined(NV_DRM_DRM_FBDEV_GENERIC_H_PRESENT)
+             #include <drm/drm_fbdev_generic.h>
+             #endif
+@@ -4580,7 +4584,11 @@ compile_test() {
+             # 1000634477d8 ("drm/fbdev-ttm:Convert to client-setup") in v6.13.
+             #
+             CODE="
++            #if defined(NV_DRM_CLIENTS_DRM_FBDEV_HELPER_H_PRESENT)
++            #include <drm/clients/drm_fbdev_helper.h>
++            #else
+             #include <drm/drm_fb_helper.h>
++            #endif
+             #if defined(NV_DRM_DRM_FBDEV_TTM_H_PRESENT)
+             #include <drm/drm_fbdev_ttm.h>
+             #endif
+@@ -4602,7 +4610,11 @@ compile_test() {
+             # in linux-next b86711c6d6e2.
+             #
+             CODE="
++            #if defined(NV_DRM_CLIENTS_DRM_FBDEV_HELPER_H_PRESENT)
++            #include <drm/clients/drm_fbdev_helper.h>
++            #else
+             #include <drm/drm_fb_helper.h>
++            #endif
+             #if defined(NV_DRM_DRM_CLIENT_SETUP_H_PRESENT)
+             #include <drm/drm_client_setup.h>
+             #elif defined(NV_DRM_CLIENTS_DRM_CLIENT_SETUP_H_PRESENT)
+@@ -5524,6 +5536,20 @@ compile_test() {
+             compile_check_conftest "$CODE" "NV_DMEM_CGROUP_REGISTER_REGION_HAS_INIT_ARG" "" "types"
+         ;;
+ 
++        vma_is_hugetlb)
++            #
++            # Determine if the renamed hugetlb VMA helper is present.
++            # typeof requires a declaration even when implicit function
++            # declaration warnings are disabled for other conftests.
++            #
++            CODE="
++            #include <linux/mm.h>
++            typeof(vma_is_hugetlb) conftest_vma_is_hugetlb;
++            "
++
++            compile_check_conftest "$CODE" "NV_VMA_IS_HUGETLB_PRESENT" "" "types"
++        ;;
++
+         misc_cgrp_id)
+             #
+             # Check to see if the misc cgroup type is available
+diff --git a/kernel-open/header-presence-tests.mk b/kernel-open/header-presence-tests.mk
+index 5311bd4d..b39c9d6d 100644
+--- a/kernel-open/header-presence-tests.mk
++++ b/kernel-open/header-presence-tests.mk
+@@ -15,6 +15,7 @@ NV_HEADER_PRESENCE_TESTS = \
+   drm/drm_managed.h \
+   drm/drm_probe_helper.h \
+   drm/clients/drm_client_setup.h \
++  drm/clients/drm_fbdev_helper.h \
+   dt-bindings/interconnect/tegra_icc_id.h \
+   generated/autoconf.h \
+   generated/compile.h \
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index d23fc0d0..da47acfd 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -64,8 +64,12 @@
+ #endif
+ 
+ #if defined(NV_DRM_FBDEV_AVAILABLE)
++#if defined(NV_DRM_CLIENTS_DRM_FBDEV_HELPER_H_PRESENT)
++#include <drm/clients/drm_fbdev_helper.h>
++#else
+ #include <drm/drm_fb_helper.h>
+ #endif
++#endif
+ 
+ #if defined(NV_DRM_DRM_CLIENT_SETUP_H_PRESENT)
+ #include <drm/drm_client_setup.h>
+diff --git a/kernel-open/nvidia-uvm/nvidia-uvm.Kbuild b/kernel-open/nvidia-uvm/nvidia-uvm.Kbuild
+index 7b8c0576..1ad268dc 100644
+--- a/kernel-open/nvidia-uvm/nvidia-uvm.Kbuild
++++ b/kernel-open/nvidia-uvm/nvidia-uvm.Kbuild
+@@ -71,6 +71,7 @@ NV_CONFTEST_TYPE_COMPILE_TESTS += mmu_interval_notifier
+ NV_CONFTEST_TYPE_COMPILE_TESTS += sg_dma_page_iter
+ NV_CONFTEST_TYPE_COMPILE_TESTS += struct_page_has_zone_device_data
+ NV_CONFTEST_TYPE_COMPILE_TESTS += memory_device_coherent_present
++NV_CONFTEST_TYPE_COMPILE_TESTS += vma_is_hugetlb
+ NV_CONFTEST_TYPE_COMPILE_TESTS += dma_buf_supports_dynamic_importer
+ 
+ NV_CONFTEST_SYMBOL_COMPILE_TESTS += is_export_symbol_present_int_active_memcg
+diff --git a/kernel-open/nvidia-uvm/uvm_hmm.c b/kernel-open/nvidia-uvm/uvm_hmm.c
+index 0efafef1..786db83d 100644
+--- a/kernel-open/nvidia-uvm/uvm_hmm.c
++++ b/kernel-open/nvidia-uvm/uvm_hmm.c
+@@ -4032,14 +4032,18 @@ bool uvm_hmm_must_use_sysmem(uvm_va_block_t *va_block,
+     if (vma_has_cow_sharing(vma))
+         return true;
+ 
+-    // migrate_vma_setup() can't migrate VM_SPECIAL so we have to force GPU
++    // migrate_vma_setup() can't migrate special mappings so we have to force GPU
+     // remote mapping.
+     // TODO: Bug 3660968: add support for file-backed migrations.
+     // TODO: Bug 3368756: add support for transparent huge page migrations.
+     return !vma_is_anonymous(vma) ||
+-           (vma->vm_flags & VM_SPECIAL) ||
++           (vma->vm_flags & (VM_IO | VM_DONTEXPAND | VM_PFNMAP | VM_MIXEDMAP)) ||
+            vma_is_dax(vma) ||
++#if defined(NV_VMA_IS_HUGETLB_PRESENT)
++           vma_is_hugetlb(vma);
++#else
+            is_vm_hugetlb_page(vma);
++#endif
+ }
+ 
+ #endif // UVM_IS_CONFIG_HMM()

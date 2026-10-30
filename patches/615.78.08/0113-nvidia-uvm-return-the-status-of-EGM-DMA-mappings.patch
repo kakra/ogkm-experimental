@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Arpit Kumar Jaiswal <arpit1.mitmpl2024@learner.manipal.edu>
+Date: Fri, 30 Oct 2026 12:36:40 +0100
+Subject: [PATCH] nvidia-uvm: return the status of EGM DMA mappings
+
+uvm_gpu_map_cpu_pages_for_egm() recorded DMA link, sync and missing DMA IOVA API
+failures in status and then returned NV_OK, so callers used a mapping that didn't exist.
+
+From upstream PR 1423 (Arpit Kumar Jaiswal), without its host test script.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-uvm/uvm_gpu.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel-open/nvidia-uvm/uvm_gpu.c b/kernel-open/nvidia-uvm/uvm_gpu.c
+index 6d42f184..3677ff4a 100644
+--- a/kernel-open/nvidia-uvm/uvm_gpu.c
++++ b/kernel-open/nvidia-uvm/uvm_gpu.c
+@@ -4115,7 +4115,7 @@ done:
+     }
+ 
+     *dma_address_out = dma_addr;
+-    return NV_OK;
++    return status;
+ }
+ 
+ NV_STATUS uvm_gpu_map_cpu_pages(uvm_gpu_t *gpu, struct page *page, size_t size, NvU64 *dma_address_out)

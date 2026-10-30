@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sylvester Kaczmarek
+ <16242628+sylvesterkaczmarek@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 12:36:35 +0100
+Subject: [PATCH] nvidia-modeset: map HDMI DSC max slices code 7 back to 16
+ slices at 400 MHz
+
+615.71.09 changed code 7 of the HDMI Forum VSDB DSC_MaxSlices field to 12 slices at
+600 MHz. The HDMI DSC throughput path only knows the 400 MHz class and otherwise falls
+back to 340 MHz, so sinks with this code lost modes. Restore the 610.57.04 mapping,
+which is also what the kernel's drm_edid.c uses for it, and leave the new code 8 alone.
+
+Upstream PR 1352 (Sylvester Kaczmarek). Fixes upstream issue 1348.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/modeset/timing/nvt_edidext_861.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/common/modeset/timing/nvt_edidext_861.c b/src/common/modeset/timing/nvt_edidext_861.c
+index a54bd61a..ac24159f 100644
+--- a/src/common/modeset/timing/nvt_edidext_861.c
++++ b/src/common/modeset/timing/nvt_edidext_861.c
+@@ -3911,7 +3911,7 @@ void parseEdidHdmiForumVSDB(VSDB_DATA *pVsdb, NVT_HDMI_FORUM_INFO *pHdmiInfo)
+             switch(pHdmiForum->DSC_MaxSlices)
+             {
+             case 8: pHdmiInfo->dsc_MaxSlices = 12; pHdmiInfo->dsc_MaxPclkPerSliceMHz = 900; break;
+-            case 7: pHdmiInfo->dsc_MaxSlices = 12; pHdmiInfo->dsc_MaxPclkPerSliceMHz = 600; break;
++            case 7: pHdmiInfo->dsc_MaxSlices = 16; pHdmiInfo->dsc_MaxPclkPerSliceMHz = 400; break;
+             case 6: pHdmiInfo->dsc_MaxSlices = 12; pHdmiInfo->dsc_MaxPclkPerSliceMHz = 400; break;
+             case 5: pHdmiInfo->dsc_MaxSlices = 8;  pHdmiInfo->dsc_MaxPclkPerSliceMHz = 400; break;
+             case 4: pHdmiInfo->dsc_MaxSlices = 8;  pHdmiInfo->dsc_MaxPclkPerSliceMHz = 340; break;

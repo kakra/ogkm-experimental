@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Fri, 30 Oct 2026 12:30:58 +0100
+Subject: [PATCH] nvidia-modeset: don't free a device reference twice in a
+ nested revoke
+
+FreeDeviceReference() -> ReleaseModesetOwnership() -> RestoreConsole() calls
+nvRevokeDevice() when the core channel can't be reallocated, for example after
+the GSP died. The revoke frees every reference on the device, including the
+pOpenDev that is being freed, so its device reference is dropped twice and the
+pOpenDev is freed twice. Dropping the other references can also free pDevEvo
+while FreeDeviceReference() still uses it.
+
+Mark the pOpenDev so that a nested revoke skips it, and hold a device reference
+while ownership is released. This covers a revoke that starts from a client
+close or NVKMS_IOCTL_FREE_DEVICE as well as a nested one.
+
+Upstream PR 1395 (SammyTourani) ignores nested nvRevokeDevice() calls with a
+global flag and leaves the client close path open, by its own description.
+Fixes upstream issue 1284.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/nvkms.c | 29 ++++++++++++++++++++++++-----
+ 1 file changed, 24 insertions(+), 5 deletions(-)
+
+diff --git a/src/nvidia-modeset/src/nvkms.c b/src/nvidia-modeset/src/nvkms.c
+index e2fe61cd..5d2e98ed 100644
+--- a/src/nvidia-modeset/src/nvkms.c
++++ b/src/nvidia-modeset/src/nvkms.c
+@@ -169,6 +169,7 @@ struct NvKmsPerOpenDev {
+     NVEvoApiHandlesRec           deferredRequestFifoHandles;
+     NVEvoApiHandlesRec           swapGroupHandles;
+     NvU32                        openedGpuId;
++    NvBool                       beingFreed;
+ };
+ 
+ struct NvKmsPerOpenEventListEntry {
+@@ -1628,6 +1629,11 @@ static void DisableRemainingVblankSemControls(
+ static void FreeDeviceReference(struct NvKmsPerOpen *pOpen,
+                                 struct NvKmsPerOpenDev *pOpenDev)
+ {
++    NVDevEvoPtr pDevEvo = pOpenDev->pDevEvo;
++
++    /* Keep a nested nvRevokeDevice() from freeing this pOpenDev as well. */
++    pOpenDev->beingFreed = TRUE;
++
+     /* Disable all client-owned vblank sync objects that still exist. */
+     DisableRemainingVblankSyncObjects(pOpen, pOpenDev);
+ 
+@@ -1640,7 +1646,12 @@ static void FreeDeviceReference(struct NvKmsPerOpen *pOpen,
+     nvEvoFreeClientSurfaces(pOpenDev->pDevEvo, pOpenDev,
+                             &pOpenDev->surfaceHandles);
+ 
+-    if (!nvFreeDevEvo(pOpenDev->pDevEvo)) {
++    if (!nvFreeDevEvo(pDevEvo)) {
++        // Releasing ownership can revoke the device if the core channel can't
++        // be reallocated, which drops every other reference.  Hold one until
++        // this function is done with pDevEvo.
++        pDevEvo->allocRefCnt++;
++
+         // If this pOpenDev is the modeset owner, implicitly release it.  Does
+         // nothing if this pOpenDev is not the modeset owner.
+         //
+@@ -1648,13 +1659,17 @@ static void FreeDeviceReference(struct NvKmsPerOpen *pOpen,
+         // ownership.
+         ReleaseModesetOwnership(pOpenDev);
+ 
+-        nvAssert(pOpenDev->pDevEvo->modesetOwner != pOpenDev);
++        nvAssert(pDevEvo->modesetOwner != pOpenDev);
+ 
+         // If this pOpenDev is the modeset sub-owner, implicitly release it.
+-        if (pOpenDev->pDevEvo->modesetSubOwner == pOpenDev) {
+-            pOpenDev->pDevEvo->modesetSubOwner = NULL;
+-            pOpenDev->pDevEvo->modesetOwnerOrSubOwnerChanged = TRUE;
++        if (pDevEvo->modesetSubOwner == pOpenDev) {
++            pDevEvo->modesetSubOwner = NULL;
++            pDevEvo->modesetOwnerOrSubOwnerChanged = TRUE;
+         }
++
++        nvFreePerOpenDev(pOpen, pOpenDev);
++        nvFreeDevEvo(pDevEvo);
++        return;
+     }
+ 
+     nvFreePerOpenDev(pOpen, pOpenDev);
+@@ -5388,6 +5403,10 @@ void nvRevokeDevice(NVDevEvoPtr pDevEvo)
+             // by nvFreeDevEvo
+             continue;
+         }
++        if (pOpenDev->beingFreed) {
++            // Called from below FreeDeviceReference() of this pOpenDev.
++            continue;
++        }
+         FreeDeviceReference(pOpen, pOpenDev);
+     }
+ }

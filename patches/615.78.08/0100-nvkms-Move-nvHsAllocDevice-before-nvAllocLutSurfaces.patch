@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Andy Ritger <aritger@nvidia.com>
+Date: Thu, 29 Oct 2026 17:16:31 -0700
+Subject: [PATCH] nvkms: Move nvHsAllocDevice() before nvAllocLutSurfacesEvo()
+
+From a patch Andy Ritger posted on NVIDIA's tracker for testing against
+615.78.08, for the display freeze with nvidia-modeset spinning in
+nvWriteGpEntry() <- PrefetchHelperSurfaceEvo() <- nvDIFRPrefetchSurfaces().
+His post gave no description; the rest of this message is our reading of
+the code.
+
+AllocLutSurfaceEvoInVidmem() gives a LUT surface its GPU mapping with
+nvHsMapSurfaceToDevice(), and says the mapping exists for DIFR prefetch.
+That function returns 0 while pDevEvo->pHsDevice is NULL, and the LUT
+surfaces were allocated before nvHsAllocDevice(), so the base, output and
+default LUTs always had gpuAddress 0. nvDIFRPrefetchSurfaces() prefetches
+them on every pass that gets that far, so stock code launched a copy from
+GPU VA 0 and timed out with FAIL_CE_HW_ERROR, leaving GPFIFO entries behind.
+
+Our lazy GPU map commit already refuses address 0 and reports the surface as
+not prefetchable, so this stack doesn't launch that copy, but a prefetch pass
+could never succeed either. With the mappings in place it can, so DIFR may
+now actually engage at idle.
+
+nvHsAllocDevice() only needs pNvKmsOpenDev and the push device, both set up
+earlier. Teardown already frees the LUT surfaces before nvHsFreeDevice(), so
+the new mappings are unmapped while the device still exists.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/nvkms-evo.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/src/nvidia-modeset/src/nvkms-evo.c b/src/nvidia-modeset/src/nvkms-evo.c
+index 34739096..66577ad9 100644
+--- a/src/nvidia-modeset/src/nvkms-evo.c
++++ b/src/nvidia-modeset/src/nvkms-evo.c
+@@ -9059,6 +9059,11 @@ NVDevEvoPtr nvAllocDevEvo(const struct NvKmsAllocDeviceRequest *pRequest,
+         goto done;
+     }
+ 
++    if (!nvHsAllocDevice(pDevEvo, pRequest)) {
++        status = NVKMS_ALLOC_DEVICE_STATUS_FATAL_ERROR;
++        goto done;
++    }
++
+     if (!nvAllocLutSurfacesEvo(pDevEvo)) {
+         nvEvoLogDev(pDevEvo, EVO_LOG_ERROR,
+             "Failed to allocate memory for the display color lookup table.");
+@@ -9083,11 +9088,6 @@ NVDevEvoPtr nvAllocDevEvo(const struct NvKmsAllocDeviceRequest *pRequest,
+         goto done;
+     }
+ 
+-    if (!nvHsAllocDevice(pDevEvo, pRequest)) {
+-        status = NVKMS_ALLOC_DEVICE_STATUS_FATAL_ERROR;
+-        goto done;
+-    }
+-
+     if (!pDevEvo->displaylessHw && !nvInitHdmiLibrary(pDevEvo)) {
+         status = NVKMS_ALLOC_DEVICE_STATUS_FATAL_ERROR;
+         goto done;

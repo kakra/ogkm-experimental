@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Cole Leavitt <cole@unwrap.rs>
+Date: Fri, 30 Oct 2026 12:35:19 +0100
+Subject: [PATCH] nvidia: balance the suspend count across hibernation thaw and
+ poweroff
+
+nv_pmops_freeze() suspends and nv_pmops_restore() resumes, but thaw and poweroff did
+nothing. The kernel keeps running after thaw in hybrid sleep, when writing the image
+fails and when the boot kernel fails to restore an image. With the notifier or procfs
+suspend, freeze only nests, the count is never dropped, and the final resume is used
+up on the count: the GPU stays suspended. Without them, freeze really suspends and the
+GPU stays suspended for the rest of that boot.
+
+Make thaw undo freeze and poweroff mirror freeze, as the PM core expects.
+
+Upstream PR 1464 (draft).
+
+Addition for this branch: without the notifier or procfs suspend, thaw now really
+resumes the GPU, so nv_pci_shutdown() would no longer see a suspended GPU in the
+shutdown and reboot hibernation modes, and would wait forever for clients that are
+frozen. Track hibernation from the PM notifier, which is always registered, and skip
+the teardown for the whole of it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia/nv-pci.c | 15 +++++++-------
+ kernel-open/nvidia/nv.c     | 39 ++++++++++++++++++++++++++++++++++---
+ 2 files changed, 43 insertions(+), 11 deletions(-)
+
+diff --git a/kernel-open/nvidia/nv-pci.c b/kernel-open/nvidia/nv-pci.c
+index 0007747a..65b7a5de 100644
+--- a/kernel-open/nvidia/nv-pci.c
++++ b/kernel-open/nvidia/nv-pci.c
+@@ -3030,18 +3030,17 @@ nv_pci_shutdown(struct pci_dev *pci_dev)
+ 
+     /*
+      * Hibernation in the shutdown and reboot modes powers off through
+-     * device_shutdown() while the GPU is still suspended for hibernation:
+-     * the PM notifier or procfs suspend holds nvkms_pm_lock for writing
+-     * until a resume that never comes, and nv_pmops_thaw() leaves the GPU
+-     * suspended. Tearing the driver down then deadlocks or waits forever on
+-     * the GPU. The GPU is already shut down, power is about to be cut and
+-     * resume goes through nv_pmops_restore(), so only disable bus mastering,
+-     * as drivers before 595 did.
++     * device_shutdown() with user space frozen, so clients never close the
++     * GPU, and possibly with the GPU still suspended: the PM notifier or
++     * procfs suspend holds nvkms_pm_lock for writing until a resume that
++     * never comes. Tearing the driver down then deadlocks or waits forever.
++     * Power is about to be cut and resume goes through nv_pmops_restore(), so
++     * only disable bus mastering, as drivers before 595 did.
+      */
+     if (nv_pci_shutdown_while_suspended(nvl))
+     {
+         nv_printf(NV_DBG_INFO,
+-                  "NVRM: GPU suspended for hibernation, skipping teardown at shutdown\n");
++                  "NVRM: hibernating, skipping teardown at shutdown\n");
+     }
+     else
+     {
+diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
+index 77da4614..52c90495 100644
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -203,6 +203,7 @@ struct semaphore nv_system_power_state_lock;
+  * a hibernation image and quiesces its devices before jumping into it.
+  */
+ static NvBool nv_restoring_hibernation_image;
++static NvBool nv_hibernation_in_progress;
+ 
+ #include <linux/suspend.h>
+ 
+@@ -4748,6 +4749,15 @@ static int nv_pm_notifier(struct notifier_block *nb, unsigned long event, void *
+     nv_power_state_t power_state;
+     const char *name;
+ 
++    if (event == PM_HIBERNATION_PREPARE)
++    {
++        WRITE_ONCE(nv_hibernation_in_progress, NV_TRUE);
++    }
++    else if (event == PM_POST_HIBERNATION)
++    {
++        WRITE_ONCE(nv_hibernation_in_progress, NV_FALSE);
++    }
++
+     if (!NVreg_UseKernelSuspendNotifiers &&
+         (event != PM_RESTORE_PREPARE) && (event != PM_POST_RESTORE))
+     {
+@@ -5338,7 +5348,8 @@ nv_system_pm_transition_pending(void)
+     NvBool pending;
+ 
+     down(&nv_system_power_state_lock);
+-    pending = (nv_system_power_state != NV_POWER_STATE_RUNNING);
++    pending = (nv_system_power_state != NV_POWER_STATE_RUNNING) ||
++              READ_ONCE(nv_hibernation_in_progress);
+     up(&nv_system_power_state_lock);
+ 
+     return pending;
+@@ -5382,11 +5393,22 @@ int nv_pmops_freeze(
+     return (status == NV_OK) ? 0 : -EIO;
+ }
+ 
++/*
++ * Undo nv_pmops_freeze(). The kernel keeps running after thaw in hybrid
++ * sleep, when writing the hibernation image fails and when the boot kernel
++ * fails to restore an image. If freeze only nested on a suspend done earlier
++ * by the PM notifier or procfs, this drops that nested count so the final
++ * resume from that path really resumes the GPU. If freeze suspended the GPU
++ * itself, this resumes it.
++ */
+ int nv_pmops_thaw(
+     struct device *dev
+ )
+ {
+-    return 0;
++    NV_STATUS status;
++
++    status = nvidia_resume(dev, NV_PM_ACTION_RESUME);
++    return (status == NV_OK) ? 0 : -EIO;
+ }
+ 
+ int nv_pmops_restore(
+@@ -5399,11 +5421,22 @@ int nv_pmops_restore(
+     return (status == NV_OK) ? 0 : -EIO;
+ }
+ 
++/*
++ * Pairs with nv_pmops_restore() when entering the platform sleep state fails
++ * after poweroff and the PM core rolls back with restore callbacks.
++ */
+ int nv_pmops_poweroff(
+     struct device *dev
+ )
+ {
+-    return 0;
++    NV_STATUS status;
++
++    status = nvidia_suspend(dev, NV_PM_ACTION_HIBERNATE, NV_FALSE);
++
++    if (status != NV_OK)
++        nvidia_resume(dev, NV_PM_ACTION_RESUME);
++
++    return (status == NV_OK) ? 0 : -EIO;
+ }
+ 
+ static int

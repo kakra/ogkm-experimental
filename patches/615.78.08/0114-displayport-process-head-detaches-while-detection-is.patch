@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hiro <31057166+HiroGitea@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 12:37:23 +0100
+Subject: [PATCH] displayport: process head detaches while detection is in
+ progress
+
+615.78.08 lets a head detach through dpPreModeset() when the sink is unplugged, but
+dpPreModeset(), notifyDetachBegin() and notifyDetachEnd() still drop it during
+detection. The client has then shut the head down while the DP library keeps the group
+head-attached, so the next attach tries flush mode on an inactive head, fails, and
+skips link training and the DSC enable: a black screen until the next modeset.
+
+Detaches don't need the sink, so only attaches stay gated on detection.
+
+The rest of upstream PR 1406 (HiroGitea), the plugged state part is in the base.
+Related to upstream issue 1405.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../displayport/src/dp_connectorimpl.cpp      | 28 ++++++++++---------
+ .../displayport/src/dp_connectorimpl2x.cpp    |  8 +++---
+ 2 files changed, 19 insertions(+), 17 deletions(-)
+
+diff --git a/src/common/displayport/src/dp_connectorimpl.cpp b/src/common/displayport/src/dp_connectorimpl.cpp
+index da9c284e..3fe7ebfa 100644
+--- a/src/common/displayport/src/dp_connectorimpl.cpp
++++ b/src/common/displayport/src/dp_connectorimpl.cpp
+@@ -4159,20 +4159,22 @@ bool ConnectorImpl::needToEnableFEC(const DpPreModesetParams &params)
+ 
+ void ConnectorImpl::dpPreModeset(const DpPreModesetParams &params)
+ {
+-    if(!connectorActive || (bIsDiscoveryDetectActive || !isDiscoveryDetectComplete))
++    if(!connectorActive)
+     {
+-        DP_ASSERT(0 && "DPCONN> dpPreModeset called when connector is not active or when detection is in progress!");
++        DP_ASSERT(0 && "DPCONN> dpPreModeset called when connector is not active!");
+         return;
+     }
+ 
+     //
+     // NVKMS funnels both attach and detach through this entry point. A detach
+-    // that arrives after HPD de-assert has to be let through, otherwise DPLib
+-    // stream state is left stale while the client clears its head mask. Attach
+-    // stays gated on plug state; DDS panels are never gated on HPD.
++    // that arrives after HPD de-assert or during detection has to be let
++    // through, otherwise DPLib stream state is left stale while the client
++    // clears its head mask. Attach stays gated on detection and plug state;
++    // DDS panels are never gated on HPD.
+     //
+-    bool  bAttachAllowed = previousPlugged || bClientForcedConnected ||
+-                           main->isInternalPanelDynamicMuxCapable();
++    bool  bAttachAllowed = !bIsDiscoveryDetectActive && isDiscoveryDetectComplete &&
++                           (previousPlugged || bClientForcedConnected ||
++                            main->isInternalPanelDynamicMuxCapable());
+     NvU32 attachHeadMask = 0x0;
+     NvU32 detachHeadMask = 0x0;
+ 
+@@ -4191,7 +4193,7 @@ void ConnectorImpl::dpPreModeset(const DpPreModesetParams &params)
+     {
+         if (detachHeadMask == 0x0)
+         {
+-            DP_ASSERT(0 && "DPCONN> dpPreModeset called when Plugged State is false!");
++            DP_ASSERT(0 && "DPCONN> dpPreModeset called when detection is in progress or Plugged State is false!");
+             return;
+         }
+ 
+@@ -4203,7 +4205,7 @@ void ConnectorImpl::dpPreModeset(const DpPreModesetParams &params)
+             // perHeadAttachedGroup from recording an attach that DPLib never
+             // completed, which a later detach would otherwise act on.
+             //
+-            DP_PRINTF(DP_ERROR, "DPCONN> dpPreModeset skipping attach on headMask 0x%x, Plugged State is false!",
++            DP_PRINTF(DP_ERROR, "DPCONN> dpPreModeset skipping attach on headMask 0x%x, detection is in progress or Plugged State is false!",
+                       attachHeadMask);
+         }
+     }
+@@ -4723,9 +4725,9 @@ void ConnectorImpl::notifyAttachEnd(bool modesetCancelled)
+ // Notify library before/after shutdown (update)
+ void ConnectorImpl::notifyDetachBegin(Group * target)
+ {
+-    if(!connectorActive || (bIsDiscoveryDetectActive || !isDiscoveryDetectComplete))
++    if(!connectorActive)
+     {
+-        DP_ASSERT(0 && "DPCONN> notifyDetachBegin called when connector is not active or when detection is in progress!");
++        DP_ASSERT(0 && "DPCONN> notifyDetachBegin called when connector is not active!");
+         return;
+     }
+ 
+@@ -4799,9 +4801,9 @@ void ConnectorImpl::notifyDetachBegin(Group * target)
+ //
+ void ConnectorImpl::notifyDetachEnd(bool bKeepOdAlive, bool bKeepLinkOn)
+ {
+-    if(!connectorActive || (bIsDiscoveryDetectActive || !isDiscoveryDetectComplete))
++    if(!connectorActive)
+     {
+-        DP_ASSERT(0 && "DPCONN> notifyDetachEnd called when connector is not active or when detection is in progress!");
++        DP_ASSERT(0 && "DPCONN> notifyDetachEnd called when connector is not active!");
+         return;
+     }
+ 
+diff --git a/src/common/displayport/src/dp_connectorimpl2x.cpp b/src/common/displayport/src/dp_connectorimpl2x.cpp
+index 49646722..2178c489 100644
+--- a/src/common/displayport/src/dp_connectorimpl2x.cpp
++++ b/src/common/displayport/src/dp_connectorimpl2x.cpp
+@@ -1536,9 +1536,9 @@ bool ConnectorImpl2x::train(const LinkConfiguration &lConfig, bool force, LinkTr
+  */
+ void ConnectorImpl2x::notifyDetachBegin(Group *target)
+ {
+-    if(!connectorActive || (bIsDiscoveryDetectActive || !isDiscoveryDetectComplete))
++    if(!connectorActive)
+     {
+-        DP_ASSERT(0 && "DPCONN> notifyDetachBegin called when connector is not active or when detection is in progress!");
++        DP_ASSERT(0 && "DPCONN> notifyDetachBegin called when connector is not active!");
+         return;
+     }
+ 
+@@ -1586,9 +1586,9 @@ void ConnectorImpl2x::notifyDetachBegin(Group *target)
+ 
+ void ConnectorImpl2x::notifyDetachEnd(bool bKeepOdAlive, bool bKeepLinkOn)
+ {
+-    if(!connectorActive || (bIsDiscoveryDetectActive || !isDiscoveryDetectComplete))
++    if(!connectorActive)
+     {
+-        DP_ASSERT(0 && "DPCONN> notifyDetachEnd called when connector is not active or when detection is in progress!");
++        DP_ASSERT(0 && "DPCONN> notifyDetachEnd called when connector is not active!");
+         return;
+     }
+ 

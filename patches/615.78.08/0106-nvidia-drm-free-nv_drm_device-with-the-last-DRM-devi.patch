@@ -1,0 +1,146 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: irontom10 <irontom10@gmail.com>
+Date: Fri, 30 Oct 2026 12:32:02 +0100
+Subject: [PATCH] nvidia-drm: free nv_drm_device with the last DRM device
+ reference
+
+drm_dev_unplug() doesn't wait for the DRM files to be closed. After a GPU removal
+or unbind with a client still open, nv_drm_postclose() and the GEM, framebuffer and
+fence teardown of that client dereferenced the freed nv_drm_device. Free it from a
+DRM-managed action instead, on the last drm_dev_put(). Kernels without
+drm_managed.h keep the old behaviour.
+
+Late teardown then calls KAPI with nv_dev->pDevice == NULL. Most KAPI free functions
+already return early for that; add the check to DestroySurface() and the GC6 blocker
+refcount, which would have crashed. The RM objects are gone with the RM client of the
+device by then, and the small KAPI wrapper structs of those objects are leaked.
+
+Also check drm_dev_alloc() for an ERR_PTR; it doesn't return NULL on failure.
+
+Based on upstream PR 1336 (irontom10).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/header-presence-tests.mk     |  1 +
+ kernel-open/nvidia-drm/nvidia-drm-drv.c  | 35 +++++++++++++++++++++++-
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c |  6 +++-
+ 3 files changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/header-presence-tests.mk b/kernel-open/header-presence-tests.mk
+index 462b0387..5311bd4d 100644
+--- a/kernel-open/header-presence-tests.mk
++++ b/kernel-open/header-presence-tests.mk
+@@ -12,6 +12,7 @@ NV_HEADER_PRESENCE_TESTS = \
+   drm/drm_fbdev_generic.h \
+   drm/drm_fbdev_ttm.h \
+   drm/drm_client_setup.h \
++  drm/drm_managed.h \
+   drm/drm_probe_helper.h \
+   drm/clients/drm_client_setup.h \
+   dt-bindings/interconnect/tegra_icc_id.h \
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index 66a59dbb..d23fc0d0 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -95,6 +95,9 @@
+ #include <drm/drm_gem.h>
+ #include <drm/drm_auth.h>
+ #include <drm/drm_atomic_helper.h>
++#if defined(NV_DRM_DRM_MANAGED_H_PRESENT)
++#include <drm/drm_managed.h>
++#endif
+ 
+ static int nv_drm_revoke_modeset_permission(struct drm_device *dev,
+                                             struct drm_file *filep,
+@@ -2163,6 +2166,20 @@ void nv_drm_update_drm_driver_features(void)
+ 
+ 
+ 
++#if defined(NV_DRM_DRM_MANAGED_H_PRESENT)
++/*
++ * nv_drm_device is used by DRM files, GEM objects and fences that can outlive
++ * drm_dev_unplug(). Keep it until the last reference to the DRM device is gone.
++ */
++static void nv_drm_dev_private_release(struct drm_device *dev, void *data)
++{
++    struct nv_drm_device *nv_dev = data;
++
++    dev->dev_private = NULL;
++    nv_drm_free(nv_dev);
++}
++#endif
++
+ /*
+  * Helper function for allocate/register DRM device for given NVIDIA GPU ID.
+  */
+@@ -2196,7 +2213,7 @@ void nv_drm_register_drm_device(const struct NvKmsKapiGpuInfo *gpu_info)
+ 
+     dev = drm_dev_alloc(&nv_drm_driver, device);
+ 
+-    if (dev == NULL) {
++    if (IS_ERR_OR_NULL(dev)) {
+         NV_DRM_DEV_LOG_ERR(nv_dev, "Failed to allocate device");
+         goto failed_drm_alloc;
+     }
+@@ -2204,6 +2221,15 @@ void nv_drm_register_drm_device(const struct NvKmsKapiGpuInfo *gpu_info)
+     dev->dev_private = nv_dev;
+     nv_dev->dev = dev;
+ 
++#if defined(NV_DRM_DRM_MANAGED_H_PRESENT)
++    if (drmm_add_action(dev, nv_drm_dev_private_release, nv_dev) != 0) {
++        NV_DRM_DEV_LOG_ERR(nv_dev, "Failed to add the device release action");
++        dev->dev_private = NULL;
++        drm_dev_put(dev);
++        goto failed_drm_alloc;
++    }
++#endif
++
+     bus_is_pci =
+ #if defined(NV_LINUX)
+         device->bus == &pci_bus_type;
+@@ -2305,6 +2331,11 @@ failed_drm_load:
+ 
+     drm_dev_put(dev);
+ 
++#if defined(NV_DRM_DRM_MANAGED_H_PRESENT)
++    /* The release action freed nv_dev, unless a file still holds the device. */
++    return;
++#endif
++
+ failed_drm_alloc:
+ 
+     nv_drm_free(nv_dev);
+@@ -2379,7 +2410,9 @@ static void nv_drm_dev_destroy(struct nv_drm_device *nv_dev)
+ 
+     nv_drm_dev_unload(dev);
+     drm_dev_put(dev);
++#if !defined(NV_DRM_DRM_MANAGED_H_PRESENT)
+     nv_drm_free(nv_dev);
++#endif
+ }
+ 
+ /*
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index 911552ce..396590b0 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -2139,6 +2139,10 @@ static NvBool RmGc6BlockerRefCntAction(const struct NvKmsKapiDevice *device,
+     NV_STATUS status;
+     NV2080_CTRL_OS_UNIX_GC6_BLOCKER_REFCNT_PARAMS params = { 0 };
+ 
++    if (device == NULL) {
++        return NV_FALSE;
++    }
++
+     nvAssert((action == NV2080_CTRL_OS_UNIX_GC6_BLOCKER_REFCNT_INC) ||
+              (action == NV2080_CTRL_OS_UNIX_GC6_BLOCKER_REFCNT_DEC));
+ 
+@@ -2581,7 +2585,7 @@ static void DestroySurface
+     struct NvKmsUnregisterSurfaceParams paramsUnreg = { };
+     NvBool status;
+ 
+-    if (device->hKmsDevice == 0x0) {
++    if (device == NULL || device->hKmsDevice == 0x0) {
+         goto done;
+     }
+ 
