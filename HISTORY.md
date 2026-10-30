@@ -5,7 +5,27 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 615.78.08
 
-Fork branch `ogkm/615.78.08`, 99 patches on the upstream tag `615.78.08`.
+Fork branch `ogkm/615.78.08`, 102 patches on the upstream tag `615.78.08`.
+
+### 2026-10-30: rate limit and back off failed GEM allocations (patches 100 to 102)
+
+In a 72-minute session of Guardians of the Galaxy without workarounds,
+Chrome's GPU process asked for the same 3.2 MB NV12 video scanout buffer on
+every frame while VRAM was full: 17336 "Failed to allocate NVKMS memory of
+size 3342336 for scanout GEM object" errors in 28 minutes, up to 60 per
+second. Frame drops and lag spikes were reported at the same time; that
+the failed allocations caused them is not measured yet.
+
+- 100: the three GEM allocation messages are rate limited together (5 per
+  10 s) and name the calling process and PID.
+- 101: `drm_file::driver_priv` points to a `struct nv_drm_file` instead of
+  holding the file id itself.
+- 102: per file back-off: after a failed allocation, allocations of that
+  file that are not smaller fail with `-ENOMEM` without calling into NVKMS,
+  for 100 ms doubling up to 2 s; a success resets it. Failed scanout
+  allocations don't hold back offscreen ones.
+
+Built against 6.18.59, not installed yet.
 
 ### 2026-10-29: the series follows Tom Englund's set (all 99 patches)
 
