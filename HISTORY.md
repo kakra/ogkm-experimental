@@ -40,6 +40,32 @@ where frame rate drops or crashes used to start from about 11.5 GB.
 Both cover several changes since the 73-patch series, they can't be
 attributed to a single patch.
 
+Test on 2026-10-30, Guardians of the Galaxy without workarounds with a
+video tab open in Chrome, about 2 h (bpftrace `tools/trace/nv-pat-latency.bt`
+from 19:06, kernel log of the boot). The game ran stable.
+
+- Uncached pool (patch 44), compared with finding 3 of
+  `analysis/2026-10-26-lock-stalls.md` (`set_pages_array_uc`: 128 calls of
+  8 to 16 ms, 17 of 32 to 64 ms; `nv_alloc_system_pages`: 152 of 8 to
+  16 ms, 17 of 32 to 64 ms, one of 256 to 512 ms): `set_pages_array_uc`
+  822 calls, 40 of 8 to 16 ms, none slower; `nv_alloc_system_pages` 47 of
+  8 to 16 ms, none slower. The sessions differ, so this is a comparison
+  of the tail, not a measurement of the pool alone. All 3243 write-back
+  resets came from kswapd0 or kworkers (pool shrinker and free worker);
+  frees took at most 2 to 4 ms, all in kworkers.
+- GEM allocation rate limit (patch 125) works: 575 messages and 15014
+  suppressed in 88 minutes, at most 5 per 10 s, all "scanout GEM object of
+  Chrome_ChildIOT[6039]".
+- The back-off (patch 127) does not work in this case: the 15589 failed
+  attempts all reached NVKMS (attempts held back by the back-off are not
+  logged), up to 26 per second from one thread, while a working back-off
+  allows one every 2 s per file. Likely cause, not verified: a
+  successful smaller or offscreen allocation between the attempts resets
+  the back-off. A fix is on a local branch, built, not installed.
+- 35 known "can't update VA space" blocks (user space driver), five
+  explicit 64 KB-page sysmem allocations fell back to 4 KB pages, and one
+  20 MB Xwayland GEM allocation fell back to sysmem.
+
 ### 2026-10-30: rate limit and back off failed GEM allocations (now patches 125 to 127)
 
 In a 72-minute session of Guardians of the Galaxy without workarounds,
