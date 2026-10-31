@@ -20,7 +20,18 @@ are now 127 to 129 (the numbers in the entries below are the old ones).
 - 126: moving the cursor only unstalls the VRR head it is on, not every
   VRR head (found by code reading).
 
-Built against 6.18.59, not installed yet.
+Built against 6.18.59 and installed on 2026-10-30 (all 129 patches, booted
+2026-10-31). A session of Elite Dangerous on 2026-10-31 with tools running
+next to it: smooth, no hangs or crashes. The kernel log of the whole boot
+(about 5 h) has no NVRM messages at all, only seven failed scanout GEM
+allocations while VRAM was full: obsidian (48 and 33 MB, 09:35) and
+spectacle (30 and 33 MB, five attempts at 11:16:08 to 11:16:16). Their
+spacing (0.13 s, 2 s, 5.6 s) and the absence of "callbacks suppressed" fit a
+working back-off (patch 129); a smaller request after a larger failed one is
+let through by design. The screenshots spectacle took at that time all
+worked, presumably with other buffers. The GotG test with a video tab in
+Chrome, the case with thousands of retries, is left open for now: the
+back-off is not yet confirmed against it.
 
 ### 2026-10-30: Tom Englund's set of 2026-10-30 (patches 100 to 124)
 
