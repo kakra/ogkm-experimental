@@ -33,6 +33,16 @@ worked, presumably with other buffers. The GotG test with a video tab in
 Chrome, the case with thousands of retries, is left open for now: the
 back-off is not yet confirmed against it.
 
+Euro Truck Simulator 2 on 2026-10-31 from 14:00, same boot: recurring
+stutters, cause unknown. The nvidia modules logged nothing from 11:16 to
+17:17. From 17:17 to 17:33 Chrome failed 19 scanout allocations (64, 32
+and 15 MB) in bursts about a minute apart, with 5 suppressed messages in
+total and sysmem fallbacks for the smaller ones; the stutters recurred
+during the whole session, not only then. Pressure stall information over the
+whole boot (9 h): memory almost none (13 s), IO 2 % some (702 s), so
+reclaim and compaction are unlikely; IO bursts from the game are not
+excluded, as PSI was not recorded over time.
+
 ### 2026-10-30: Tom Englund's set of 2026-10-30 (patches 100 to 124)
 
 25 new patches from `gulafaran/patches`, most of them open upstream pull
