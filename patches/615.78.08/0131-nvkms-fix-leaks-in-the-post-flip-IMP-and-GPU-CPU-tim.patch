@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 14:43:21 +0100
+Subject: [PATCH] nvkms: fix leaks in the post flip IMP and GPU-CPU time timers
+
+A fired timer stays allocated until nvkms_free_timer() is called on its handle.
+TryToDoPostFlipIMP() cleared the handle without freeing it, and
+GpuCpuTimeDiffRefreshTimerFired() cleared or overwrote it, so every timer that
+fired leaked its nvkms_timer_t: the latter every 10 s while vblank callbacks are
+active. Free them from the callbacks, like IdleTimerProc() does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/nvkms-evo.c     | 7 ++++---
+ src/nvidia-modeset/src/nvkms-hw-flip.c | 1 +
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/src/nvidia-modeset/src/nvkms-evo.c b/src/nvidia-modeset/src/nvkms-evo.c
+index f24a967b..5e3d2b9a 100644
+--- a/src/nvidia-modeset/src/nvkms-evo.c
++++ b/src/nvidia-modeset/src/nvkms-evo.c
+@@ -8896,6 +8896,10 @@ static void GpuCpuTimeDiffRefreshTimerFired(void *dataPtr, NvU32 dataU32)
+     NvU32 dispIndex, apiHead;
+     NvBool vblankActive = FALSE;
+ 
++    /* First free the timer that triggered us. */
++    nvkms_free_timer(pDevEvo->gpuCpuTimeDiffRefreshTimer);
++    pDevEvo->gpuCpuTimeDiffRefreshTimer = NULL;
++
+     /* Update the GPU-CPU time difference */
+     nvUpdateGpuCpuTimeDiff(pDevEvo);
+ 
+@@ -8917,9 +8921,6 @@ static void GpuCpuTimeDiffRefreshTimerFired(void *dataPtr, NvU32 dataU32)
+         pDevEvo->gpuCpuTimeDiffRefreshTimer =
+             nvkms_alloc_timer(GpuCpuTimeDiffRefreshTimerFired, pDevEvo, 0,
+                              GPU_CPU_TIME_DIFF_REFRESH_PERIOD_USEC);
+-    } else {
+-        /* No active vblank callbacks, stop the timer */
+-        pDevEvo->gpuCpuTimeDiffRefreshTimer = NULL;
+     }
+ }
+ 
+diff --git a/src/nvidia-modeset/src/nvkms-hw-flip.c b/src/nvidia-modeset/src/nvkms-hw-flip.c
+index f21ec0b8..90dff87e 100644
+--- a/src/nvidia-modeset/src/nvkms-hw-flip.c
++++ b/src/nvidia-modeset/src/nvkms-hw-flip.c
+@@ -2903,6 +2903,7 @@ TryToDoPostFlipIMP(void *dataPtr, NvU32 dataU32)
+     NvU32 head, sd;
+     NVDispEvoPtr pDispEvo;
+ 
++    nvkms_free_timer(pDevEvo->postFlipIMPTimer);
+     pDevEvo->postFlipIMPTimer = NULL;
+ 
+     FOR_ALL_EVO_DISPLAYS(pDispEvo, sd, pDevEvo) {

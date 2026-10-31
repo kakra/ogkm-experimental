@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 13:07:21 +0100
+Subject: [PATCH] nvidia-drm: reject source offsets on overlay planes
+
+Overlay layers can't crop. KAPI only sends srcX/srcY for the main layer,
+where they become the head's viewport point in, and NVKMS can't program a
+source fetch offset. The offset of an overlay plane was silently dropped, so
+a commit with a cropped overlay passed and showed the wrong part of the
+framebuffer. Fail the commit, so that the compositor can fall back to
+composition. Primary planes are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-crtc.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+index 7e898d78..7ca5e044 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -1242,6 +1242,17 @@ plane_req_config_update(struct drm_plane *plane,
+         return -EINVAL;
+     }
+ 
++    /*
++     * Overlay layers can't crop: KAPI only sends srcX/srcY for the main layer,
++     * where they become the head's viewport point in, and NVKMS can't program
++     * a source fetch offset. Fail the commit instead of showing the wrong part
++     * of the framebuffer, so that the compositor can fall back to composition.
++     */
++    if (plane->type == DRM_PLANE_TYPE_OVERLAY &&
++        (plane_state->src_x != 0 || plane_state->src_y != 0)) {
++        return -EINVAL;
++    }
++
+     /* Source values are 16.16 fixed point */
+     req_config->config.srcX = plane_state->src_x >> 16;
+     req_config->config.srcY = plane_state->src_y >> 16;

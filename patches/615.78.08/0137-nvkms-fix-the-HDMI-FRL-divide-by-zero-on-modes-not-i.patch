@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 18:34:24 +0100
+Subject: [PATCH] nvkms: fix the HDMI FRL divide by zero on modes not in the
+ EDID
+
+nvHdmiFrlQueryConfigOneColorFormatAndBpc() builds an NVT_TIMING for a mode
+that isn't in the EDID, but doesn't set VTotal. hdmiQueryFRLConfigC671()
+divides by HTotal * VTotal to get the refresh rate for its DSC bpp clamp, so
+such a mode oopses the kernel when it needs DSC.
+
+Set VTotal and interlaced, which the clamp also reads, and don't divide by
+zero in the library.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/modeset/hdmipacket/nvhdmipkt_C671.c | 7 +++++--
+ src/nvidia-modeset/src/nvkms-hdmi.c            | 4 ++++
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/src/common/modeset/hdmipacket/nvhdmipkt_C671.c b/src/common/modeset/hdmipacket/nvhdmipkt_C671.c
+index b7f4e871..73194803 100644
+--- a/src/common/modeset/hdmipacket/nvhdmipkt_C671.c
++++ b/src/common/modeset/hdmipacket/nvhdmipkt_C671.c
+@@ -1158,6 +1158,7 @@ hdmiQueryFRLConfigC671(NVHDMIPKT_CLASS                         *pThis,
+ 
+ #if defined(NVHDMIPKT_NVKMS)
+         NvU32 hVisible, vVisible, rr;
++        NvU64 rasterPixels;
+         NvBool clampBpp;
+ #endif
+ 
+@@ -1290,8 +1291,10 @@ hdmiQueryFRLConfigC671(NVHDMIPKT_CLASS                         *pThis,
+         hVisible = pVidTransInfo->pTiming->HVisible;
+         vVisible = pVidTransInfo->pTiming->VVisible;
+ 
+-        rr = (pVidTransInfo->pTiming->pclk * (NvU64)10000) /
+-             (pVidTransInfo->pTiming->HTotal * (NvU64)pVidTransInfo->pTiming->VTotal);
++        rasterPixels = pVidTransInfo->pTiming->HTotal *
++                       (NvU64)pVidTransInfo->pTiming->VTotal;
++        rr = (rasterPixels != 0) ?
++             ((pVidTransInfo->pTiming->pclk * (NvU64)10000) / rasterPixels) : 0;
+ 
+         clampBpp = ((rr >= 480) || ((rr >= 165) && (hVisible == 5120) && (vVisible == 2160))) &&
+                    (!pVidTransInfo->pTiming->interlaced) &&
+diff --git a/src/nvidia-modeset/src/nvkms-hdmi.c b/src/nvidia-modeset/src/nvkms-hdmi.c
+index 17b99398..ee33972c 100644
+--- a/src/nvidia-modeset/src/nvkms-hdmi.c
++++ b/src/nvidia-modeset/src/nvkms-hdmi.c
+@@ -2539,6 +2539,8 @@ NvBool nvHdmiFrlQueryConfigOneColorFormatAndBpc(
+          * - pVidTransInfo->pTiming->HTotal
+          * - pVidTransInfo->pTiming->HVisible
+          * - pVidTransInfo->pTiming->VVisible
++         * - pVidTransInfo->pTiming->VTotal
++         * - pVidTransInfo->pTiming->interlaced
+          *
+          * This is also used, although we don't have a CEA format so we just
+          * set it to 0:
+@@ -2553,6 +2555,8 @@ NvBool nvHdmiFrlQueryConfigOneColorFormatAndBpc(
+         nvtTiming.HTotal = pHwTimings->rasterSize.x;
+         nvtTiming.VVisible = pHwTimings->rasterBlankStart.y -
+                              pHwTimings->rasterBlankEnd.y;
++        nvtTiming.VTotal = pHwTimings->rasterSize.y;
++        nvtTiming.interlaced = pModeTimings->interlaced;
+         nvtTiming.etc.status = 0;
+ 
+         pNvtTiming = &nvtTiming;

@@ -126,10 +126,10 @@ index cd1a836e..639b92e3 100644
                                        p->memory_size);
      if (ret) {
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-priv.h b/kernel-open/nvidia-drm/nvidia-drm-priv.h
-index 5769a930..087814b0 100644
+index 5a0755d3..0a2434c6 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-priv.h
 +++ b/kernel-open/nvidia-drm/nvidia-drm-priv.h
-@@ -369,6 +369,16 @@ static inline struct nv_drm_device *to_nv_device(
+@@ -375,6 +375,16 @@ static inline struct nv_drm_device *to_nv_device(
  struct nv_drm_file {
      /* Returned by DRM_IOCTL_NVIDIA_GET_DRM_FILE_UNIQUE_ID */
      u64 id;

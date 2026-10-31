@@ -1,0 +1,190 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 19:40:50 +0100
+Subject: [PATCH] nvidia-drm: return the display semaphores of a commit that
+ failed
+
+A plane's in-fence takes a display semaphore from a pool of 256 that is only
+reset when the device is set up. The fence callback marks it ready and the flip
+releases it, so if the commit failed there was no flip, and it stayed ready for
+good. After 256 of those, every commit with an in-fence fails with -EAGAIN until
+the driver is reloaded.
+
+The callback has to stay registered while the commit is applied, as NVKMS can
+wait for the flip's semaphore while applying a modeset. So let the commit keep a
+reference on the callback's data until it knows the outcome, and on failure
+remove the callback and return the semaphore to the pool.
+
+This also covers the planes already handled when __nv_drm_convert_in_fences()
+fails on a later one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-crtc.h      |  2 +
+ kernel-open/nvidia-drm/nvidia-drm-modeset.c   | 77 ++++++++++++++++++-
+ .../kapi/src/nvkms-kapi-notifiers.c           |  4 +-
+ 3 files changed, 79 insertions(+), 4 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.h b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
+index cd957103..c2d2be50 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
+@@ -405,6 +405,8 @@ void nv_free_drm_lut_surface_pool(struct nv_drm_device *nv_dev);
+ struct nv_drm_plane_state {
+     struct drm_plane_state base;
+     s32 __user *fd_user_ptr;
++    /* Only set while a commit applies this state */
++    struct nv_drm_plane_fence_cb_data *fence_data;
+     enum nv_drm_input_color_space input_colorspace;
+ #if defined(NV_DRM_HAS_HDR_OUTPUT_METADATA)
+     struct drm_property_blob *hdr_output_metadata;
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-modeset.c b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+index e9c85da8..a21a74c9 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-modeset.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+@@ -169,9 +169,21 @@ static int __nv_drm_put_back_post_fence_fd(
+ struct nv_drm_plane_fence_cb_data {
+     struct dma_fence_cb dma_fence_cb;
+     struct nv_drm_device *nv_dev;
++    /* Held until the commit knows whether it was applied */
++    struct dma_fence *fence;
+     NvU32 semaphore_index;
++    /* One for the fence callback, one for the commit */
++    atomic_t refcount;
+ };
+ 
++static void
++__nv_drm_plane_fence_cb_data_put(struct nv_drm_plane_fence_cb_data *fence_data)
++{
++    if (atomic_dec_and_test(&fence_data->refcount)) {
++        nv_drm_free(fence_data);
++    }
++}
++
+ static void
+ __nv_drm_plane_fence_cb(
+     struct dma_fence *fence,
+@@ -184,7 +196,53 @@ __nv_drm_plane_fence_cb(
+ 
+     dma_fence_put(fence);
+     nvKms->signalDisplaySemaphore(nv_dev->pDevice, fence_data->semaphore_index);
+-    nv_drm_free(fence_data);
++    __nv_drm_plane_fence_cb_data_put(fence_data);
++}
++
++/*
++ * Drop the commit's references on the fence callbacks of its planes. If the
++ * commit failed, no flip will ever release their semaphores, so stop the
++ * callbacks and return the semaphores to the pool. The callback has to be
++ * registered before the commit is applied rather than after, since NVKMS can
++ * wait for the flip's semaphore while applying a modeset.
++ */
++static void __nv_drm_put_in_fences(struct nv_drm_device *nv_dev,
++                                   nv_drm_atomic_state_base_t *state,
++                                   bool failed)
++{
++    struct drm_plane *plane;
++    struct drm_plane_state *plane_state;
++    int i;
++
++    for_each_new_plane_in_state(state, plane, plane_state, i) {
++        struct nv_drm_plane_state *nv_plane_state =
++            to_nv_drm_plane_state(plane_state);
++        struct nv_drm_plane_fence_cb_data *fence_data =
++            nv_plane_state->fence_data;
++
++        if (fence_data == NULL) {
++            continue;
++        }
++
++        nv_plane_state->fence_data = NULL;
++
++        if (failed) {
++            /*
++             * The callback runs with the fence's lock held, so if it can't be
++             * removed anymore, it has finished.
++             */
++            if (dma_fence_remove_callback(fence_data->fence,
++                                          &fence_data->dma_fence_cb)) {
++                dma_fence_put(fence_data->fence);
++                __nv_drm_plane_fence_cb_data_put(fence_data);
++            }
++            nvKms->cancelDisplaySemaphore(nv_dev->pDevice,
++                                          fence_data->semaphore_index);
++        }
++
++        dma_fence_put(fence_data->fence);
++        __nv_drm_plane_fence_cb_data_put(fence_data);
++    }
+ }
+ 
+ static int __nv_drm_convert_in_fences(
+@@ -294,7 +352,12 @@ static int __nv_drm_convert_in_fences(
+         }
+ 
+         fence_data->nv_dev = nv_dev;
++        fence_data->fence = plane_state->fence;
+         fence_data->semaphore_index = semaphore_index;
++        atomic_set(&fence_data->refcount, 2);
++
++        /* The callback drops its own reference on the fence */
++        dma_fence_get(plane_state->fence);
+ 
+         ret = dma_fence_add_callback(plane_state->fence,
+                                      &fence_data->dma_fence_cb,
+@@ -312,16 +375,18 @@ static int __nv_drm_convert_in_fences(
+ #endif
+         case 0:
+             /*
+-             * The plane state's fence reference has either been consumed or
+-             * belongs to the outstanding callback now.
++             * The plane state's fence reference belongs to fence_data now,
++             * see __nv_drm_put_in_fences().
+              */
+             plane_state->fence = NULL;
++            to_nv_drm_plane_state(plane_state)->fence_data = fence_data;
+             break;
+         default:
+             NV_DRM_DEV_LOG_ERR(
+                 nv_dev,
+                 "Failed plane fence callback registration");
+             /* Fence callback registration failed */
++            dma_fence_put(plane_state->fence);
+             nvKms->cancelDisplaySemaphore(nv_dev->pDevice, semaphore_index);
+             nv_drm_free(fence_data);
+             return ret;
+@@ -472,6 +537,8 @@ __nv_drm_cancel_flips(struct drm_device *dev,
+     struct drm_crtc_state *new_crtc_state;
+     int i;
+ 
++    __nv_drm_put_in_fences(nv_dev, state, true /* failed */);
++
+     for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
+         struct nv_drm_crtc *nv_crtc = to_nv_crtc(crtc);
+         struct nv_drm_crtc_state *nv_new_crtc_state =
+@@ -685,6 +752,10 @@ nv_drm_atomic_apply_modeset_config(struct drm_device *dev,
+         return -EINVAL;
+     }
+ 
++    if (commit) {
++        __nv_drm_put_in_fences(nv_dev, state, false /* failed */);
++    }
++
+     if (num_submitted_flips > 0) {
+         const NvU64 kick_time = ktime_get_ns();
+ 
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c b/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c
+index c8eb5767..1eb04ce4 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c
+@@ -315,7 +315,9 @@ void nvKmsKapiCancelDisplaySemaphore(struct NvKmsKapiDevice *device,
+                         &semParsed);
+ 
+     if (semParsed.payload != NVKMS_KAPI_SEMAPHORE_VALUE_DONE) {
+-        nvAssert(semParsed.payload == NVKMS_KAPI_SEMAPHORE_VALUE_NOT_READY);
++        /* READY if the fence signaled before the commit failed */
++        nvAssert(semParsed.payload == NVKMS_KAPI_SEMAPHORE_VALUE_NOT_READY ||
++                 semParsed.payload == NVKMS_KAPI_SEMAPHORE_VALUE_READY);
+         ResetSemaphore(device, index, NVKMS_KAPI_SEMAPHORE_VALUE_DONE);
+     }
+ }

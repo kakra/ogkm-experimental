@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 19:40:50 +0100
+Subject: [PATCH] nvidia-drm: don't keep a flip's semaphore in later CRTC
+ states
+
+Duplicating a CRTC state copied each layer's config including syncParams, which
+are only reset for planes that are part of the new commit. A flip ignores them
+for the other planes, but a modeset request sends the config of every layer on
+its heads. With a modeset on one CRTC and a commit leaving out a plane on
+another, that plane's flip waited on the semaphore of an old flip, until a
+later fence happened to release it or the channel idle timed out.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-crtc.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+index 5ebe3dc4..71f4cb64 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -2456,6 +2456,13 @@ static inline bool nv_drm_crtc_duplicate_req_head_modeset_config(
+     for (i = 0; i < ARRAY_SIZE(old->layerRequestedConfig); i++) {
+         new->layerRequestedConfig[i].config =
+             old->layerRequestedConfig[i].config;
++        /*
++         * These belong to the commit that set them. A modeset sends the config
++         * of planes that aren't part of its commit too, and would wait on an
++         * old semaphore.
++         */
++        memset(&new->layerRequestedConfig[i].config.syncParams, 0,
++               sizeof(new->layerRequestedConfig[i].config.syncParams));
+     }
+ 
+     return true;

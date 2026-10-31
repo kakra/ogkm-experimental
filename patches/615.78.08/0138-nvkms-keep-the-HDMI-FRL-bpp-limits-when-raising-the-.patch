@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 18:34:24 +0100
+Subject: [PATCH] nvkms: keep the HDMI FRL bpp limits when raising the link
+ rate
+
+With HDMI_QUERY_FRL_HIGHEST_PIXEL_QUALITY, which NVKMS always uses, and
+dsc_All_bpp, hdmiQueryFRLConfigC671() searches again at higher FRL rates. It
+reset the bpp range to the full bppMaxX16, which undid the clampBpp limit of
+8 bpp for 480 Hz and for 5120x2160 at 165 Hz, a client's forced bpp and the bpp
+of a precalculated timing. With a forced FRL rate the search also started above
+its end, and so went past that rate.
+
+Keep the limit, leave forced and precalculated settings alone, and don't raise
+the link rate when the bpp already is at the limit, as that gains nothing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/modeset/hdmipacket/nvhdmipkt_C671.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/common/modeset/hdmipacket/nvhdmipkt_C671.c b/src/common/modeset/hdmipacket/nvhdmipkt_C671.c
+index 73194803..52c0fc1c 100644
+--- a/src/common/modeset/hdmipacket/nvhdmipkt_C671.c
++++ b/src/common/modeset/hdmipacket/nvhdmipkt_C671.c
+@@ -1349,13 +1349,17 @@ hdmiQueryFRLConfigC671(NVHDMIPKT_CLASS                         *pThis,
+ 
+             if (pSinkCaps->pHdmiForumInfo->dsc_All_bpp)
+             {
++                // A higher FRL rate only helps when it can raise the bpp. Keep bppMaxX16Itr: it holds the
++                // limit for this mode. Forced settings and precalculated timings must not change here.
+                 if ((pClientCtrl->option == HDMI_QUERY_FRL_HIGHEST_PIXEL_QUALITY) &&
+-                    (frlComputeResult.frlRate < (NvU32)dscMaxFRLRate))
++                    (frlComputeResult.frlRate < (NvU32)dscMaxFRLRate) &&
++                    !pClientCtrl->forceFRLRate &&
++                    (bppMinX16Itr != bppMaxX16Itr) &&
++                    (frlComputeResult.bppTargetx16 < bppMaxX16Itr))
+                 {
+                     // Increase FRL rate if possible and iterate over primary compressed format bppTarget to max Bpp
+                     minFRLRateItr = getNextHigherLinkRate(frlComputeResult.frlRate);
+                     bppMinX16Itr = frlComputeResult.bppTargetx16;
+-                    bppMaxX16Itr = bppMaxX16;
+                     bRedoDSCCalc = NV_TRUE;
+                 }
+ 

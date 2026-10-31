@@ -5,7 +5,44 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 615.78.08
 
-Fork branch `ogkm/615.78.08`, 129 patches on the upstream tag `615.78.08`.
+Fork branch `ogkm/615.78.08`, 146 patches on the upstream tag `615.78.08`.
+
+### 2026-10-31: Tom Englund's set of 2026-10-31 (patches 127 to 146)
+
+Tom now carries our three GEM allocation patches too, with the same code;
+the series keeps our original commits (his copies only add a second
+Co-Authored-By line) at his position, 133 to 135. Eleven new patches from
+him; left out is the hwmon read retry, which needs the hwmon patches the
+series doesn't carry.
+
+- 127, 128: reject overlay planes with a source offset and cropped or
+  scaled cursor planes, which were shown wrong before.
+- 129: low framerate compensation for VRR.
+- 130, 131: fired NVKMS timers were never freed; with vblank callbacks
+  active one leaked every 10 s.
+- 132: vblank counts and VRR flip times from the raster position register.
+- 136: Tom's extension of our back-off (135): it starts over at the
+  shortest delay when the last one ended more than 10 s ago, and
+  `nvidia_drm.gem_alloc_backoff=0` turns it off. A separate commit, not
+  folded into ours, as it extends rather than fixes it.
+- 137 to 140: HDMI FRL: a divide by zero (oops) on modes not in the EDID
+  that need DSC, bpp limits lost when raising the link rate, a trained
+  rate replaced by the EDID rate, and failed link training reported to
+  the compositor instead of a silent black screen, with 200 ms between
+  retries (the TV, finding 5 of `analysis/2026-10-26-lock-stalls.md`).
+- 141 to 143: failed atomic commits: their queued flips no longer stall
+  later commits (-EBUSY until a 3 s timeout), their display semaphores
+  return to the pool (after 256 failed commits with in-fences every such
+  commit failed with -EAGAIN until the driver was reloaded), and later CRTC
+  states don't keep an old flip's semaphore.
+- 144: the plane ILUT follows the CRTC DEGAMMA_LUT (upstream PR
+  [#1506][pr-1506]).
+- 145: a display that wakes up but isn't ready for link training keeps its
+  HDMI FRL modes (reported in upstream PR [#1505][pr-1505]).
+- 146: a sync FD wait during system suspend is retried after resume instead
+  of dropped (stalled Plasma taskbar after S3).
+
+Built against 6.18.59, not installed yet.
 
 ### 2026-10-30: VRR flip events (patches 125, 126)
 
@@ -275,3 +312,5 @@ no longer logged as errors.
 [pr-1493]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1493
 [pr-1498]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1498
 [pr-1500]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1500
+[pr-1505]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1505
+[pr-1506]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1506

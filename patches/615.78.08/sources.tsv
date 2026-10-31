@@ -125,6 +125,23 @@ nvidia-drm: expose opt-in per-connector MST DDC adapters	upstream PR [#1400](htt
 nvidia: clear the hibernation marker when the PM notifier fails	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia-drm: report when VRR page flips are scanned out	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvkms: only unstall the VRR head the cursor moved on	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: reject source offsets on overlay planes	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: reject cropped or scaled cursor planes	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms: add low framerate compensation for VRR	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms: fix a leak in VrrUnstallTimer	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms: fix leaks in the post flip IMP and GPU-CPU time timers	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: use the raster position register for vblank counts and VRR flips	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia-drm: rate limit GEM allocation failure messages and name the client	own
 nvidia-drm: keep per file data in a struct nv_drm_file	own
 nvidia-drm: back off repeated failed GEM allocations of a client	own
+nvidia-drm: add a switch to the GEM allocation back-off and let it decay	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches) (extends our patch 135)
+nvkms: fix the HDMI FRL divide by zero on modes not in the EDID	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms: keep the HDMI FRL bpp limits when raising the link rate	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms: don't replace an assessed HDMI FRL rate with the EDID rate	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms, nvidia-drm: report failed HDMI FRL link training of a modeset	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: don't stall on flips of a commit that failed	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: return the display semaphores of a commit that failed	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: don't keep a flip's semaphore in later CRTC states	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia-drm: keep the plane ILUT in sync with the CRTC DEGAMMA_LUT	upstream PR [#1506](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1506), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms: keep the HDMI FRL caps of a sink that isn't ready for link training	upstream PR [#1505](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1505) (report), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvkms, nvidia-drm: wait out a system suspend for a sync FD auto-update	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)

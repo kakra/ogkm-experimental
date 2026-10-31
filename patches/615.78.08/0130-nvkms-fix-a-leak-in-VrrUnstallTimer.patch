@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 14:43:21 +0100
+Subject: [PATCH] nvkms: fix a leak in VrrUnstallTimer
+
+A fired timer stays allocated until nvkms_free_timer() is called on its handle.
+VrrUnstallTimer() cleared the handle without freeing it, so every timer that
+fired leaked its nvkms_timer_t. Only timers that were canceled before firing
+were freed. Free it from the callback, like IdleTimerProc() does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/nvkms-vrr.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/nvidia-modeset/src/nvkms-vrr.c b/src/nvidia-modeset/src/nvkms-vrr.c
+index d8167a28..d6c6d1b6 100644
+--- a/src/nvidia-modeset/src/nvkms-vrr.c
++++ b/src/nvidia-modeset/src/nvkms-vrr.c
+@@ -958,6 +958,7 @@ VrrUnstallTimer(void *dataPtr, NvU32 dataU32)
+     NVDispEvoPtr pDispEvo = dataPtr;
+ 
+     VrrUnstallNow(pDispEvo);
++    nvkms_free_timer(pDispEvo->vrr.unstallTimer);
+     pDispEvo->vrr.unstallTimer = NULL;
+ }
+ 
