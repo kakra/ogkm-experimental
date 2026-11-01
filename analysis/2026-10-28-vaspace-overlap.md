@@ -2,8 +2,9 @@
 
 - **Status:** cause found in the closed user space driver, nothing to fix in
   the kernel modules
-- **Evidence:** `evidence/2026-10-28-gotg-vaspace-overlap/`, earlier kernel
-  logs in `evidence/2026-10-26-gotg-explicit-pagesize/`
+- **Evidence:** `evidence/2026-10-28-gotg-vaspace-overlap/`,
+  `evidence/2026-11-01-gotg-vaspace-vram-pressure/` (VRAM full vs. not), earlier
+  kernel logs in `evidence/2026-10-26-gotg-explicit-pagesize/`
 
 ## Symptom
 
@@ -79,9 +80,18 @@ the Vulkan driver; the library was not identified).
 
 Not verified: after the failure `A` stays mapped to the right memory, but
 with the kind of the plain map instead of the requested forced-compressed
-one. No crash in the traced session. The earlier sessions with these errors
-had VRAM full, so the moves may be the driver's compaction or eviction under
-VRAM pressure; this was not checked.
+one. No crash in the traced sessions.
+
+The failures need VRAM to be full (measured 2026-11-01, same boot and
+driver): a 29 minute session without VRAM pressure had 564 moves and no
+failed unmap or map. In an 87 minute session the first failed unmap came
+1.2 s after RM started to place allocations in system memory
+(`sysmemConstruct_IMPL ... retrying with page size 0x1000`), after 56
+minutes without any failure. The 11 "can't update VA space" blocks followed
+20 to 27 minutes later, during a burst of moves and frees (3052 frees and 461
+failed unmaps in 5 minutes), each with the same sequence as above. The user
+saw stutter from the first NVRM message on and higher GPU load afterwards;
+that part is reported, not measured.
 
 open-gpu-kernel-modules issue [#1282][issue-1282] reports the same "can't
 update VA space" errors together with Xid 109 hangs in Cyberpunk 2077
@@ -93,8 +103,10 @@ sequence is unknown.
 - Reported to NVIDIA on 2026-10-28 in the [615 release feedback thread][forum-615]
   (the bug is in the closed user space driver, not in the open kernel
   modules).
-- Check whether the errors only appear with VRAM full, and whether other
-  D3D12 games show the same sequence.
+- Checked 2026-11-01: the errors only appear with VRAM full.
+- Open: whether other D3D12 games show the same sequence, and whether the
+  higher GPU load after the errors comes from system memory placement or from
+  the moves themselves.
 
 [pr-1483]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1483
 [issue-1282]: https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1282
