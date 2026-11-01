@@ -16,6 +16,12 @@
  *
  * Usage: sudo bpftrace nv-va-trace.bt > trace.log   (Ctrl-C to stop)
  * Read-only: no writes to user memory, no signals, no overrides.
+ *
+ * bpftrace 0.26: syscall tracepoint args are typed as user address space,
+ * while literals in binops are cast to the probe's (kernel) address space,
+ * which warns "Addrspace mismatch". The scalars below are plain values, so
+ * kptr() only retags them (no code is generated); user memory is still read
+ * through uptr(). delete() returns a bool, assigned to $d to keep it quiet.
  */
 config = { max_strlen = 128 }
 
@@ -29,31 +35,34 @@ tracepoint:syscalls:sys_exit_openat
 / @open_path[tid] != "" /
 {
   $path = @open_path[tid];
-  if (args.ret >= 0) {
-    @nvfd[pid, args.ret] = 1;
-    printf("O %llu %d %d fd=%d path=%s comm=%s\n", nsecs, pid, tid, args.ret, $path, comm);
+  $ret = kptr(args.ret);
+  if ($ret >= 0) {
+    @nvfd[pid, $ret] = 1;
+    printf("O %llu %d %d fd=%d path=%s comm=%s\n", nsecs, pid, tid, $ret, $path, comm);
   }
-  delete(@open_path[tid]);
+  $d = delete(@open_path, tid);
 }
 
 tracepoint:syscalls:sys_enter_close
-/ @nvfd[pid, args.fd] /
+/ @nvfd[pid, (int64)args.fd] /
 {
   printf("C %llu %d %d fd=%d comm=%s\n", nsecs, pid, tid, args.fd, comm);
-  delete(@nvfd[pid, args.fd]);
+  $d = delete(@nvfd, (pid, (int64)args.fd));
 }
 
 tracepoint:syscalls:sys_enter_ioctl
-/ ((args.cmd >> 8) & 0xff) == 0x46 /
+/ ((kptr(args.cmd) >> 8) & 0xff) == 0x46 /
 {
-  $nr = args.cmd & 0xff;
-  $size = (args.cmd >> 16) & 0x3fff;
-  $ptr = (uint64)args.arg;
+  $cmd = kptr(args.cmd);
+  $arg = kptr((uint64)args.arg);
+  $nr = $cmd & 0xff;
+  $size = ($cmd >> 16) & 0x3fff;
+  $ptr = $arg;
   $xfer = 0;
   if ($nr == 211) {
-    $nr = *(uint32 *)uptr(args.arg);
-    $size = *(uint32 *)uptr(args.arg + 4);
-    $ptr = *(uint64 *)uptr(args.arg + 8);
+    $nr = kptr(*(uint32 *)uptr($arg));
+    $size = kptr(*(uint32 *)uptr($arg + 4));
+    $ptr = kptr(*(uint64 *)uptr($arg + 8));
     $xfer = 1;
   }
   if ($nr == 0x27 || $nr == 0x29 || $nr == 0x2b || $nr == 0x34 || $nr == 0x57 || $nr == 0x58) {
@@ -86,19 +95,19 @@ tracepoint:syscalls:sys_exit_ioctl
   printf(" comm=%s\n", comm);
   /* User stack only for a failed map/unmap: status @56 (NVOS46), @40 (NVOS47). */
   $status = (uint32)0;
-  if ($nr == 0x57 && $size == 64) { $status = *(uint32 *)uptr($ptr + 56); }
-  if ($nr == 0x58 && $size == 48) { $status = *(uint32 *)uptr($ptr + 40); }
+  if ($nr == 0x57 && $size == 64) { $status = kptr(*(uint32 *)uptr($ptr + 56)); }
+  if ($nr == 0x58 && $size == 48) { $status = kptr(*(uint32 *)uptr($ptr + 40)); }
   if ($status != 0) {
     printf("S %llu %d %d status=0x%x%s\nS-END\n", nsecs, pid, tid, $status, ustack(perf, 16));
   }
-  delete(@t_nr[tid]); delete(@t_size[tid]); delete(@t_ptr[tid]); delete(@t_fd[tid]);
+  $d = delete(@t_nr, tid); $d = delete(@t_size, tid); $d = delete(@t_ptr, tid); $d = delete(@t_fd, tid);
 }
 
 tracepoint:sched:sched_process_exit
 / @nvpid[pid] && pid == tid /
 {
   printf("P %llu %d %d exit comm=%s\n", nsecs, pid, tid, comm);
-  delete(@nvpid[pid]);
+  $d = delete(@nvpid, pid);
 }
 
 END
