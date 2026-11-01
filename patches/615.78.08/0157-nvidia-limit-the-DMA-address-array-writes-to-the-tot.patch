@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sun, 1 Nov 2026 03:18:37 +0100
+Subject: [PATCH] nvidia: limit the DMA address array writes to the total page
+ count
+
+nv_load_dma_map_scatterlist() limited pages per scatterlist entry only,
+so an imported sg table that covers more pages than the memdesc wrote
+past the end of the caller's IOVA array. If it covered fewer, the rest of
+the array silently kept the physical addresses (or zeroes) it was
+initialized with, and the GPU would be pointed at those.
+
+Stop at the total page count, which matches what nv_register_sgt()
+already does for the physical address array, and fail the mapping if the
+table covers too few pages. Also return an NV_STATUS rather than -EINVAL
+when a large import can't use a single submap on old kernels.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia/nv-dma.c | 20 ++++++++++++++++----
+ 1 file changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/kernel-open/nvidia/nv-dma.c b/kernel-open/nvidia/nv-dma.c
+index 93e88eae..bf7862d2 100644
+--- a/kernel-open/nvidia/nv-dma.c
++++ b/kernel-open/nvidia/nv-dma.c
+@@ -176,7 +176,7 @@ NV_STATUS nv_create_dma_map_scatterlist(nv_dma_map_t *dma_map)
+ 
+     if (dma_map->import_sgt && (num_submaps != 1))
+     {
+-        return -EINVAL;
++        return NV_ERR_NOT_SUPPORTED;
+     }
+ 
+     dma_map->mapping.discontig.submap_count = NvU64_LO32(num_submaps);
+@@ -319,7 +319,8 @@ void nv_destroy_dma_map_scatterlist(nv_dma_map_t *dma_map)
+     os_free_mem(dma_map->mapping.discontig.submaps);
+ }
+ 
+-static void nv_load_dma_map_scatterlist(
++/* Returns the number of pages loaded, at most dma_map->page_count. */
++static NvU64 nv_load_dma_map_scatterlist(
+     nv_dma_map_t *dma_map,
+     NvU64 *va_array
+ )
+@@ -339,13 +340,16 @@ static void nv_load_dma_map_scatterlist(
+              */
+             for (sg_addr = sg_dma_address(sg), sg_len = sg_dma_len(sg),
+                     sg_off = 0, k = 0;
+-                 (sg_off < sg_len) && (k < submap->page_count);
++                 (sg_off < sg_len) && (k < submap->page_count) &&
++                     (l < dma_map->page_count);
+                  sg_off += PAGE_SIZE, l++, k++)
+             {
+                 va_array[l] = sg_addr + sg_off;
+             }
+         }
+     }
++
++    return l;
+ }
+ 
+ static NV_STATUS nv_dma_map_scatterlist(
+@@ -374,7 +378,15 @@ static NV_STATUS nv_dma_map_scatterlist(
+         return status;
+     }
+ 
+-    nv_load_dma_map_scatterlist(dma_map, va_array);
++    i = nv_load_dma_map_scatterlist(dma_map, va_array);
++    if (i != dma_map->page_count)
++    {
++        NV_DMA_DEV_PRINTF(NV_DBG_ERRORS, dma_dev,
++                "DMA mapping covers %llu pages, expected %llu\n",
++                i, dma_map->page_count);
++        nv_dma_unmap_scatterlist(dma_map);
++        return NV_ERR_INVALID_STATE;
++    }
+ 
+     for (i = 0; i < dma_map->page_count; i++)
+     {

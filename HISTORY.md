@@ -5,7 +5,24 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 615.78.08
 
-Fork branch `ogkm/615.78.08`, 146 patches on the upstream tag `615.78.08`.
+Fork branch `ogkm/615.78.08`, 163 patches on the upstream tag `615.78.08`.
+
+### 2026-11-01: Tom Englund's set of 2026-11-01 (patches 147 to 163)
+
+- 147 to 155: ACPI: power source tracking across all `_PSR` objects and
+  GPUs, a dynamic power reference NVPCF events never took, and bounds
+  checks on ACPI packages (`_PR3`, battery information, NULL elements,
+  `_DDC`, Optimus caps). Mostly laptops.
+- 156 to 160: dma-buf and peer mappings: imported buffers of 4 GiB or more
+  were truncated, an imported sg table could write past the DMA address
+  array, a peer mapping ending at the last page of a BAR was rejected, a
+  second GPU got the first GPU's IOVAs of an imported buffer, and static
+  importers got page-less exports.
+- 161 to 163: ATS support on kernels without SVA, the coherent page
+  fallback for multi-page allocations (vGPU hosts), and a double destroy
+  of a peer BAR memdesc.
+
+Built against 6.18.59, not installed yet.
 
 ### 2026-10-31: Tom Englund's set of 2026-10-31 (patches 127 to 146)
 
