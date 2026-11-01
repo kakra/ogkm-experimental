@@ -15,10 +15,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 7 insertions(+)
 
 diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
-index c336288d..1d797617 100644
+index 147032a6..fc7d4985 100644
 --- a/kernel-open/nvidia/nv.c
 +++ b/kernel-open/nvidia/nv.c
-@@ -4809,6 +4809,13 @@ static int nv_pm_notifier(struct notifier_block *nb, unsigned long event, void *
+@@ -4801,6 +4801,13 @@ static int nv_pm_notifier(struct notifier_block *nb, unsigned long event, void *
      status = nv_set_system_power_state(power_state, nv_procfs_pm_action_depth);
      if (status != NV_OK) {
          nv_printf(NV_DBG_ERRORS, "NVRM: PM %s notifier failed: 0x%x\n", name, status);

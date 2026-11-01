@@ -571,10 +571,10 @@ index 2306362a..36b02a61 100644
      struct nv_drm_device *nv_dev,
      const struct NvKmsKapiDeviceResourcesInfo *pResInfo);
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
-index da47acfd..306c7b5b 100644
+index d23fc0d0..a404ea21 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
-@@ -940,6 +940,8 @@ static int nv_drm_dev_load(struct drm_device *dev)
+@@ -936,6 +936,8 @@ static int nv_drm_dev_load(struct drm_device *dev)
          NV_DRM_DEV_LOG_ERR(nv_dev, "Failed to register event mask");
      }
  
@@ -583,7 +583,7 @@ index da47acfd..306c7b5b 100644
      /* Add crtcs */
  
      nv_drm_enumerate_crtcs_and_planes(nv_dev, &resInfo);
-@@ -953,6 +955,10 @@ static int nv_drm_dev_load(struct drm_device *dev)
+@@ -949,6 +951,10 @@ static int nv_drm_dev_load(struct drm_device *dev)
          if (!nv_drm_workthread_init(&nv_dev->vblank_worker, "nvidia-drm-vblank-notification")) {
              NV_DRM_DEV_LOG_WARN(nv_dev, "Failed to init vblank worker, vblank notification not enabled.");
          } else {
@@ -594,7 +594,7 @@ index da47acfd..306c7b5b 100644
              drm_vblank_init(dev, dev->mode_config.num_crtc);
          }
      }
-@@ -1034,6 +1040,8 @@ static void nv_drm_dev_unload(struct drm_device *dev)
+@@ -1030,6 +1036,8 @@ static void nv_drm_dev_unload(struct drm_device *dev)
  
      drm_mode_config_cleanup(dev);
  
@@ -603,7 +603,7 @@ index da47acfd..306c7b5b 100644
      if (!nvKms->declareEventInterest(nv_dev->pDevice, 0x0)) {
          NV_DRM_DEV_LOG_ERR(nv_dev, "Failed to stop event listening");
      }
-@@ -2533,6 +2541,7 @@ void nv_drm_suspend_resume(NvBool suspend)
+@@ -2529,6 +2537,7 @@ void nv_drm_suspend_resume(NvBool suspend)
  #if defined(NV_DRM_FBDEV_AVAILABLE)
              drm_fb_helper_set_suspend_unlocked(dev->fb_helper, 1);
  #endif

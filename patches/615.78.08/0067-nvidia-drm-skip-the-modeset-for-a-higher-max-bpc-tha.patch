@@ -71,7 +71,7 @@ index 4e6bf902..1aec355b 100644
  };
  
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
-index c7f4ee8c..0bb3cb4e 100644
+index 5a998755..e662a1b6 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
 @@ -502,9 +502,10 @@ static int nv_drm_connector_atomic_get_property(

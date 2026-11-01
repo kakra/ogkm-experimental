@@ -102,7 +102,7 @@ index 93efa4be..9f94b338 100644
  void nvkms_extcon_report_hdmi(NvBool state);
  void nvkms_extcon_report_hdmi_audio(NvBool state);
 diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
-index d8c5cb38..b8208afa 100644
+index 8311422e..e71dd0b5 100644
 --- a/src/nvidia-modeset/include/nvkms-types.h
 +++ b/src/nvidia-modeset/include/nvkms-types.h
 @@ -2080,6 +2080,19 @@ typedef struct _NVDispVblankApiHeadState {
@@ -174,10 +174,10 @@ index 93efa4be..9f94b338 100644
  void nvkms_extcon_report_hdmi(NvBool state);
  void nvkms_extcon_report_hdmi_audio(NvBool state);
 diff --git a/src/nvidia-modeset/src/nvkms-evo.c b/src/nvidia-modeset/src/nvkms-evo.c
-index 1ed1ffaa..f24a967b 100644
+index 66577ad9..d60ba1b3 100644
 --- a/src/nvidia-modeset/src/nvkms-evo.c
 +++ b/src/nvidia-modeset/src/nvkms-evo.c
-@@ -5578,6 +5578,7 @@ void nvFreeCoreChannelEvo(NVDevEvoPtr pDevEvo)
+@@ -5576,6 +5576,7 @@ void nvFreeCoreChannelEvo(NVDevEvoPtr pDevEvo)
  
      const NvU32 fullApiHeadMask = ~0u;
      nvCancelVrrFrameReleaseTimers(pDevEvo, fullApiHeadMask);

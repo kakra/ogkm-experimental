@@ -70,10 +70,10 @@ index 72def96d..ad069277 100644
  NvBool nvHdmiFrlQueryConfigOneColorFormatAndBpc(const NVDpyEvoRec *pDpyEvo,
                                                 const NvModeTimings *pModeTimings,
 diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
-index e5f8e3cd..207ff972 100644
+index 478c28b8..7ed67875 100644
 --- a/src/nvidia-modeset/include/nvkms-types.h
 +++ b/src/nvidia-modeset/include/nvkms-types.h
-@@ -2422,7 +2422,22 @@ typedef struct _NVDpyEvoRec {
+@@ -2415,7 +2415,22 @@ typedef struct _NVDpyEvoRec {
          HDMI_SRC_CAPS srcCaps;
          HDMI_SINK_CAPS sinkCaps;
          NvBool reassessFrlLinkCaps             : 1;

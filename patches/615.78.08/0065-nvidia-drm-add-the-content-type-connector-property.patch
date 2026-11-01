@@ -74,7 +74,7 @@ index ded99127..4e6bf902 100644
          NvBool postcompColorPassthroughChanged : 1;
      } flags;
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
-index aad36a1f..d52f1582 100644
+index 1832c2f7..eeb547fa 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
 @@ -880,6 +880,23 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
@@ -101,7 +101,7 @@ index aad36a1f..d52f1582 100644
      /* Handle HDMI VSIF metadata changes */
      req_config->flags.hdmiVsifMetadataChanged =
          !nv_drm_blobs_equal(nv_old_connector_state->hdmi_vsif_metadata,
-@@ -1152,6 +1169,14 @@ nv_drm_connector_new(struct drm_device *dev,
+@@ -1094,6 +1111,14 @@ nv_drm_connector_new(struct drm_device *dev,
          }
          drm_connector_attach_hdr_output_metadata_property(&nv_connector->base);
  

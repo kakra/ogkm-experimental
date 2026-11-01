@@ -66,10 +66,10 @@ index 56eb7b26..65cdead4 100644
       * Query where a head's raster generator reports its position, see
       * NVKMS_IOCTL_QUERY_HEAD_RASTER. Must be called from a context that can
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
-index 9b1b7648..cc76ce25 100644
+index f95cb0c3..25fc3ae3 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
-@@ -1571,6 +1571,41 @@ bool nv_drm_connector_revoke_permissions(struct drm_device *dev,
+@@ -1511,6 +1511,41 @@ bool nv_drm_connector_revoke_permissions(struct drm_device *dev,
      return ret;
  }
  
@@ -124,10 +124,10 @@ index 4ff78005..eeaf7d7b 100644
  int nv_drm_connector_update_topology_property(struct nv_drm_connector *nv_connector,
                                                const void *topology);
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
-index 6f7c0e25..a37977f4 100644
+index c52d7882..8a416afb 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
-@@ -775,6 +775,14 @@ static void nv_drm_handle_hotplug_event(struct work_struct *work)
+@@ -771,6 +771,14 @@ static void nv_drm_handle_hotplug_event(struct work_struct *work)
      struct delayed_work *dwork = to_delayed_work(work);
      struct nv_drm_device *nv_dev =
          container_of(dwork, struct nv_drm_device, hotplug_event_work);
@@ -143,10 +143,10 @@ index 6f7c0e25..a37977f4 100644
      drm_kms_helper_hotplug_event(nv_dev->dev);
  }
 diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
-index b8208afa..e5f8e3cd 100644
+index e71dd0b5..478c28b8 100644
 --- a/src/nvidia-modeset/include/nvkms-types.h
 +++ b/src/nvidia-modeset/include/nvkms-types.h
-@@ -2422,6 +2422,7 @@ typedef struct _NVDpyEvoRec {
+@@ -2415,6 +2415,7 @@ typedef struct _NVDpyEvoRec {
          HDMI_SRC_CAPS srcCaps;
          HDMI_SINK_CAPS sinkCaps;
          NvBool reassessFrlLinkCaps             : 1;

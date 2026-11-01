@@ -20,7 +20,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 40 insertions(+)
 
 diff --git a/kernel-open/nvidia/nv-dma.c b/kernel-open/nvidia/nv-dma.c
-index 9368a12a..1e44ac96 100644
+index bf7862d2..5dca1f67 100644
 --- a/kernel-open/nvidia/nv-dma.c
 +++ b/kernel-open/nvidia/nv-dma.c
 @@ -613,6 +613,38 @@ static NV_STATUS NV_API_CALL nv_dma_unmap_pages(

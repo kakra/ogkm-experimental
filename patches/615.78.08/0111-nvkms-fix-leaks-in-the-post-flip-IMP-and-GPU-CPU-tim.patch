@@ -16,10 +16,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 5 insertions(+), 3 deletions(-)
 
 diff --git a/src/nvidia-modeset/src/nvkms-evo.c b/src/nvidia-modeset/src/nvkms-evo.c
-index f24a967b..5e3d2b9a 100644
+index d60ba1b3..5bccda27 100644
 --- a/src/nvidia-modeset/src/nvkms-evo.c
 +++ b/src/nvidia-modeset/src/nvkms-evo.c
-@@ -8896,6 +8896,10 @@ static void GpuCpuTimeDiffRefreshTimerFired(void *dataPtr, NvU32 dataU32)
+@@ -8894,6 +8894,10 @@ static void GpuCpuTimeDiffRefreshTimerFired(void *dataPtr, NvU32 dataU32)
      NvU32 dispIndex, apiHead;
      NvBool vblankActive = FALSE;
  
@@ -30,7 +30,7 @@ index f24a967b..5e3d2b9a 100644
      /* Update the GPU-CPU time difference */
      nvUpdateGpuCpuTimeDiff(pDevEvo);
  
-@@ -8917,9 +8921,6 @@ static void GpuCpuTimeDiffRefreshTimerFired(void *dataPtr, NvU32 dataU32)
+@@ -8915,9 +8919,6 @@ static void GpuCpuTimeDiffRefreshTimerFired(void *dataPtr, NvU32 dataU32)
          pDevEvo->gpuCpuTimeDiffRefreshTimer =
              nvkms_alloc_timer(GpuCpuTimeDiffRefreshTimerFired, pDevEvo, 0,
                               GPU_CPU_TIME_DIFF_REFRESH_PERIOD_USEC);

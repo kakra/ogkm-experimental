@@ -58,10 +58,10 @@ index 696eb716..ca4dbdae 100644
  #include "nv-kthread-q.h"           /* kthread based queue              */
  #include <linux/efi.h>              /* efi_enabled                      */
 diff --git a/kernel-open/nvidia/nv-pci.c b/kernel-open/nvidia/nv-pci.c
-index 29f240d8..43ea2526 100644
+index 52d1a502..bf023959 100644
 --- a/kernel-open/nvidia/nv-pci.c
 +++ b/kernel-open/nvidia/nv-pci.c
-@@ -1774,7 +1774,7 @@ nv_pci_gb10b_devfreq_enable_boost(struct device *dev, unsigned int duration, int
+@@ -1760,7 +1760,7 @@ nv_pci_gb10b_devfreq_enable_boost(struct device *dev, unsigned int duration, int
          if (duration != 0)
          {
              INIT_DELAYED_WORK(&tdev->boost_disable, nv_pci_devfreq_disable_boost);
@@ -70,7 +70,7 @@ index 29f240d8..43ea2526 100644
          }
      }
  
-@@ -1786,7 +1786,7 @@ nv_pci_gb10b_devfreq_enable_boost(struct device *dev, unsigned int duration, int
+@@ -1772,7 +1772,7 @@ nv_pci_gb10b_devfreq_enable_boost(struct device *dev, unsigned int duration, int
          if (duration != 0)
          {
              INIT_DELAYED_WORK(&tdev->boost_disable, nv_pci_devfreq_disable_boost);

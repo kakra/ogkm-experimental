@@ -57,7 +57,7 @@ index 15c22c2e..36e3fec5 100755
              #
              # Check if iommu_sva_bind_device() has drvdata parameter.
 diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
-index d52f1582..c7f4ee8c 100644
+index eeb547fa..5a998755 100644
 --- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
 +++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
 @@ -783,6 +783,82 @@ static const NvU32 __nv_drm_connector_supported_colorspaces =

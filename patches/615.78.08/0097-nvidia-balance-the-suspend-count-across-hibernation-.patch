@@ -28,10 +28,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 43 insertions(+), 11 deletions(-)
 
 diff --git a/kernel-open/nvidia/nv-pci.c b/kernel-open/nvidia/nv-pci.c
-index 0007747a..65b7a5de 100644
+index c68704b3..f2555cf3 100644
 --- a/kernel-open/nvidia/nv-pci.c
 +++ b/kernel-open/nvidia/nv-pci.c
-@@ -3030,18 +3030,17 @@ nv_pci_shutdown(struct pci_dev *pci_dev)
+@@ -3016,18 +3016,17 @@ nv_pci_shutdown(struct pci_dev *pci_dev)
  
      /*
       * Hibernation in the shutdown and reboot modes powers off through
@@ -58,7 +58,7 @@ index 0007747a..65b7a5de 100644
      else
      {
 diff --git a/kernel-open/nvidia/nv.c b/kernel-open/nvidia/nv.c
-index 77da4614..52c90495 100644
+index dd669a40..147032a6 100644
 --- a/kernel-open/nvidia/nv.c
 +++ b/kernel-open/nvidia/nv.c
 @@ -203,6 +203,7 @@ struct semaphore nv_system_power_state_lock;

@@ -5,7 +5,37 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 615.78.08
 
-Fork branch `ogkm/615.78.08`, 163 patches on the upstream tag `615.78.08`.
+Fork branch `ogkm/615.78.08`, 130 patches on the upstream tag `615.78.08`.
+
+### 2026-11-01: the series only carries what matters on the test system
+
+33 patches are left out, because they have no effect on the test system
+(`docs/system.md`: desktop, no laptop, no vGPU, no PRIME rendering, no MST,
+all displays on the dGPU, OBS encoding on the iGPU). The series keeps
+everything for stability, stalls and latency, gaming, KWin, OBS (dma-buf
+exports of the dGPU), and CUDA. Hibernation and suspend patches stay, to
+test both again. Why: code paths that can't be exercised here would sit
+under our own patches untested, and could make them run on other systems
+under conditions never seen here. Left out, numbers of the 163-patch series:
+
+- laptop, ACPI and power source: 19, 32, 91, 94, 121, 147 to 155;
+- builds for other kernels and compilers: 97, 98, 99, 110, 118;
+- hardware or setups not present: 96 (confidential computing), 101 (16K
+  pages), 107 (Turing RTD3), 112 and 116 (DP modes wider than 5120 with
+  DSC), 113 and 161 (Grace EGM and ATS), 120 (Apple Thunderbolt), 122
+  (Blackwell), 158 and 163 (GPU-to-GPU peer mappings), 162 (vGPU hosts),
+  88 (vfio on the HDA function), 67 (MST PATH).
+
+The opt-in MST DDC adapters (123, off by default) stay, as the raster
+position patch depends on them. The rest applied without conflicts. Built
+against 6.18.59, installed and booted on 2026-11-01 08:00: clean boot, no
+NVRM messages, no warnings from the nvidia modules. The 146- and
+163-patch series were never booted.
+
+The boot of the 129-patch series before it ran 23 h (2026-10-31 08:35 to
+2026-11-01 07:59): no NVRM messages at all, 26 failed scanout GEM
+allocations of Chrome, spectacle and obsidian (5 more messages suppressed)
+and 10 compression retries or sysmem fallbacks of Chrome.
 
 ### 2026-11-01: Tom Englund's set of 2026-11-01 (patches 147 to 163)
 

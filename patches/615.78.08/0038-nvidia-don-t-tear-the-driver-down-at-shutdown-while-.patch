@@ -50,10 +50,10 @@ index 943f3318..5b7484ba 100644
  
  void          nvidia_modeset_suspend           (NvU32 gpuId);
 diff --git a/kernel-open/nvidia/nv-pci.c b/kernel-open/nvidia/nv-pci.c
-index 96b02f6b..29f240d8 100644
+index 5c48eb82..52d1a502 100644
 --- a/kernel-open/nvidia/nv-pci.c
 +++ b/kernel-open/nvidia/nv-pci.c
-@@ -2988,6 +2988,26 @@ nv_pci_remove(struct pci_dev *pci_dev)
+@@ -2974,6 +2974,26 @@ nv_pci_remove(struct pci_dev *pci_dev)
      nv_pci_remove_helper(pci_dev, true);
  }
  
@@ -80,7 +80,7 @@ index 96b02f6b..29f240d8 100644
  static void
  nv_pci_shutdown(struct pci_dev *pci_dev)
  {
-@@ -3008,11 +3028,29 @@ nv_pci_shutdown(struct pci_dev *pci_dev)
+@@ -2994,11 +3014,29 @@ nv_pci_shutdown(struct pci_dev *pci_dev)
      nv_pci_tegra_unregister_devfreq(pci_dev);
  #endif
  

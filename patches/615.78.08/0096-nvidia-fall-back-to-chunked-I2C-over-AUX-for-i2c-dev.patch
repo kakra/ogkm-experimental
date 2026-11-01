@@ -44,10 +44,10 @@ index a0f61ed2..38d48d4b 100644
                                         (NvU8 *)msgs[i].buf);
          }
 diff --git a/src/nvidia/arch/nvalloc/unix/include/nv-priv.h b/src/nvidia/arch/nvalloc/unix/include/nv-priv.h
-index 2cfa3525..9b1cfdf1 100644
+index a3dcebfd..9cd24901 100644
 --- a/src/nvidia/arch/nvalloc/unix/include/nv-priv.h
 +++ b/src/nvidia/arch/nvalloc/unix/include/nv-priv.h
-@@ -83,6 +83,7 @@ typedef struct nv_i2c_adapter_entry_s
+@@ -81,6 +81,7 @@ typedef struct nv_i2c_adapter_entry_s
      void  *pOsAdapter;
      NvU32  port;
      NvU32  displayId[MAX_DISP_ID_PER_ADAPTER];
@@ -56,10 +56,10 @@ index 2cfa3525..9b1cfdf1 100644
  
  #define NV_INIT_FLAG_HAL                  0x0001
 diff --git a/src/nvidia/arch/nvalloc/unix/src/osapi.c b/src/nvidia/arch/nvalloc/unix/src/osapi.c
-index 1a534421..ff8ffb26 100644
+index 22c4ede2..0545d9f0 100644
 --- a/src/nvidia/arch/nvalloc/unix/src/osapi.c
 +++ b/src/nvidia/arch/nvalloc/unix/src/osapi.c
-@@ -4012,7 +4012,159 @@ NvBool NV_API_CALL rm_is_supported_pci_device(
+@@ -3957,7 +3957,159 @@ NvBool NV_API_CALL rm_is_supported_pci_device(
  /*
   * Performs the I2C transfers which are related with DP AUX channel
   */
@@ -220,7 +220,7 @@ index 1a534421..ff8ffb26 100644
  (
      nv_state_t  *pNv,
      NvU32       displayId,
-@@ -4026,14 +4178,6 @@ static NV_STATUS RmDpAuxI2CTransfer
+@@ -3971,14 +4123,6 @@ static NV_STATUS RmDpAuxI2CTransfer
      RM_API    *pRmApi   = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
      NV_STATUS  status;
  
@@ -235,7 +235,7 @@ index 1a534421..ff8ffb26 100644
      pParams = portMemAllocNonPaged(sizeof(*pParams));
      if (pParams == NULL)
      {
-@@ -4068,6 +4212,31 @@ static NV_STATUS RmDpAuxI2CTransfer
+@@ -4013,6 +4157,31 @@ static NV_STATUS RmDpAuxI2CTransfer
      return status;
  }
  
@@ -267,7 +267,7 @@ index 1a534421..ff8ffb26 100644
  /*
   * Performs the I2C transfers which are not related with DP AUX channel
   */
-@@ -4225,7 +4394,7 @@ NV_STATUS NV_API_CALL rm_i2c_transfer(
+@@ -4170,7 +4339,7 @@ NV_STATUS NV_API_CALL rm_i2c_transfer(
      NvBool     unlockGpu = NV_FALSE;
      NvU32      x;
      void      *fp;
@@ -276,7 +276,7 @@ index 1a534421..ff8ffb26 100644
  
      NV_ENTER_RM_RUNTIME(sp,fp);
      threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
-@@ -4267,8 +4436,14 @@ NV_STATUS NV_API_CALL rm_i2c_transfer(
+@@ -4212,8 +4381,14 @@ NV_STATUS NV_API_CALL rm_i2c_transfer(
          goto finish;
      }
  
@@ -292,7 +292,7 @@ index 1a534421..ff8ffb26 100644
          NvU32 displayId = pNvp->i2c_adapters[x].displayId[numDispId];
  
          if (displayId == INVALID_DISP_ID)
-@@ -4290,12 +4465,13 @@ NV_STATUS NV_API_CALL rm_i2c_transfer(
+@@ -4235,12 +4410,13 @@ NV_STATUS NV_API_CALL rm_i2c_transfer(
                  goto semafinish;
              }
  
@@ -307,7 +307,7 @@ index 1a534421..ff8ffb26 100644
              break;
          }
      }
-@@ -4408,6 +4584,7 @@ void RmI2cAddGpuPorts(nv_state_t * pNv)
+@@ -4353,6 +4529,7 @@ void RmI2cAddGpuPorts(nv_state_t * pNv)
          {
              pNvp->i2c_adapters[x].displayId[numDispId] = INVALID_DISP_ID;
          }
