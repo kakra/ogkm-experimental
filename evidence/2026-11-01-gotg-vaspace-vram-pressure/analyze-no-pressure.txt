@@ -1,0 +1,40 @@
+calls 21244 by_op {'MAP': 6640, 'UNMAP': 5726, 'FREE': 7629, 'DUP': 106, 'ALLOC': 1128, 'ALLOC_MEMORY': 15} xfer 0
+  MAP           status    0x0 x6640
+  UNMAP         status    0x0 x5726
+  FREE          status    0x0 x7629
+  DUP           status    0x0 x106
+  ALLOC         status    0x0 x1128
+  ALLOC_MEMORY  status    0x0 x15
+unmap failures by class: none
+counters: {'unmap_ok_of_mapping_older_than_trace': 411, 'free_of_object_older_than_trace': 7134, 'handle_reused_after_free': 456, 'process_exit': 6, 'implicit_unmap_inferred': 256}
+findings: {'IN_FIELD_CHANGED_DURING_CALL': 30, 'UNPARSED': 4, 'ORPHAN_EXIT': 3, 'ALLOC_OVER_LIVE_HANDLE': 1}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 192, "tid": 216248, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 194, "tid": 216248, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 211, "tid": 216248, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 214, "tid": 216248, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 259, "tid": 216248, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 632, "tid": 216268, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 634, "tid": 216268, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 651, "tid": 216268, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 654, "tid": 216268, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 699, "tid": 216268, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 834, "tid": 216477, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 836, "tid": 216477, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 853, "tid": 216477, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 856, "tid": 216477, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 901, "tid": 216477, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1120, "tid": 216497, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1122, "tid": 216497, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1139, "tid": 216497, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1142, "tid": 216497, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1187, "tid": 216497, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1202, "tid": 216497, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1490, "tid": 216529, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1492, "tid": 216529, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1509, "tid": 216529, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1512, "tid": 216529, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1557, "tid": 216529, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1572, "tid": 216529, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1610, "tid": 216529, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 1616, "tid": 216529, "fields": {"cls": [0, 65]}}
+  {"type": "IN_FIELD_CHANGED_DURING_CALL", "op": "ALLOC", "line": 14287, "tid": 216840, "fields": {"cls": [0, 65]}}
