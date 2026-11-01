@@ -2,3 +2,6 @@
 /build/
 *.orig
 *.rej
+
+# Python bytecode of the tools
+__pycache__/
