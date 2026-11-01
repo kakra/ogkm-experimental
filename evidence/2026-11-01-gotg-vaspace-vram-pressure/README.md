@@ -98,6 +98,35 @@ comes 11.2 s after the move, so it is stale state, not a race between the two
 threads. Many of the other failed unmaps go to a temporary handle that the
 same thread freed (`RM_FREE`) just before.
 
+### Race or logic error
+
+`tools/trace/nv-va-race-check.py trace-vram-full.log` pairs entry and exit of
+every map, unmap and free, and for each failed call looks at the earlier
+calls on the same virtual object and at the call that last mapped the VA:
+
+```
+failed calls overlapping a call on the same handle from another thread: 0
+   11  MAP fail: last op on same handle = UNMAP(fail), same thread  gap ms min 0.002 median 0.004
+  440  UNMAP fail: last op on same handle = FREE, same thread  gap ms min 0.009 median 0.036 max 1
+  171  UNMAP fail: last op on same handle = MAP, same thread  gap ms min 9.712 median 20742
+   51  UNMAP fail: last op on same handle = MAP, other thread  gap ms min 5112 median 281671
+```
+
+Measured: no failed call overlaps a call on the same object from another
+thread. 440 of the 662 failed unmaps come from the thread that freed the
+same handle a few microseconds before (the free already removed the
+mapping). Each of the 11 failed maps follows the failed unmap of the same
+thread by microseconds; the last successful map of that object was 11 s to
+438 s earlier, in 10 cases by DeferedReleaseThread.
+
+Inferred: this is not a race between the RM calls of two threads. The
+driver works with VAs and handles that have been stale for seconds to
+minutes, in calls that run strictly one after the other. The bug is a
+logic error in the path that moves allocations when VRAM is full. A data
+race inside the user space driver's own bookkeeping (which never reaches
+an ioctl) cannot be excluded by a syscall trace, but would not explain
+values that stay wrong for minutes.
+
 Reported by the user, not measured: the game ran smoothly until the first
 NVRM message, then frame rates became unstable with heavy stutter. After the
 VA space errors it settled again, but less smoothly than before and with
