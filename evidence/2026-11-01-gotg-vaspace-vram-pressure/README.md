@@ -127,6 +127,23 @@ race inside the user space driver's own bookkeeping (which never reaches
 an ioctl) cannot be excluded by a syscall trace, but would not explain
 values that stay wrong for minutes.
 
+### Left-over mappings
+
+Measured: after each of the 11 failed maps, neither the virtual object `A`
+nor its memory `M` appears in any later RM call until the game exits (1 to
+8 minutes later); together 224 MiB (one 64 MiB and ten 16 MiB mappings).
+Of all objects mapped successfully in the same window, about 30 % are not
+touched again either, so 11 of 11 is unlikely to be chance. The 440 stale
+unmaps of freed handles leave nothing behind: RM already removed those
+mappings with the free. The number of live mappings in the trace model does
+not grow after the errors (about 1560 before the burst of moves, about 1160
+afterwards).
+
+Inferred, not verified: the user space driver gives up on these objects
+after the failed map, and their memory stays allocated and mapped until the
+process exits. A syscall trace cannot tell whether the GPU still uses them,
+and cannot connect them to the higher GPU load.
+
 Reported by the user, not measured: the game ran smoothly until the first
 NVRM message, then frame rates became unstable with heavy stutter. After the
 VA space errors it settled again, but less smoothly than before and with
