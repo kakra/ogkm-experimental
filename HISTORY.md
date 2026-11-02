@@ -5,7 +5,23 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 615.78.08
 
-Fork branch `ogkm/615.78.08`, 130 patches on the upstream tag `615.78.08`.
+Fork branch `ogkm/615.78.08`, 132 patches on the upstream tag `615.78.08`.
+
+### 2026-11-02: two hardening fixes from a code review (patches 43, 98)
+
+- 43 (fixes 42): the uncached pool checked its limit before adding the
+  pages, so frees running at the same time could exceed
+  `uncached_pool_max_mb` together. Not reachable in this series, as all
+  such frees run from the single deferred free work item (41). The room is
+  now reserved in the pool counter first and given back on failure.
+- 98 (fixes 97): the chunked I2C-over-AUX fallback restarted its defer
+  limit with every 16-byte AUX transaction, so a sink that defers every
+  transaction of a long message could hold the API and GPU locks for
+  hundreds of milliseconds. A budget of 64 delays per message now caps
+  that. The fallback only runs for i2c-dev clients (ddcutil, DDC/CI
+  brightness in Plasma) after the I2C transfer control failed.
+
+Both built (object files only) against 6.18 kernel headers, not tested.
 
 ### 2026-11-01: the series only carries what matters on the test system
 
