@@ -41,6 +41,7 @@ nvidia-modeset: cut the per-flip work area memset and flip request vmalloc	[gula
 nvkms: don't hang the display when the DIFR prefetch GPFIFO fills up	upstream PR [#1286](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1286), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia: free uncached and write-combined sysmem from a worker	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia: keep uncached and write-combined sysmem pages uncached in a pool	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: reserve room in the uncached pool before adding pages	own
 nvidia: unmap exported dma-buf sg tables with the original entry count	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia: hold the reservation lock when RM maps an imported dma-buf	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia-drm: return an error pointer from PRIME import, don't BUG on size	[gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
@@ -95,6 +96,7 @@ nvidia-modeset: don't free a device reference twice in a nested revoke	upstream 
 nvidia: coalesce static BAR1 updates of noncontiguous allocations	upstream PR [#1500](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1500), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia-drm: free nv_drm_device with the last DRM device reference	upstream PR [#1336](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1336), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia: fall back to chunked I2C-over-AUX for i2c-dev DP transfers	upstream PR [#1436](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1436), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
+nvidia: limit the delays of a whole chunked I2C-over-AUX message	own
 nvidia: balance the suspend count across hibernation thaw and poweroff	upstream PR [#1464](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1464), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 nvidia-modeset: map HDMI DSC max slices code 7 back to 16 slices at 400 MHz	upstream PR [#1352](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1352), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)
 displayport: process head detaches while detection is in progress	upstream PR [#1406](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1406), via [gulafaran/patches](https://github.com/gulafaran/open-gpu-kernel-modules/tree/patches)

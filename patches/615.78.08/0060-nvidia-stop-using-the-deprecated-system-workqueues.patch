@@ -80,10 +80,10 @@ index 52d1a502..bf023959 100644
      }
  
 diff --git a/kernel-open/nvidia/nv-vm.c b/kernel-open/nvidia/nv-vm.c
-index 15e5f74c..2f0043ee 100644
+index fe5e62c4..ab779ec5 100644
 --- a/kernel-open/nvidia/nv-vm.c
 +++ b/kernel-open/nvidia/nv-vm.c
-@@ -1227,7 +1227,7 @@ static void nv_account_mm_free(nv_linux_mm_free_work_t *mm_work)
+@@ -1239,7 +1239,7 @@ static void nv_account_mm_free(nv_linux_mm_free_work_t *mm_work)
      atomic_long_add_return(-mm_work->num_pages, &mm_work->mm->rss_stat.count[MM_SHMEMPAGES]);
  #endif
  

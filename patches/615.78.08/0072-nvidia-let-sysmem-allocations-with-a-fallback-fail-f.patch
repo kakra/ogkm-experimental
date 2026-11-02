@@ -67,7 +67,7 @@ index 2731195b..566933c3 100644
  
  NV_STATUS  NV_API_CALL  nv_register_user_pages   (nv_state_t *, NvU64, NvU64 *, void *, void **, NvBool);
 diff --git a/kernel-open/nvidia/nv-vm.c b/kernel-open/nvidia/nv-vm.c
-index 2f0043ee..f1902973 100644
+index ab779ec5..9b811b19 100644
 --- a/kernel-open/nvidia/nv-vm.c
 +++ b/kernel-open/nvidia/nv-vm.c
 @@ -310,7 +310,14 @@ static unsigned int nv_compute_gfp_mask(
