@@ -10,9 +10,11 @@ T=/sys/kernel/tracing
 OUT=${1:-./nv-sysmem-fail-$(date +%Y%m%d-%H%M%S).txt}
 EVENTS="nvsys_fail"
 
-# struct nv_alloc_s offsets (pahole -C nv_alloc_s /sys/kernel/btf/nvidia, 615.78.08):
+# struct nv_alloc_s offsets (pahole -C nv_alloc_s /sys/kernel/btf/nvidia),
+# the same in 615.78.08 and 620.70.06 (with and without the ogkm series):
 #   flags @24 (contig = bit 0), cache_type @28, num_pages @32, order @36
 # nv_alloc_system_pages(nv_state_t *nv, nv_alloc_t *at): at = $arg2
+# Add a release to the case below only after checking the offsets with pahole.
 FIELDS='order=+36($arg2):u32 num_pages=+32($arg2):u32 cache_type=+28($arg2):u32 flags=+24($arg2):x16'
 
 cleanup() {
@@ -31,9 +33,14 @@ if [ "$(id -u)" != 0 ]; then
 	echo "Must run as root" >&2
 	exit 1
 fi
-if [ "$(cat /sys/module/nvidia/version)" != 615.78.08 ]; then
-	echo "Warning: struct offsets were taken from 615.78.08, check them with pahole" >&2
-fi
+version=$(cat /sys/module/nvidia/version 2>/dev/null)
+case "$version" in
+615.78.08 | 620.70.06) ;;
+*)
+	echo "Unknown nvidia driver version '$version': check the struct nv_alloc_s offsets with pahole" >&2
+	exit 1
+	;;
+esac
 
 echo 0 > $T/tracing_on
 echo > $T/trace
