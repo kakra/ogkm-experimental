@@ -10,7 +10,7 @@ evidence README says otherwise. State as of 2026-10-29.
 | RAM | 31 GiB, 31 GiB swap; in daily use memory is heavily fragmented (often no free blocks of order 8 or higher in the Normal zone) |
 | Displays | 2x 3840x2160 via DisplayPort; 2560x2880 via HDMI (LG SDQHD, TMDS); Samsung TV (2020) via HDMI, FRL up to 10G x4, DSC, 4K120 VRR, usually disabled; the newer monitors run with VRR enabled |
 | Distribution | Gentoo Linux |
-| Kernel | 6.18.59-gentoo (since 2026-10-29, 6.18.58 before), `CONFIG_PREEMPT_LAZY=y`, `CONFIG_HZ=300`, THP `madvise`, `vm.compaction_proactiveness=60` (default 20) |
+| Kernel | 6.18.60-gentoo (since 2026-11-03, 6.18.59 since 2026-10-29, 6.18.58 before), `CONFIG_PREEMPT_LAZY=y`, `CONFIG_HZ=300`, THP `madvise`, `vm.compaction_proactiveness=60` (default 20) |
 | Kernel command line | `mitigations=off nvidia-drm.modeset=1 nvidia-drm.fbdev=1 intel_iommu=on iommu=pt` |
 | Driver | `x11-drivers/nvidia-drivers-620.70.06` (since 2026-11-05, 615.78.08 before), open kernel modules, built with the series from this repository |
 | Desktop | KDE Plasma 6.8.1 on Wayland (KWin) |
