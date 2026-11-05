@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Decode nv-va-trace.bt output and replay a GPU-VA mapping model (original).
 
-Layouts come from the 615.78.08 headers (nvos.h, nv-ioctl.h); offsets are
-little-endian x86-64 with the NV_ALIGN_BYTES(8) padding made explicit.
+Layouts come from the 615.78.08 headers (nvos.h, nv-ioctl.h) and are
+unchanged in 620.70.06; offsets are little-endian x86-64 with the
+NV_ALIGN_BYTES(8) padding made explicit. A log whose "V <version>" line names
+another release is refused: check the headers, then add it to KNOWN_RELEASES.
 The model is an observer's reconstruction, not RM state: anything the trace
 cannot see (objects older than the trace, kernel-internal frees) is reported
 as UNKNOWN rather than guessed.
@@ -63,6 +65,9 @@ def nvos47(b):  # RM_UNMAP_MEMORY_DMA
                 flags=_u32(b, 16), va=_u64(b, 24), size=_u64(b, 32), status=_u32(b, 40))
 
 
+# Driver releases whose escapes and parameter blocks match the decoders below.
+KNOWN_RELEASES = ('615.78.08', '620.70.06')
+
 ESCAPES = {
     0x27: ('ALLOC_MEMORY', {48: nvos02, 56: nvos02}),
     0x29: ('FREE', {16: nvos00}),
@@ -107,6 +112,13 @@ def parse(lines):
                 stack = None
             elif line.strip():
                 stack['frames'].append(line.strip())
+            continue
+        if line.startswith('V '):
+            version = line[2:].strip()
+            if version not in KNOWN_RELEASES:
+                raise ValueError(f'line {number}: driver {version} is not one of {", ".join(KNOWN_RELEASES)}; '
+                                 'check the struct layouts before decoding this log')
+            out.append(dict(kind='VERSION', version=version, line=number))
             continue
         if line.startswith('S '):
             parts = line.split()
@@ -291,6 +303,7 @@ def run(path, focus=None):
             model.proc_exit(rec['pid'])
     calls = [r for r in records if r['kind'] == 'CALL']
     report = dict(
+        driver=next((r['version'] for r in records if r['kind'] == 'VERSION'), None),
         calls=len(calls),
         by_op=dict(Counter(r['op'] for r in calls)),
         xfer_calls=sum(1 for r in calls if r['xfer']),
@@ -314,10 +327,14 @@ def main():
     parser.add_argument('--json')
     parser.add_argument('--va', type=lambda s: int(s, 0))
     args = parser.parse_args()
-    report = run(args.trace, args.va)
+    try:
+        report = run(args.trace, args.va)
+    except ValueError as err:
+        sys.exit(f'{args.trace}: {err}')
     if args.json:
         with open(args.json, 'w') as out:
             json.dump(report, out, indent=1, default=str)
+    print(f"driver {report['driver'] or 'unknown (log without V line)'}")
     print(f"calls {report['calls']} by_op {report['by_op']} xfer {report['xfer_calls']}")
     for row in report['status']:
         print(f"  {row['op']:13s} status {row['status']:>6s} x{row['n']}")

@@ -127,6 +127,15 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(r['failure_stacks'][9][0], ['7f00deadbeef wine_thread+0x10'])
         self.assertTrue(any(f['type'] == 'UNDECODED' for f in r['findings']))
 
+    def test_driver_version_line(self):
+        log = Log()
+        log.lines.append('V 620.70.06')
+        log.map(0xA, 0x100, 0x1000, 0x200000)
+        self.assertEqual(log.run()['driver'], '620.70.06')
+        log.lines[0] = 'V 999.1.2'
+        with self.assertRaises(ValueError):
+            log.run()
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

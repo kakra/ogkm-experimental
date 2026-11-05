@@ -2,6 +2,9 @@
 /*
  * NVIDIA RM object/GPU-VA lifecycle tracer (original; written from the
  * 615.78.08 headers nv_escape.h, nv-ioctl-numbers.h, nv-ioctl.h, nvos.h).
+ * The escapes and parameter blocks below are unchanged in 620.70.06. The
+ * first line of the log is the running driver version ("V <version>");
+ * nv_va_analyze.py refuses logs of releases it does not know.
  *
  * Records, per thread, the raw parameter block of each RM escape that can
  * create, map, unmap, duplicate or free an object, read twice: at syscall
@@ -24,6 +27,12 @@
  * through uptr(). delete() returns a bool, assigned to $d to keep it quiet.
  */
 config = { max_strlen = 128 }
+
+BEGIN
+{
+  printf("V ");
+  cat("/sys/module/nvidia/version");
+}
 
 tracepoint:syscalls:sys_enter_openat
 {
