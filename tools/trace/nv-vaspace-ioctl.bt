@@ -26,7 +26,8 @@
 // bpftrace 0.26 types syscall tracepoint args as user address space and
 // warns "Addrspace mismatch" when they meet a literal in a binop. kptr()
 // only retags these scalars (no code is generated); user memory is still
-// read through uptr().
+// read through uptr(). delete() returns a bool, assigned to $d to keep it
+// quiet.
 // The escapes and layouts are the same in 615.78.08 and 620.70.06. The log
 // header names the running driver; nv-vaspace-analyze.py refuses others.
 
@@ -81,11 +82,11 @@ tracepoint:syscalls:sys_exit_ioctl /@nr[tid]/
 		       @u_size[tid], *(uint32 *)uptr($p + 16), @u_off[tid],
 		       *(uint32 *)uptr($p + 40), comm);
 	}
-	delete(@nr[tid]);
-	delete(@p[tid]);
-	delete(@m_off[tid]);
-	delete(@u_off[tid]);
-	delete(@u_size[tid]);
+	$d = delete(@nr, tid);
+	$d = delete(@p, tid);
+	$d = delete(@m_off, tid);
+	$d = delete(@u_off, tid);
+	$d = delete(@u_size, tid);
 }
 
 END
