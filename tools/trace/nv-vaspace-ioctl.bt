@@ -22,6 +22,11 @@
 // NVOS47_PARAMETERS (48 bytes): hClient @0 hDevice @4 hDma @8 hMemory @12
 //   flags @16 dmaOffset @24 size @32 status @40
 // nv_ioctl_xfer_t: cmd @0 size @4 ptr @8
+//
+// bpftrace 0.26 types syscall tracepoint args as user address space and
+// warns "Addrspace mismatch" when they meet a literal in a binop. kptr()
+// only retags these scalars (no code is generated); user memory is still
+// read through uptr().
 // The escapes and layouts are the same in 615.78.08 and 620.70.06. The log
 // header names the running driver; nv-vaspace-analyze.py refuses others.
 
@@ -32,13 +37,13 @@ BEGIN
 	printf("# start, ts in ms; off/len: range of hMemory; dmaoff: GPU VA (in: requested)\n");
 }
 
-tracepoint:syscalls:sys_enter_ioctl /((args.cmd >> 8) & 0xff) == 0x46/
+tracepoint:syscalls:sys_enter_ioctl /((kptr(args.cmd) >> 8) & 0xff) == 0x46/
 {
-	$nr = args.cmd & 0xff;
-	$p = (uint64)args.arg;
+	$nr = kptr(args.cmd) & 0xff;
+	$p = kptr((uint64)args.arg);
 	if ($nr == 211) {	// NV_ESC_IOCTL_XFER_CMD (NV_IOCTL_BASE + 11)
-		$nr = *(uint32 *)uptr($p);
-		$p = *(uint64 *)uptr($p + 8);
+		$nr = kptr(*(uint32 *)uptr($p));
+		$p = kptr(*(uint64 *)uptr($p + 8));
 	}
 	if ($nr == 0x57 || $nr == 0x58) {
 		@nr[tid] = $nr;
@@ -59,7 +64,7 @@ tracepoint:syscalls:sys_exit_ioctl /@nr[tid]/
 	if (@nr[tid] == 0x57) {
 		printf("%llu %s pid=%d tid=%d ret=%d client=0x%x device=0x%x dma=0x%x mem=0x%x off=0x%llx len=0x%llx flags=0x%x dmaoff=0x%llx in=0x%llx status=0x%x comm=%s\n",
 		       nsecs / 1000000,
-		       *(uint32 *)uptr($p + 56) != 0 ? "MAPFAIL" : "map",
+		       kptr(*(uint32 *)uptr($p + 56)) != 0 ? "MAPFAIL" : "map",
 		       pid, tid, args.ret,
 		       *(uint32 *)uptr($p), *(uint32 *)uptr($p + 4),
 		       *(uint32 *)uptr($p + 8), *(uint32 *)uptr($p + 12),
@@ -69,7 +74,7 @@ tracepoint:syscalls:sys_exit_ioctl /@nr[tid]/
 	} else {
 		printf("%llu %s pid=%d tid=%d ret=%d client=0x%x device=0x%x dma=0x%x mem=0x%x size=0x%llx flags=0x%x dmaoff=0x%llx status=0x%x comm=%s\n",
 		       nsecs / 1000000,
-		       *(uint32 *)uptr($p + 40) != 0 ? "UNMAPFAIL" : "unmap",
+		       kptr(*(uint32 *)uptr($p + 40)) != 0 ? "UNMAPFAIL" : "unmap",
 		       pid, tid, args.ret,
 		       *(uint32 *)uptr($p), *(uint32 *)uptr($p + 4),
 		       *(uint32 *)uptr($p + 8), *(uint32 *)uptr($p + 12),
