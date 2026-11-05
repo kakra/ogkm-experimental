@@ -12,6 +12,8 @@ of them shows up as "no tracked overlap".
 import re
 import sys
 
+# Driver releases whose NVOS46/NVOS47 layouts match the tracer offsets.
+KNOWN_RELEASES = ('615.78.08', '620.70.06')
 KV = re.compile(r'(\w+)=(\S+)')
 PAGE = 0xfff
 
@@ -48,6 +50,13 @@ def main(path):
 
     with open(path, errors='replace') as f:
         for raw in f:
+            if raw.startswith('# driver '):
+                version = raw.split()[2]
+                if version not in KNOWN_RELEASES:
+                    sys.exit(f"{path}: driver {version} is not one of {', '.join(KNOWN_RELEASES)}; "
+                             "check the NVOS46/NVOS47 offsets first")
+                print(f"driver {version}")
+                continue
             ev = parse(raw)
             if ev is None:
                 continue
