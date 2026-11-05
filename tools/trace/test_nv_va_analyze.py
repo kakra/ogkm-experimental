@@ -51,10 +51,10 @@ class Log:
     def unmap(self, dma, memory, va, status=0, tid=7, exit_va=None):
         self.call(0x58, nvos47(dma, memory, va), nvos47(dma, memory, va if exit_va is None else exit_va, status), tid)
 
-    def run(self, va=None):
+    def run(self, va=None, series_s=None, journal=None):
         with tempfile.NamedTemporaryFile('w', suffix='.log', delete=False) as f:
             f.write('\n'.join(self.lines) + '\n')
-        return A.run(f.name, va)
+        return A.run(f.name, va, series_s, journal)
 
 
 class AnalyzerTests(unittest.TestCase):
@@ -135,6 +135,29 @@ class AnalyzerTests(unittest.TestCase):
         log.lines[0] = 'V 999.1.2'
         with self.assertRaises(ValueError):
             log.run()
+
+    def test_series_per_minute(self):
+        log = Log()
+        log.map(0xA, 0x100, 0x200000, 0x1000000)
+        log.map(0xB, 0x101, 0x100000, 0x2000000)
+        log.t += 61 * 10**9                       # next minute
+        log.unmap(0xA, 0x100, 0x1000000)
+        log.map(0xC, 0x102, 0x100000, 0x3000000, status=0x1f)
+        with tempfile.NamedTemporaryFile('w', suffix='.log', delete=False) as j:
+            j.write(f"[    0.000500] host kernel: unrelated\n"
+                    f"[   {(log.t - 5) / 1e9:.6f}] host kernel: NVRM: dmaAllocMapping_GM107: can't update VA space\n")
+        rows = log.run(series_s=60, journal=j.name)['series']
+        self.assertEqual([(r['bucket'], r['live'], r['live_mib'], r['map'], r['unmap'], r['map_fail'], r['kmsg'])
+                          for r in rows], [(0, 2, 3.0, 2, 0, 0, 0), (1, 1, 1.0, 0, 1, 1, 1)])
+
+    def test_series_drops_exited_process(self):
+        log = Log()
+        log.map(0xA, 0x100, 0x200000, 0x1000000)
+        log.t += 61 * 10**9                       # the process exits in the next minute
+        log.lines.append(f'P {log.t} 100 100 exit comm=game')
+        log.call(0x29, nvos00(0x200, parent=DEVICE), tid=8)
+        rows = log.run(series_s=60)['series']
+        self.assertEqual([(r['bucket'], r['live']) for r in rows], [(0, 1), (1, 0)])
 
 
 if __name__ == '__main__':

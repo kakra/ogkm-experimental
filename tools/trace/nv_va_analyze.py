@@ -10,8 +10,19 @@ cannot see (objects older than the trace, kernel-internal frees) is reported
 as UNKNOWN rather than guessed.
 
 Usage: python3 -I nv_va_analyze.py trace.log [--json out.json] [--va 0xADDR]
+           [--series [SECONDS]] [--csv out.csv] [--journal kernel.log]
+
+--series prints a time series per bucket (default 60 s) and process: live
+mappings and their bytes as the model sees them at the end of the bucket
+(none after the process exited),
+and the MAP, UNMAP and FREE calls and failures in it. --csv writes the same
+rows for plotting (implies --series). --journal takes the output of
+`journalctl -k -o short-monotonic` for the traced boot and counts NVRM, Xid
+and VA space messages per bucket; bpftrace's nsecs and the monotonic
+journal stamps share one clock as long as the system did not suspend.
 """
 import argparse
+import csv
 import json
 import re
 import struct
@@ -237,7 +248,7 @@ class Model:
             if ok:
                 table = self.maps[(client, e['dma'])]
                 rec = dict(memory=e['memory'], length=e['length'], offset=e['offset'], t=call['t_exit'],
-                           tid=call['tid'], line=call['line'], flags=e['flags'])
+                           tid=call['tid'], pid=call['pid'], line=call['line'], flags=e['flags'])
                 start, inside = self.live_at(client, x['va'])
                 if start or inside:
                     self.findings.append(dict(type='MAP_RETURNED_LIVE_VA', line=call['line'], va=x['va'],
@@ -287,20 +298,100 @@ class Model:
         self.counts['process_exit'] += 1
 
 
-def run(path, focus=None):
+JOURNAL = re.compile(r'^\[\s*(?P<s>\d+)\.(?P<us>\d{6})\]')
+JOURNAL_MATCH = re.compile(r"NVRM|Xid|gpu_vaspace|can't update VA space")
+SERIES_FIELDS = ('bucket', 't_mono_s', 'pid', 'comm', 'live', 'live_mib', 'map', 'unmap', 'free',
+                 'map_fail', 'unmap_fail', 'kmsg')
+
+
+def journal_marks(path):
+    """Monotonic ns of the kernel messages that matter for the VA space."""
+    marks = []
+    with open(path, errors='replace') as stream:
+        for line in stream:
+            m = JOURNAL.match(line)
+            if m and JOURNAL_MATCH.search(line):
+                marks.append(int(m['s']) * 1_000_000_000 + int(m['us']) * 1000)
+    return marks
+
+
+class Series:
+    """Rows per (bucket, pid), filled while the model replays the calls."""
+
+    def __init__(self, width_ns, marks=()):
+        self.width, self.marks = width_ns, sorted(marks)
+        self.t0 = self.bucket = None
+        self.ops = defaultdict(Counter)   # pid -> counts in the current bucket
+        self.comms = defaultdict(Counter)  # pid -> thread names seen
+        self.exited = set()                # RM drops the mappings of a client with its process
+        self.rows = []
+
+    def advance(self, t, model):
+        if self.t0 is None:
+            self.t0, self.bucket = t, 0
+        bucket = (t - self.t0) // self.width
+        if bucket > self.bucket:
+            self.flush(model)
+            self.bucket = bucket
+
+    def count(self, call):
+        e, x = call['entry'], call['exit']
+        if e is None or x is None:
+            return
+        ok = x['status'] == 0
+        name = {'MAP': 'map', 'UNMAP': 'unmap', 'FREE': 'free'}.get(call['op'])
+        if name:
+            self.ops[call['pid']][name if ok or name == 'free' else name + '_fail'] += 1
+        self.comms[call['pid']][call['comm']] += 1
+
+    def flush(self, model):
+        if self.t0 is None:
+            return
+        start = self.t0 + self.bucket * self.width
+        kmsg = sum(1 for t in self.marks if start <= t < start + self.width)
+        live = defaultdict(lambda: [0, 0])
+        for table in model.maps.values():
+            for rec in table.values():
+                if rec['pid'] in self.exited:
+                    continue
+                live[rec['pid']][0] += 1
+                live[rec['pid']][1] += rec['length']
+        for pid in sorted(set(live) | set(self.ops)):
+            ops, (n, size) = self.ops.get(pid, Counter()), live.get(pid, (0, 0))
+            comm = self.comms[pid].most_common(1)[0][0] if self.comms[pid] else '?'
+            self.rows.append(dict(bucket=self.bucket, t_mono_s=start // 1_000_000_000, pid=pid, comm=comm,
+                                  live=n, live_mib=round(size / 2**20, 1), map=ops['map'], unmap=ops['unmap'],
+                                  free=ops['free'], map_fail=ops['map_fail'], unmap_fail=ops['unmap_fail'],
+                                  kmsg=kmsg))
+        if not live and not self.ops and kmsg:
+            self.rows.append(dict(bucket=self.bucket, t_mono_s=start // 1_000_000_000, pid=0, comm='-',
+                                  live=0, live_mib=0, map=0, unmap=0, free=0, map_fail=0, unmap_fail=0,
+                                  kmsg=kmsg))
+        self.ops.clear()
+
+
+def run(path, focus=None, series_s=None, journal=None):
     with open(path, errors='replace') as stream:
         records = parse(stream)
     model = Model()
+    series = Series(series_s * 1_000_000_000, journal_marks(journal) if journal else ()) if series_s else None
     stacks = defaultdict(list)
     for rec in records:
         if rec['kind'] == 'CALL':
+            if series:
+                series.advance(rec['t_exit'], model)
             model.apply(rec)
+            if series:
+                series.count(rec)
         elif rec['kind'] == 'STACK':
             stacks[rec['tid']].append(rec)
         elif rec['kind'] in ('NO_EXIT', 'ORPHAN_EXIT', 'UNPARSED'):
             model.findings.append(dict(type=rec['kind'], line=rec['line']))
         elif rec['kind'] == 'PROC_EXIT':
             model.proc_exit(rec['pid'])
+            if series:
+                series.advance(rec['ns'], model)
+                series.exited.add(rec['pid'])
     calls = [r for r in records if r['kind'] == 'CALL']
     report = dict(
         driver=next((r['version'] for r in records if r['kind'] == 'VERSION'), None),
@@ -318,6 +409,9 @@ def run(path, focus=None):
     )
     if focus is not None:
         report['va_history'] = model.va_history.get(focus, [])
+    if series:
+        series.flush(model)
+        report['series'] = series.rows
     return report
 
 
@@ -326,9 +420,14 @@ def main():
     parser.add_argument('trace')
     parser.add_argument('--json')
     parser.add_argument('--va', type=lambda s: int(s, 0))
+    parser.add_argument('--series', nargs='?', type=int, const=60, metavar='SECONDS')
+    parser.add_argument('--csv')
+    parser.add_argument('--journal')
     args = parser.parse_args()
+    if (args.csv or args.journal) and not args.series:
+        args.series = 60
     try:
-        report = run(args.trace, args.va)
+        report = run(args.trace, args.va, args.series, args.journal)
     except ValueError as err:
         sys.exit(f'{args.trace}: {err}')
     if args.json:
@@ -349,6 +448,20 @@ def main():
         print(f'history of VA 0x{args.va:x}:')
         for h in report['va_history']:
             print('  ', h)
+    if 'series' in report:
+        print(f'series per {args.series} s (live: model state at the end of the bucket, '
+              'mappings older than the trace are not counted):')
+        print(f"{'bucket':>6} {'t_mono_s':>9} {'pid':>7} {'comm':15s} {'live':>6} {'live_mib':>9} "
+              f"{'map':>5} {'unmap':>5} {'free':>5} {'mapF':>4} {'unmapF':>6} {'kmsg':>4}")
+        for r in report['series']:
+            print(f"{r['bucket']:6d} {r['t_mono_s']:9d} {r['pid']:7d} {r['comm'][:15]:15s} {r['live']:6d} "
+                  f"{r['live_mib']:9.1f} {r['map']:5d} {r['unmap']:5d} {r['free']:5d} {r['map_fail']:4d} "
+                  f"{r['unmap_fail']:6d} {r['kmsg']:4d}")
+        if args.csv:
+            with open(args.csv, 'w', newline='') as out:
+                writer = csv.DictWriter(out, fieldnames=SERIES_FIELDS)
+                writer.writeheader()
+                writer.writerows(report['series'])
     return 0
 
 
