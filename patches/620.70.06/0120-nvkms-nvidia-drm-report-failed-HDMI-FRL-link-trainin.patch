@@ -1,0 +1,373 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 18:34:24 +0100
+Subject: [PATCH] nvkms, nvidia-drm: report failed HDMI FRL link training of a
+ modeset
+
+When FRL link training fails in a modeset, nvHdmiFrlSetConfig() fakes it to
+keep the display engine from hanging and logs a warning. The display stays
+black and no client finds out. It also retries right away, while amdgpu waits
+200 ms before a retry.
+
+Wait 200 ms between the retries. After a failure reassess the link and send a
+dpy event. nvidia-drm then sets the connector's link-status to BAD before its
+hotplug event, as the DRM docs describe for this case, so the compositor sets a
+mode again, using the rates that still work. Stop reporting after 3 failures in
+a row, so that a link that keeps failing doesn't cause modesets forever. A
+successful training or probing the display again resets the count.
+
+The state reaches nvidia-drm through a new read-only dpy attribute, added at
+the end of the enum, so the NVKMS ABI of userspace clients doesn't change.
+
+The wait holds nvkms_lock, for up to 1 s more on a modeset that fails.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nvkms-kapi.h           | 18 ++++++++
+ kernel-open/nvidia-drm/nvidia-drm-connector.c | 35 +++++++++++++++
+ kernel-open/nvidia-drm/nvidia-drm-connector.h |  1 +
+ kernel-open/nvidia-drm/nvidia-drm-drv.c       |  8 ++++
+ src/nvidia-modeset/include/nvkms-types.h      |  1 +
+ src/nvidia-modeset/interface/nvkms-api.h      |  6 +++
+ .../kapi/interface/nvkms-kapi.h               | 18 ++++++++
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 23 ++++++++++
+ src/nvidia-modeset/src/nvkms-attributes.c     | 12 +++++
+ src/nvidia-modeset/src/nvkms-dpy.c            |  1 +
+ src/nvidia-modeset/src/nvkms-hdmi.c           | 44 +++++++++++++++++++
+ 11 files changed, 167 insertions(+)
+
+diff --git a/kernel-open/common/inc/nvkms-kapi.h b/kernel-open/common/inc/nvkms-kapi.h
+index 9ab46ac0..7a83c384 100644
+--- a/kernel-open/common/inc/nvkms-kapi.h
++++ b/kernel-open/common/inc/nvkms-kapi.h
+@@ -1784,6 +1784,24 @@ struct NvKmsKapiFunctionsTable {
+         NvBool *pLimited
+     );
+ 
++    /*!
++     * Get whether HDMI FRL link training failed in the last modeset of a
++     * display, so that it doesn't show anything until the next successful one.
++     *
++     * \param [in]   device   A device returned by allocateDevice().
++     *
++     * \param [in]   display  The display to query.
++     *
++     * \param [out]  pFailed  Whether link training failed.
++     *
++     * \return NV_TRUE on success, NV_FALSE on failure.
++     */
++    NvBool (*getDisplayFrlLinkFailed)(
++        struct NvKmsKapiDevice *device,
++        NvKmsKapiDisplay display,
++        NvBool *pFailed
++    );
++
+     /*!
+      * Query where a head's raster generator reports its position, see
+      * NVKMS_IOCTL_QUERY_HEAD_RASTER. Must be called from a context that can
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index 87605c71..33cfa41f 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -1707,6 +1707,41 @@ bool nv_drm_connector_revoke_permissions(struct drm_device *dev,
+     return ret;
+ }
+ 
++/*
++ * Set a BAD link-status if HDMI FRL link training failed in the last modeset,
++ * which tells the compositor to set a mode again. Takes connection_mutex.
++ */
++void nv_drm_connector_update_link_status(struct drm_connector *connector)
++{
++    struct drm_device *dev = connector->dev;
++    struct nv_drm_device *nv_dev = to_nv_device(dev);
++    struct nv_drm_connector *nv_connector = to_nv_connector(connector);
++    NvBool failed = NV_FALSE;
++
++    if ((connector->connector_type != DRM_MODE_CONNECTOR_HDMIA) &&
++        (connector->connector_type != DRM_MODE_CONNECTOR_HDMIB)) {
++        return;
++    }
++
++    drm_modeset_lock(&dev->mode_config.connection_mutex, NULL);
++
++    if ((connector->state->crtc != NULL) &&
++        (nv_connector->nv_detected_encoder != NULL) &&
++        !nvKms->getDisplayFrlLinkFailed(
++            nv_dev->pDevice,
++            nv_connector->nv_detected_encoder->hDisplay,
++            &failed)) {
++        failed = NV_FALSE;
++    }
++
++    drm_modeset_unlock(&dev->mode_config.connection_mutex);
++
++    if (failed) {
++        drm_connector_set_link_status_property(connector,
++                                               DRM_MODE_LINK_STATUS_BAD);
++    }
++}
++
+ /*
+  * The caller must hold dev->mode_config.mutex (for nv_connector->cp) and
+  * dev->mode_config.connection_mutex (for calling drm_hdcp_update_content_protection).
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.h b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+index a4a59ff3..66bceb24 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+@@ -161,6 +161,7 @@ nv_drm_get_connector(struct drm_device *dev,
+ 
+ bool nv_drm_connector_revoke_permissions(struct drm_device *dev,
+                                          struct nv_drm_connector *nv_connector);
++void nv_drm_connector_update_link_status(struct drm_connector *connector);
+ void nv_drm_connector_update_content_protection(struct nv_drm_connector *nv_connector);
+ int nv_drm_connector_update_topology_property(struct nv_drm_connector *nv_connector,
+                                               const void *topology);
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index 3a988932..d7f6a075 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -847,6 +847,14 @@ static void nv_drm_handle_hotplug_event(struct work_struct *work)
+     struct delayed_work *dwork = to_delayed_work(work);
+     struct nv_drm_device *nv_dev =
+         container_of(dwork, struct nv_drm_device, hotplug_event_work);
++    struct drm_connector_list_iter conn_iter;
++    struct drm_connector *connector;
++
++    drm_connector_list_iter_begin(nv_dev->dev, &conn_iter);
++    drm_for_each_connector_iter(connector, &conn_iter) {
++        nv_drm_connector_update_link_status(connector);
++    }
++    drm_connector_list_iter_end(&conn_iter);
+ 
+     drm_kms_helper_hotplug_event(nv_dev->dev);
+ }
+diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
+index 276e7c42..f6517f60 100644
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -2448,6 +2448,7 @@ typedef struct _NVDpyEvoRec {
+         HDMI_SINK_CAPS sinkCaps;
+         NvBool reassessFrlLinkCaps             : 1;
+         NvU8 scdcSrcTestConfig;
++        NvU8 frlLinkFailures;
+     } hdmi;
+ 
+     struct {
+diff --git a/src/nvidia-modeset/interface/nvkms-api.h b/src/nvidia-modeset/interface/nvkms-api.h
+index 6ed81b7e..62a26a07 100644
+--- a/src/nvidia-modeset/interface/nvkms-api.h
++++ b/src/nvidia-modeset/interface/nvkms-api.h
+@@ -2852,6 +2852,12 @@ enum NvKmsDpyAttribute {
+      * wouldn't raise it.
+      */
+     NV_KMS_DPY_ATTRIBUTE_CURRENT_COLOR_BPC_LIMITED,
++
++    /*
++     * Whether HDMI FRL link training failed in the last modeset, so that the
++     * display doesn't show anything until the next successful one.
++     */
++    NV_KMS_DPY_ATTRIBUTE_HDMI_FRL_LINK_FAILED,
+ };
+ 
+ /*! Values for the NV_KMS_DPY_ATTRIBUTE_CONTENT_TYPE attribute. */
+diff --git a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+index 9ab46ac0..7a83c384 100644
+--- a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
++++ b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+@@ -1784,6 +1784,24 @@ struct NvKmsKapiFunctionsTable {
+         NvBool *pLimited
+     );
+ 
++    /*!
++     * Get whether HDMI FRL link training failed in the last modeset of a
++     * display, so that it doesn't show anything until the next successful one.
++     *
++     * \param [in]   device   A device returned by allocateDevice().
++     *
++     * \param [in]   display  The display to query.
++     *
++     * \param [out]  pFailed  Whether link training failed.
++     *
++     * \return NV_TRUE on success, NV_FALSE on failure.
++     */
++    NvBool (*getDisplayFrlLinkFailed)(
++        struct NvKmsKapiDevice *device,
++        NvKmsKapiDisplay display,
++        NvBool *pFailed
++    );
++
+     /*!
+      * Query where a head's raster generator reports its position, see
+      * NVKMS_IOCTL_QUERY_HEAD_RASTER. Must be called from a context that can
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index 41a48c68..22832064 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -3840,6 +3840,28 @@ static NvBool GetDisplayColorBpc(
+     return NV_TRUE;
+ }
+ 
++static NvBool GetDisplayFrlLinkFailed(
++    struct NvKmsKapiDevice *device,
++    NvKmsKapiDisplay display,
++    NvBool *pFailed)
++{
++    NvS64 failed;
++
++    if (device->hKmsDevice == 0x0) {
++        return NV_FALSE;
++    }
++
++    if (!GetDisplayAttribute(device, display,
++                             NV_KMS_DPY_ATTRIBUTE_HDMI_FRL_LINK_FAILED,
++                             &failed)) {
++        return NV_FALSE;
++    }
++
++    *pFailed = (failed != 0);
++
++    return NV_TRUE;
++}
++
+ static NvBool KmsSetMode(
+     struct NvKmsKapiDevice *device,
+     const struct NvKmsKapiRequestedModeSetConfig *requestedConfig,
+@@ -4817,6 +4839,7 @@ NvBool nvKmsKapiGetFunctionsTableInternal
+     funcsTable->perfBoost = RmPerfBoost;
+ 
+     funcsTable->getDisplayColorBpc = GetDisplayColorBpc;
++    funcsTable->getDisplayFrlLinkFailed = GetDisplayFrlLinkFailed;
+ 
+     funcsTable->getHeadRaster = GetHeadRaster;
+ 
+diff --git a/src/nvidia-modeset/src/nvkms-attributes.c b/src/nvidia-modeset/src/nvkms-attributes.c
+index 70178164..2c19e397 100644
+--- a/src/nvidia-modeset/src/nvkms-attributes.c
++++ b/src/nvidia-modeset/src/nvkms-attributes.c
+@@ -867,6 +867,12 @@ static NvBool GetCurrentColorBpcLimited(const NVDpyEvoRec *pDpyEvo,
+     return TRUE;
+ }
+ 
++static NvBool GetHdmiFrlLinkFailed(const NVDpyEvoRec *pDpyEvo, NvS64 *pValue)
++{
++    *pValue = (pDpyEvo->hdmi.frlLinkFailures != 0);
++    return TRUE;
++}
++
+ static NvBool GetRequestedColorBpcMaxValidValues(
+     const NVDpyEvoRec *pDpyEvo,
+     struct NvKmsAttributeValidValuesCommonReply *pValidValues)
+@@ -1468,6 +1474,12 @@ static const struct {
+         .getValidValues = NULL,
+         .type           = NV_KMS_ATTRIBUTE_TYPE_BOOLEAN,
+     },
++    [NV_KMS_DPY_ATTRIBUTE_HDMI_FRL_LINK_FAILED] = {
++        .set            = NULL,
++        .get            = GetHdmiFrlLinkFailed,
++        .getValidValues = NULL,
++        .type           = NV_KMS_ATTRIBUTE_TYPE_BOOLEAN,
++    },
+ };
+ 
+ /*!
+diff --git a/src/nvidia-modeset/src/nvkms-dpy.c b/src/nvidia-modeset/src/nvkms-dpy.c
+index 4e25710f..6581d58b 100644
+--- a/src/nvidia-modeset/src/nvkms-dpy.c
++++ b/src/nvidia-modeset/src/nvkms-dpy.c
+@@ -978,6 +978,7 @@ void nvDpyProbeMaxPixelClock(NVDpyEvoPtr pDpyEvo)
+ 
+             nvkms_memset(&pDpyEvo->hdmi.srcCaps, 0, sizeof(pDpyEvo->hdmi.srcCaps));
+             nvkms_memset(&pDpyEvo->hdmi.sinkCaps, 0, sizeof(pDpyEvo->hdmi.sinkCaps));
++            pDpyEvo->hdmi.frlLinkFailures = 0;
+ 
+             if (nvHdmiDpySupportsFrl(pDpyEvo)) {
+                 /*
+diff --git a/src/nvidia-modeset/src/nvkms-hdmi.c b/src/nvidia-modeset/src/nvkms-hdmi.c
+index dc43cca8..011ffcb2 100644
+--- a/src/nvidia-modeset/src/nvkms-hdmi.c
++++ b/src/nvidia-modeset/src/nvkms-hdmi.c
+@@ -31,6 +31,7 @@
+ #include "nvkms-hdmi.h"
+ #include "nvkms-evo.h"
+ #include "nvkms-modepool.h"
++#include "nvkms-private.h"
+ #include "nvkms-rmapi.h"
+ #include "nvkms-types.h"
+ #include "nvkms-utils.h"
+@@ -3006,6 +3007,39 @@ static enum NvKmsFrlRateForce GetForceMaxFrlRateType(
+     return NVKMS_FRL_RATE_FORCE_NONE;
+ }
+ 
++/*
++ * Track failed FRL link training of a modeset. The display stays black after
++ * a failure, and nothing else tells the clients: reassess the link and send
++ * them a dpy event, which nvidia-drm turns into a BAD link-status so that the
++ * compositor sets a mode again. Give up after a few failures in a row, so that
++ * a link that keeps failing doesn't cause modesets forever.
++ */
++static void HandleFrlLinkTrainingResult(NVDispEvoPtr pDispEvo,
++                                        const NVConnectorEvoRec *pConnectorEvo,
++                                        NvBool trained)
++{
++    const NvU8 MAX_REPORTED_FAILURES = 3;
++    NVDpyEvoPtr pDpyEvo =
++        nvGetDpyEvoFromDispEvo(pDispEvo, pConnectorEvo->displayId);
++
++    if (pDpyEvo == NULL) {
++        return;
++    }
++
++    if (trained) {
++        pDpyEvo->hdmi.frlLinkFailures = 0;
++        return;
++    }
++
++    if (pDpyEvo->hdmi.frlLinkFailures >= MAX_REPORTED_FAILURES) {
++        return;
++    }
++
++    pDpyEvo->hdmi.frlLinkFailures++;
++    pDpyEvo->hdmi.reassessFrlLinkCaps = TRUE;
++    nvSendDpyEventEvo(pDpyEvo, NVKMS_EVENT_TYPE_DPY_CHANGED);
++}
++
+ void nvHdmiFrlSetConfig(NVDispEvoRec *pDispEvo, NvU32 head)
+ {
+     const NVDevEvoRec *pDevEvo = pDispEvo->pDevEvo;
+@@ -3015,6 +3049,7 @@ void nvHdmiFrlSetConfig(NVDispEvoRec *pDispEvo, NvU32 head)
+     NVHDMIPKT_RESULT ret;
+     NvU32 retries = 0;
+     const NvU32 MAX_RETRIES = 5;
++    NvBool trained;
+ 
+     if (pFrlConfig->frlRate == HDMI_FRL_DATA_RATE_NONE) {
+         return;
+@@ -3023,6 +3058,11 @@ void nvHdmiFrlSetConfig(NVDispEvoRec *pDispEvo, NvU32 head)
+     nvAssert(pHeadState->activeRmId != 0);
+ 
+     do {
++        /* Give the sink time to get ready for link training again. */
++        if (retries != 0) {
++            nvkms_usleep(200000);
++        }
++
+         ret = NvHdmi_SetFRLConfig(pDevEvo->hdmiLib.handle,
+                                   pDispEvo->displayOwner,
+                                   pHeadState->activeRmId,
+@@ -3030,6 +3070,8 @@ void nvHdmiFrlSetConfig(NVDispEvoRec *pDispEvo, NvU32 head)
+                                   pFrlConfig);
+     } while (ret != NVHDMIPKT_SUCCESS && retries++ < MAX_RETRIES);
+ 
++    trained = (ret == NVHDMIPKT_SUCCESS);
++
+     if (ret != NVHDMIPKT_SUCCESS) {
+         nvEvoLogDisp(pDispEvo, EVO_LOG_WARN,
+                      "HDMI FRL link training failed.");
+@@ -3059,4 +3101,6 @@ void nvHdmiFrlSetConfig(NVDispEvoRec *pDispEvo, NvU32 head)
+                           "HDMI FRL link training retried %d times.",
+                           retries);
+     }
++
++    HandleFrlLinkTrainingResult(pDispEvo, pHeadState->pConnectorEvo, trained);
+ }

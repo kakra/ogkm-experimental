@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 09:58:32 +0100
+Subject: [PATCH] nvidia: take the API lock for read for GET_SURFACE_INFO
+
+NV0041_CTRL_CMD_GET_SURFACE_INFO is flagged without
+RMCTRL_FLAGS_API_LOCK_READONLY, so it takes the global RM API lock for
+write. nvidia-modeset calls it while registering every framebuffer
+(DRM ADDFB2), and a write acquire waits for every READ-locked control
+of every other client: when an app starts, the compositor's main thread
+waited 2.9 ms behind the app's PERF_BOOST GSP RPC.
+
+The control only reads the Memory object's descriptor (size, address
+space, physical attributes, compression coverage) and HW resource
+attributes, which are fixed once the memory is allocated. Frees, allocs,
+dups and maps take the API lock for write, and the control still takes
+its client lock for write and the GPU lock, so a READ API lock is
+enough.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/src/kernel/rmapi/control.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/src/nvidia/src/kernel/rmapi/control.c b/src/nvidia/src/kernel/rmapi/control.c
+index 3ac50815..0f6240c3 100644
+--- a/src/nvidia/src/kernel/rmapi/control.c
++++ b/src/nvidia/src/kernel/rmapi/control.c
+@@ -42,6 +42,7 @@
+ #include "ctrl/ctrl0000/ctrl0000gpuacct.h" // NV0000_CTRL_CMD_GPUACCT_*
+ #include "ctrl/ctrl2080/ctrl2080tmr.h" // NV2080_CTRL_CMD_TIMER_SCHEDULE
+ #include "ctrl/ctrl2080/ctrl2080fb.h" // NV2080_CTRL_CMD_FB_GET_MEM_ALIGNMENT
++#include "ctrl/ctrl0041.h" // NV0041_CTRL_CMD_GET_SURFACE_INFO
+ 
+ static NV_STATUS
+ releaseDeferRmCtrlBuffer(RmCtrlDeferredCmd* pRmCtrlDeferredCmd)
+@@ -958,6 +959,21 @@ serverControlLookupLockFlags
+             *pAccess = LOCK_ACCESS_READ;
+         }
+ 
++        //
++        // GET_SURFACE_INFO only reads the Memory object's descriptor and HW
++        // resource attributes, which are fixed once the memory is allocated.
++        // Frees, allocs, dups and maps take the API lock for write, and the
++        // control still takes the client lock (write) and the GPU lock, so
++        // a READ API lock is enough. nvidia-modeset calls it while registering
++        // every framebuffer; with the WRITE lock that waited for every other
++        // client's READ-locked control (e.g. a PERF_BOOST GSP RPC when an app
++        // starts), stalling the compositor.
++        //
++        if (pRmCtrlParams->cmd == NV0041_CTRL_CMD_GET_SURFACE_INFO)
++        {
++            *pAccess = LOCK_ACCESS_READ;
++        }
++
+         //
+         // ROUTE_TO_PHYSICAL controls always take the READ API lock. This only applies
+         // to GSP clients: Only there can we guarantee per-gpu execution of commands.

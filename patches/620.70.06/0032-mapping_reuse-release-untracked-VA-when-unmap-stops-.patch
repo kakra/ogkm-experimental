@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jo=C3=A3o=20Paulo=20Furtado?=
+ <30300459+jonit-dev@users.noreply.github.com>
+Date: Thu, 10 Sep 2026 18:37:02 -0700
+Subject: [PATCH] mapping_reuse: release untracked VA when unmap stops at a
+ foreign entry
+
+reusemappingdbUnmap() walks virtualMap from range.start and unmaps every
+tracked entry contained in the requested range, then releases whatever
+untracked VA is left over in the trailing "overhang" block.
+
+When the walk stopped on an entry not contained in the unmap range, the
+function took one of two different exits depending on whether any entry had
+already been processed: break on the first iteration, plain return on every
+later one. The return path skips the overhang unmap, so any untracked VA
+between the last removed entry and the end of the requested range is never
+released. That VA stays reserved for the lifetime of the BAR1 address space.
+
+Untracked mappings are routinely produced by reusemappingdbMap(): when a
+cached entry intersects the request without matching it exactly, bAddToMap is
+cleared, fresh mappings are allocated, and the entries are PORT_FREE()d
+without being inserted into virtualMap. The overhang unmap in
+reusemappingdbUnmap() is the only path that reclaims them.
+
+Use a single exit that records how far the overhang may extend. Clamping to
+the offending entry's start also fixes a latent over-unmap on the existing
+break path, where an entry straddling the end of the requested range could be
+unmapped while references to it remained, and makes the trailing size
+computation unable to underflow.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../libraries/mapping_reuse/mapping_reuse.c   | 20 ++++++++++++-------
+ 1 file changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c b/src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c
+index 8ff00af1..dc6729b4 100644
+--- a/src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c
++++ b/src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c
+@@ -88,7 +88,7 @@ reusemappingdbUnmap
+ {
+     ReuseMappingDbEntry *pEntry = mapFindGEQ(&(pReuseMappingDb->virtualMap), range.start);
+     NvU64 curOffset = range.start;
+-    NvBool bFirstRange = NV_TRUE;
++    NvU64 unmapLimit = mrangeLimit(range);
+ 
+     while (pEntry != NULL)
+     {
+@@ -100,14 +100,20 @@ reusemappingdbUnmap
+         // Only unmap ranges contained within the desired unmap range
+         if (!mrangeContains(range, revRange))
+         {
+-            if (bFirstRange)
++            //
++            // This entry is not ours to remove. Anything still left below it
++            // inside the requested range is untracked VA and must be released
++            // by the overhang unmap below. Clamp to this entry's start so that
++            // an entry straddling the end of the range is never unmapped from
++            // underneath its remaining references.
++            //
++            if (revOffset < unmapLimit)
+             {
+-                break;
++                unmapLimit = revOffset;
+             }
+-            return;
++            break;
+         }
+ 
+-        bFirstRange = NV_FALSE;
+         curOffset = mrangeLimit(revRange);
+ 
+         // Unmap any partial range not tracked by data structure
+@@ -136,9 +142,9 @@ reusemappingdbUnmap
+     }
+ 
+     // Take care of any overhang.
+-    if (mrangeLimit(range) != curOffset)
++    if (unmapLimit > curOffset)
+     {
+-        MemoryRange diffRange = mrangeMake(curOffset, mrangeLimit(range) - curOffset);
++        MemoryRange diffRange = mrangeMake(curOffset, unmapLimit - curOffset);
+         pReuseMappingDb->pUnmapCb(pReuseMappingDb->pGlobalCtx, pAllocCtx, diffRange);
+     }
+ }

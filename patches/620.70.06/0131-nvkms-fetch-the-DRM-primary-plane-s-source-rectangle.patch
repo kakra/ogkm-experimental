@@ -1,0 +1,267 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 4 Nov 2026 07:36:43 +0100
+Subject: [PATCH] nvkms: fetch the DRM primary plane's source rectangle with
+ the window's SET_POINT_IN
+
+NVKMS never programs a window source fetch offset, so KAPI passes the
+primary plane's SRC_X/SRC_Y as viewPortIn.point and NVKMS pans the head
+viewport by it, while the main layer fetches SRC_W x SRC_H from 0,0 of
+the surface. That only shows the requested content when the plane is
+unscaled, at CRTC 0,0 and fetched up to the end of the source rectangle.
+Otherwise the screen shows black (the second tile of a tiled monitor,
+upstream issue 1510) or the wrong part of the surface: a cropped plane
+at a CRTC offset shows surface columns [0, SRC_X) to the left of its
+destination, a cropped and scaled plane shows the wrong area, and
+overlay planes move with the pan.
+
+For KAPI opens (kernel-space clients with a kernel per-open handle,
+i.e. nvidia-drm), treat viewPortIn.point as the main layer's source
+point: keep it in NVFlipChannelEvoHwState.pointIn, program it with
+SET_POINT_IN for both eyes in EvoFlipC3Common, validate the fetch rect
+with it (YUV parity rules, inside the surface) and leave the head
+viewport at the modeset's origin. A new point is only taken with a new
+main layer surface, which nvidia-drm sends with every plane update.
+
+The flip API's userspace ABI is unchanged. NVKMS's internal open
+(console restore, headsurface) and userspace clients keep viewport
+panning; when they flip the main layer to a new surface, the point is
+reset so they don't inherit nvidia-drm's. NVKMS's own flips that keep
+the surface (semaphores to NULL on surface unregistration) keep it.
+
+An offset together with a rotated or reflected scan is refused, since
+whether SET_POINT_IN is taken in surface space or in the reversed scan
+direction is unverified; the client composites instead. With
+SRC_X/Y = 0 the hardware is programmed as before (POINT_IN is now
+written explicitly as 0).
+
+Supersedes upstream PR 1511, which only fixes the unscaled case at CRTC
+0,0 by fetching from 0,0 to the end of the source rectangle.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/include/nvkms-private.h |  3 +
+ src/nvidia-modeset/include/nvkms-types.h   |  6 ++
+ src/nvidia-modeset/src/nvkms-evo3.c        |  9 +++
+ src/nvidia-modeset/src/nvkms-hw-flip.c     | 79 +++++++++++++++++++---
+ src/nvidia-modeset/src/nvkms.c             | 30 ++++++++
+ 5 files changed, 119 insertions(+), 8 deletions(-)
+
+diff --git a/src/nvidia-modeset/include/nvkms-private.h b/src/nvidia-modeset/include/nvkms-private.h
+index 5077486d..7e5af2bd 100644
+--- a/src/nvidia-modeset/include/nvkms-private.h
++++ b/src/nvidia-modeset/include/nvkms-private.h
+@@ -74,6 +74,9 @@ NVEvoApiHandlesRec *nvGetSurfaceHandlesFromOpenDev(
+ const NVEvoApiHandlesRec *nvGetSurfaceHandlesFromOpenDevConst(
+     const struct NvKmsPerOpenDev *pOpenDev);
+ 
++NvBool nvViewPortInIsMainLayerPointIn(
++    const struct NvKmsPerOpenDev *pOpenDev);
++
+ void nvKmsServiceNonStallInterrupt(void *dataPtr, NvU32 dataU32);
+ 
+ #ifdef __cplusplus
+diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
+index 4ffb4252..7a0d2778 100644
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -631,6 +631,12 @@ typedef struct {
+     NvBool vrrTearing;
+     NvBool perEyeStereoFlip;
+ 
++    /*
++     * Source fetch offset into the surface (window SET_POINT_IN). Only set
++     * for the main layer of nvidia-drm flips; see
++     * nvViewPortInIsMainLayerPointIn().
++     */
++    struct NvKmsPoint pointIn;
+     struct NvKmsSize sizeIn;
+     struct NvKmsSize sizeOut;
+     struct NvKmsSignedPoint outputPosition;
+diff --git a/src/nvidia-modeset/src/nvkms-evo3.c b/src/nvidia-modeset/src/nvkms-evo3.c
+index a16cd385..9c88b5af 100644
+--- a/src/nvidia-modeset/src/nvkms-evo3.c
++++ b/src/nvidia-modeset/src/nvkms-evo3.c
+@@ -3913,6 +3913,15 @@ EvoFlipC3Common(NVDevEvoPtr pDevEvo,
+         DRF_NUM(C37E, _SET_SIZE_OUT, _WIDTH, pHwState->sizeOut.width) |
+         DRF_NUM(C37E, _SET_SIZE_OUT, _HEIGHT, pHwState->sizeOut.height));
+ 
++    /* Source fetch offset, the same for both eyes. */
++    ct_assert(NVC37E_SET_POINT_IN(1) == NVC37E_SET_POINT_IN(0) + 4);
++    nvDmaSetStartEvoMethod(pChannel, NVC37E_SET_POINT_IN(0), 2);
++    for (eye = 0; eye < NVKMS_MAX_EYES; eye++) {
++        nvDmaSetEvoMethodData(pChannel,
++            DRF_NUM(C37E, _SET_POINT_IN, _X, pHwState->pointIn.x) |
++            DRF_NUM(C37E, _SET_POINT_IN, _Y, pHwState->pointIn.y));
++    }
++
+     /* XXX nvdisplay: enforce pitch/BL layout are consistent between eyes at a
+      * higher level */
+ 
+diff --git a/src/nvidia-modeset/src/nvkms-hw-flip.c b/src/nvidia-modeset/src/nvkms-hw-flip.c
+index 23936580..f66e4924 100644
+--- a/src/nvidia-modeset/src/nvkms-hw-flip.c
++++ b/src/nvidia-modeset/src/nvkms-hw-flip.c
+@@ -1340,11 +1340,52 @@ NvBool nvUpdateFlipEvoHwState(
+ {
+     NvU32 layer;
+ 
+-    if (pParams->viewPortIn.specified) {
++    if (pParams->viewPortIn.specified &&
++        nvViewPortInIsMainLayerPointIn(pOpenDev)) {
++        NVFlipChannelEvoHwState *pMainHwState =
++            &pFlipState->layer[NVKMS_MAIN_LAYER];
++
++        /*
++         * Only take a new source point together with a new main layer
++         * surface: without one, the window would either not be reprogrammed
++         * or be reflipped with its current sync objects. nvidia-drm sends the
++         * surface with every plane update, so this only rejects requests it
++         * doesn't make.
++         */
++        if (((pMainHwState->pointIn.x != pParams->viewPortIn.point.x) ||
++             (pMainHwState->pointIn.y != pParams->viewPortIn.point.y)) &&
++            !pParams->layer[NVKMS_MAIN_LAYER].surface.specified) {
++            return FALSE;
++        }
++
++        pMainHwState->pointIn = pParams->viewPortIn.point;
++
++        /* Keep the head viewport where the modeset put it. */
+         pFlipState->dirty.viewPortPointIn = TRUE;
+-        pFlipState->viewPortPointIn.x = pParams->viewPortIn.point.x +
+-            (pTimings->viewPort.in.width * mergeHeadSection);
+-        pFlipState->viewPortPointIn.y = pParams->viewPortIn.point.y;
++        pFlipState->viewPortPointIn.x =
++            pTimings->viewPort.in.width * mergeHeadSection;
++        pFlipState->viewPortPointIn.y = 0;
++    } else {
++        /*
++         * Other clients have no source point; don't let a surface they flip
++         * to inherit the one nvidia-drm left in the main layer state (e.g.
++         * console restore, or a DRM lease client flipping through userspace
++         * NVKMS). Only on a new surface: NVKMS's own flips that keep the
++         * current surface, like flipping the semaphores to NULL when a
++         * semaphore surface is unregistered, must keep its source point.
++         */
++        if (!nvViewPortInIsMainLayerPointIn(pOpenDev) &&
++            pParams->layer[NVKMS_MAIN_LAYER].surface.specified) {
++            pFlipState->layer[NVKMS_MAIN_LAYER].pointIn.x = 0;
++            pFlipState->layer[NVKMS_MAIN_LAYER].pointIn.y = 0;
++        }
++
++        if (pParams->viewPortIn.specified) {
++            pFlipState->dirty.viewPortPointIn = TRUE;
++            pFlipState->viewPortPointIn.x = pParams->viewPortIn.point.x +
++                (pTimings->viewPort.in.width * mergeHeadSection);
++            pFlipState->viewPortPointIn.y = pParams->viewPortIn.point.y;
++        }
+     }
+ 
+     if (!UpdateCursorLayerFlipEvoHwState(pOpenDev, pDevEvo, pParams, pTimings,
+@@ -1668,10 +1709,8 @@ ValidateMainFlipChannelEvoHwState(const NVDevEvoRec *pDevEvo,
+ 
+     /*
+      * This struct represents the source fetch rectangle for a given surface,
+-     * and will be populated later as such. This function doesn't explicitly set
+-     * sourceFetchRect.{x,y} because NVKMS currently doesn't support programming
+-     * source fetch offsets, so the init value of 0 should be fine for both of
+-     * these fields.
++     * and will be populated later as such. Only the main layer has a source
++     * fetch offset (pointIn); see nvViewPortInIsMainLayerPointIn().
+      */
+     struct NvKmsRect sourceFetchRect = {0};
+ 
+@@ -1695,6 +1734,8 @@ ValidateMainFlipChannelEvoHwState(const NVDevEvoRec *pDevEvo,
+             return FALSE;
+         }
+ 
++        sourceFetchRect.x = pHwState->pointIn.x;
++        sourceFetchRect.y = pHwState->pointIn.y;
+         sourceFetchRect.width = pHwState->sizeIn.width;
+         sourceFetchRect.height = pHwState->sizeIn.height;
+ 
+@@ -1710,6 +1751,28 @@ ValidateMainFlipChannelEvoHwState(const NVDevEvoRec *pDevEvo,
+          * guaranteed that. */
+         nvAssert(pDevEvo->caps.maxWidthInPixels <= NV_U16_MAX);
+         nvAssert(pDevEvo->caps.maxHeight <= NV_U16_MAX);
++
++        /*
++         * An offset fetch must stay inside the surface. Without an offset,
++         * keep accepting what NVKMS always accepted.
++         *
++         * Also refuse an offset with a rotated or reflected scan: whether
++         * SET_POINT_IN is taken in surface space or in the reversed scan
++         * direction is unverified, and a wrong guess would show the wrong
++         * part of the surface. The client then composites instead.
++         */
++        if (((pHwState->pointIn.x != 0) || (pHwState->pointIn.y != 0)) &&
++            (A_plus_B_greater_than_C_U16(pHwState->pointIn.x,
++                                         pHwState->sizeIn.width,
++                                         pSurfaceEvo->widthInPixels) ||
++             A_plus_B_greater_than_C_U16(pHwState->pointIn.y,
++                                         pHwState->sizeIn.height,
++                                         pSurfaceEvo->heightInPixels) ||
++             (pHwState->rrParams.rotation != NVKMS_ROTATION_0) ||
++             pHwState->rrParams.reflectionX ||
++             pHwState->rrParams.reflectionY)) {
++            return FALSE;
++        }
+     }
+ 
+     return TRUE;
+diff --git a/src/nvidia-modeset/src/nvkms.c b/src/nvidia-modeset/src/nvkms.c
+index 28830a55..5ce26da8 100644
+--- a/src/nvidia-modeset/src/nvkms.c
++++ b/src/nvidia-modeset/src/nvkms.c
+@@ -174,6 +174,11 @@ struct NvKmsPerOpenDev {
+     NVEvoApiHandlesRec           vblankSemControlHandles;
+     NVEvoApiHandlesRec           vblankIntrCallbackHandles[NVKMS_MAX_HEADS_PER_DISP];
+     NvBool                       beingFreed;
++    /*
++     * The open belongs to KAPI (nvidia-drm), which passes the main layer's
++     * source x/y in viewPortIn.point; see nvViewPortInIsMainLayerPointIn().
++     */
++    NvBool                       viewPortInIsMainLayerPointIn;
+ };
+ 
+ struct NvKmsPerOpenEventListEntry {
+@@ -1124,6 +1129,15 @@ struct NvKmsPerOpenDev *nvAllocPerOpenDev(struct NvKmsPerOpen *pOpen,
+ 
+     pOpenDev->pDevEvo = pDevEvo;
+ 
++    /*
++     * Only KAPI opens are kernel-space clients with a kernel per-open handle;
++     * NVKMS's own internal open (console restore etc.) has none and keeps the
++     * viewport panning meaning of viewPortIn.point.
++     */
++    pOpenDev->viewPortInIsMainLayerPointIn =
++        (pOpen->clientType == NVKMS_CLIENT_KERNEL_SPACE) &&
++        (pOpen->pOpenKernel != NULL);
++
+     if (!nvEvoInitApiHandles(&pOpenDev->dispHandles,
+                              ARRAY_LEN(pOpenDev->disp))) {
+         goto fail;
+@@ -6976,6 +6990,22 @@ const NVEvoApiHandlesRec *nvGetSurfaceHandlesFromOpenDevConst(
+     return &pOpenDev->surfaceHandles;
+ }
+ 
++/*
++ * NVKMS can't take a per-layer source fetch offset through the flip API
++ * without changing its userspace ABI, so KAPI has always passed the DRM
++ * primary plane's SRC_X/SRC_Y as viewPortIn.point. Panning the head viewport
++ * by it only shows the right content when the plane is unscaled, at CRTC
++ * 0,0, and fetched from 0,0 up to the end of the source rectangle; otherwise
++ * the screen shows black or the wrong part of the surface, and overlays move
++ * with the pan. For KAPI opens, use the point as the main layer's
++ * SET_POINT_IN instead and leave the head viewport at its origin.
++ */
++NvBool nvViewPortInIsMainLayerPointIn(
++    const struct NvKmsPerOpenDev *pOpenDev)
++{
++    return (pOpenDev != NULL) && pOpenDev->viewPortInIsMainLayerPointIn;
++}
++
+ static int suspendCounter = 0;
+ 
+ /*

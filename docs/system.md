@@ -12,7 +12,7 @@ evidence README says otherwise. State as of 2026-10-29.
 | Distribution | Gentoo Linux |
 | Kernel | 6.18.59-gentoo (since 2026-10-29, 6.18.58 before), `CONFIG_PREEMPT_LAZY=y`, `CONFIG_HZ=300`, THP `madvise`, `vm.compaction_proactiveness=60` (default 20) |
 | Kernel command line | `mitigations=off nvidia-drm.modeset=1 nvidia-drm.fbdev=1 intel_iommu=on iommu=pt` |
-| Driver | `x11-drivers/nvidia-drivers-615.78.08`, open kernel modules, built with the series from this repository |
+| Driver | `x11-drivers/nvidia-drivers-620.70.06` (since 2026-11-05, 615.78.08 before), open kernel modules, built with the series from this repository |
 | Desktop | KDE Plasma 6.8.1 on Wayland (KWin) |
 | Use | Gaming via Steam/Proton (Vulkan through DXVK/VKD3D-Proton), web browsers, desktop |
 

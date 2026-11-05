@@ -1,0 +1,302 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 22:10:10 +0100
+Subject: [PATCH] nvkms, nvidia-drm: wait out a system suspend for a sync FD
+ auto-update
+
+Waiting on a sync FD with DRM_NVIDIA_SEMSURF_FENCE_WAIT registers an RM waiter
+that writes post_wait_value once the fence has signaled. RM refuses this with
+NV_ERR_GPU_NOT_FULL_POWER while the GPU is suspended. nvidia-drm then logs
+"Failed to register auto-value-update" and frees the wait, so the value is never
+written and whatever waits on it can hang. Upstream forum topic 385523 traced
+this to a stalled Plasma taskbar after S3: tasks thaw before NVKMS has resumed.
+NVreg_UseKernelSuspendNotifiers leaves a gap on both sides, since it suspends
+before tasks freeze and resumes after they thaw. The retry of the semaphore
+surface callback fix only helps a GPU in runtime D3.
+
+Take the NVKMS PM lock for reading around the registration, and try again every
+20 ms when a suspend holds it. The lock is held from before RM suspends until
+after it has resumed, and every path through nv_set_system_power_state() that
+took it also releases it.
+
+Don't wait on the lock. The fence context's destructor flushes the work thread
+uninterruptibly, so a worker blocked until resume would keep a task closing the
+context from freezing, and suspend would fail after the freezer's 20 s timeout.
+A reader sleeping behind a suspend also blocks later readers. Instead the worker
+drops the wait when the context is shutting down, as is done for work added after
+shutdown, and a task doing this from the ioctl can freeze between tries.
+
+A suspend that doesn't go through the notifiers or /proc/driver/nvidia/suspend
+doesn't take the lock, so this can still fail there, after tasks are frozen.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nvkms-kapi.h           |  6 ++++
+ kernel-open/nvidia-drm/nvidia-drm-fence.c     | 33 ++++++++++++++-----
+ .../nvidia-drm/nvidia-drm-os-interface.c      | 26 +++++++++++++++
+ .../nvidia-drm/nvidia-drm-os-interface.h      |  6 ++++
+ .../nvidia-modeset/nvidia-modeset-linux.c     | 10 ++++++
+ .../nvidia-modeset-os-interface.h             |  7 ++++
+ .../kapi/interface/nvkms-kapi.h               |  6 ++++
+ src/nvidia-modeset/kapi/src/nvkms-kapi-sync.c | 14 ++++++++
+ .../include/nvidia-modeset-os-interface.h     |  7 ++++
+ 9 files changed, 106 insertions(+), 9 deletions(-)
+
+diff --git a/kernel-open/common/inc/nvkms-kapi.h b/kernel-open/common/inc/nvkms-kapi.h
+index 7a83c384..def32947 100644
+--- a/kernel-open/common/inc/nvkms-kapi.h
++++ b/kernel-open/common/inc/nvkms-kapi.h
+@@ -682,6 +682,7 @@ typedef enum NvKmsKapiRegisterWaiterResultRec {
+     NVKMS_KAPI_REG_WAITER_FAILED,
+     NVKMS_KAPI_REG_WAITER_SUCCESS,
+     NVKMS_KAPI_REG_WAITER_ALREADY_SIGNALLED,
++    NVKMS_KAPI_REG_WAITER_NOT_READY,
+ } NvKmsKapiRegisterWaiterResult;
+ 
+ struct NvKmsKapiGpuInfo {
+@@ -1519,6 +1520,11 @@ struct NvKmsKapiFunctionsTable {
+      *         requested and the semaphore at <index> has already reached or
+      *         exceeded <wait_value>
+      *
++     *         NVKMS_KAPI_REG_WAITER_NOT_READY if no callback was requested and
++     *         the GPU is being suspended, is suspended or is resuming. Nothing
++     *         was registered; the caller should try again later. Registrations
++     *         with a callback don't return this.
++     *
+      *         NVKMS_KAPI_REG_WAITER_FAILED if waiter registration failed.
+      */
+     NvKmsKapiRegisterWaiterResult
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-fence.c b/kernel-open/nvidia-drm/nvidia-drm-fence.c
+index d99612df..3d4a5223 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-fence.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-fence.c
+@@ -2217,17 +2217,32 @@ __nv_drm_semsurf_wait_fence_work_cb
+      * Note this command applies "newValue" immediately if the semaphore has
+      * already reached "waitValue." It only returns NVKMS_KAPI_ALREADY_SIGNALLED
+      * if a separate notification was requested as well.
++     *
++     * The value is never written if this fails, so wait out a system suspend.
++     * Don't wait if the context is going away: its destructor flushes this
++     * work, which could otherwise hold up the freezer until suspend gave up.
++     * Dropping the wait is what happens to work added after shutdown too.
+      */
+-    ret = nvKms->registerSemaphoreSurfaceCallback(nv_dev->pDevice,
+-                                                  ctx->pSemSurface,
+-                                                  NULL,
+-                                                  NULL,
+-                                                  ctx->base.fenceSemIndex,
+-                                                  wait_data->pre_wait_value,
+-                                                  wait_data->post_wait_value,
+-                                                  NULL);
++    while (true) {
++        ret = nvKms->registerSemaphoreSurfaceCallback(nv_dev->pDevice,
++                                                      ctx->pSemSurface,
++                                                      NULL,
++                                                      NULL,
++                                                      ctx->base.fenceSemIndex,
++                                                      wait_data->pre_wait_value,
++                                                      wait_data->post_wait_value,
++                                                      NULL);
+ 
+-    if (ret != NVKMS_KAPI_REG_WAITER_SUCCESS) {
++        if ((ret != NVKMS_KAPI_REG_WAITER_NOT_READY) ||
++            nv_drm_workthread_is_shutting_down(&ctx->worker)) {
++            break;
++        }
++
++        nv_drm_wait_for_resume_sleep();
++    }
++
++    if ((ret != NVKMS_KAPI_REG_WAITER_SUCCESS) &&
++        (ret != NVKMS_KAPI_REG_WAITER_NOT_READY)) {
+         NV_DRM_DEV_LOG_ERR(nv_dev,
+                            "Failed to register auto-value-update on pre-wait value for sync FD semaphore surface");
+     }
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-os-interface.c b/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
+index 613b3157..945d7929 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
+@@ -31,6 +31,11 @@
+ #include <linux/vmalloc.h>
+ #include <linux/sched.h>
+ #include <linux/device.h>
++#include <linux/delay.h>
++
++#if !defined(NV_BSD)
++#include <linux/freezer.h>
++#endif
+ 
+ #if defined(NVCPU_AARCH64)
+ #include <asm/page.h>
+@@ -189,6 +194,18 @@ void nv_drm_workthread_shutdown(nv_drm_workthread *worker)
+     nv_kthread_q_stop(&worker->q);
+ }
+ 
++bool nv_drm_workthread_is_shutting_down(nv_drm_workthread *worker)
++{
++    unsigned long flags;
++    bool shutting_down;
++
++    spin_lock_irqsave(&worker->lock, flags);
++    shutting_down = worker->shutting_down;
++    spin_unlock_irqrestore(&worker->lock, flags);
++
++    return shutting_down;
++}
++
+ void nv_drm_workthread_work_init(nv_drm_work *work,
+                                  void (*callback)(void *),
+                                  void *arg)
+@@ -210,6 +227,15 @@ int nv_drm_workthread_add_work(nv_drm_workthread *worker, nv_drm_work *work)
+     return ret;
+ }
+ 
++void nv_drm_wait_for_resume_sleep(void)
++{
++#if !defined(NV_BSD)
++    /* Does nothing for a kernel thread. A user task must not hold up suspend. */
++    try_to_freeze();
++#endif
++    msleep(20);
++}
++
+ void nv_drm_timer_setup(nv_drm_timer *timer, void (*callback)(nv_drm_timer *nv_drm_timer))
+ {
+     nv_timer_setup(timer, callback);
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-os-interface.h b/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
+index 0fa812db..9bf53601 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-os-interface.h
+@@ -101,6 +101,9 @@ bool nv_drm_workthread_init(nv_drm_workthread *worker, const char *name);
+ /* Can be called concurrently with nv_drm_workthread_add_work() */
+ void nv_drm_workthread_shutdown(nv_drm_workthread *worker);
+ 
++/* Can be called concurrently with nv_drm_workthread_shutdown() */
++bool nv_drm_workthread_is_shutting_down(nv_drm_workthread *worker);
++
+ void nv_drm_workthread_work_init(nv_drm_work *work,
+                                  void (*callback)(void *),
+                                  void *arg);
+@@ -124,6 +127,9 @@ struct dma_fence *nv_drm_sync_file_get_fence(int fd);
+ 
+ void nv_drm_yield(void);
+ 
++/* Sleep a little between retries of work that waits for system resume. */
++void nv_drm_wait_for_resume_sleep(void);
++
+ #if defined(NVCPU_AARCH64)
+ NvBool nv_aarch64_pfn_is_map_memory(unsigned long pfn);
+ #endif
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+index 8532772d..afe73200 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+@@ -1679,6 +1679,16 @@ NvBool nvkms_ioctl_from_kapi
+  * APIs for locking.
+  *************************************************************************/
+ 
++NvBool nvkms_read_trylock_pm_lock_from_kapi(void)
++{
++    return nvkms_read_trylock_pm_lock() == 0;
++}
++
++void nvkms_read_unlock_pm_lock_from_kapi(void)
++{
++    nvkms_read_unlock_pm_lock();
++}
++
+ void nvkms_drop_global_lock(void)
+ {
+     up(&nvkms_lock);
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+index 585bbc4a..303b6a7e 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+@@ -394,6 +394,13 @@ NvBool nvkms_ioctl_from_kapi_try_pmlock
+  * NVKMS state. Only valid in an ioctl from a kernel-space (KAPI) client, which
+  * also holds the NVKMS PM lock, so suspend can't run in between.
+  */
++/*
++ * Keep system suspend from starting, without waiting if it already has.
++ * Returns NV_FALSE if a suspend holds or is about to take the PM lock.
++ */
++NvBool nvkms_read_trylock_pm_lock_from_kapi(void);
++void nvkms_read_unlock_pm_lock_from_kapi(void);
++
+ void nvkms_drop_global_lock(void);
+ void nvkms_retake_global_lock(void);
+ 
+diff --git a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+index 7a83c384..def32947 100644
+--- a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
++++ b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+@@ -682,6 +682,7 @@ typedef enum NvKmsKapiRegisterWaiterResultRec {
+     NVKMS_KAPI_REG_WAITER_FAILED,
+     NVKMS_KAPI_REG_WAITER_SUCCESS,
+     NVKMS_KAPI_REG_WAITER_ALREADY_SIGNALLED,
++    NVKMS_KAPI_REG_WAITER_NOT_READY,
+ } NvKmsKapiRegisterWaiterResult;
+ 
+ struct NvKmsKapiGpuInfo {
+@@ -1519,6 +1520,11 @@ struct NvKmsKapiFunctionsTable {
+      *         requested and the semaphore at <index> has already reached or
+      *         exceeded <wait_value>
+      *
++     *         NVKMS_KAPI_REG_WAITER_NOT_READY if no callback was requested and
++     *         the GPU is being suspended, is suspended or is resuming. Nothing
++     *         was registered; the caller should try again later. Registrations
++     *         with a callback don't return this.
++     *
+      *         NVKMS_KAPI_REG_WAITER_FAILED if waiter registration failed.
+      */
+     NvKmsKapiRegisterWaiterResult
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi-sync.c b/src/nvidia-modeset/kapi/src/nvkms-kapi-sync.c
+index 0d81a958..e76cf71f 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi-sync.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi-sync.c
+@@ -430,6 +430,16 @@ nvKmsKapiRegisterSemaphoreSurfaceCallback(
+         cb->rmCallback.arg = cb;
+ 
+         waiterParams.notificationHandle = (NvUPtr)&cb->rmCallback;
++    } else if (!nvkms_read_trylock_pm_lock_from_kapi()) {
++        /*
++         * RM would fail this with NV_ERR_GPU_NOT_FULL_POWER, and then nothing
++         * would ever write new_value. Let the caller retry after resume.
++         *
++         * Don't wait for the lock here. The caller's work thread can be flushed
++         * by a task that the freezer needs to stop before suspend can go on, and
++         * a reader waiting behind a suspend blocks anything queued after it.
++         */
++        return NVKMS_KAPI_REG_WAITER_NOT_READY;
+     }
+ 
+     ret = nvRmApiControl(device->hRmClient,
+@@ -438,6 +448,10 @@ nvKmsKapiRegisterSemaphoreSurfaceCallback(
+                          &waiterParams,
+                          sizeof(waiterParams));
+ 
++    if (pCallback == NULL) {
++        nvkms_read_unlock_pm_lock_from_kapi();
++    }
++
+     switch (ret) {
+     case NVOS_STATUS_SUCCESS:
+         if (pCallback) {
+diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+index 585bbc4a..303b6a7e 100644
+--- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
++++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+@@ -394,6 +394,13 @@ NvBool nvkms_ioctl_from_kapi_try_pmlock
+  * NVKMS state. Only valid in an ioctl from a kernel-space (KAPI) client, which
+  * also holds the NVKMS PM lock, so suspend can't run in between.
+  */
++/*
++ * Keep system suspend from starting, without waiting if it already has.
++ * Returns NV_FALSE if a suspend holds or is about to take the PM lock.
++ */
++NvBool nvkms_read_trylock_pm_lock_from_kapi(void);
++void nvkms_read_unlock_pm_lock_from_kapi(void);
++
+ void nvkms_drop_global_lock(void);
+ void nvkms_retake_global_lock(void);
+ 

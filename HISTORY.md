@@ -3,6 +3,49 @@
 What changed in the series per driver release, and why. Newest first. Patch
 numbers refer to `patches/<release>/README.md`.
 
+## 620.70.06
+
+Fork branch `ogkm/620.70.06`, 133 patches on the upstream tag `620.70.06`.
+
+### 2026-11-05: the series moves to 620.70.06
+
+Tom Englund's branch `patches`, rebased onto 620.70.06, with the same
+patches left out as for 615.78.08. `patches/615.78.08/` and
+`ogkm/615.78.08` stay as they are.
+
+Dropped, as 620.70.06 carries the fix itself:
+
+- nvidia: correct Linux rwsem conditional acquisition status (upstream
+  PR [#1424][pr-1424]).
+- nvidia: unmap exported dma-buf sg tables with the original entry count.
+
+Changed:
+
+- 22: the HDMI FRL DSC hblankMin patch only fixes the lane count now.
+  620.70.06 computes the numerator from the 64-bit `pixelClockHz`, so the
+  32-bit overflow it also fixed on 615.78.08 is gone.
+- 99: head detaches are processed while unplugged or while detection is
+  in progress, all of upstream PR [#1406][pr-1406]. 620.70.06 doesn't
+  have the half 615.78.08 had already taken.
+- 70 to 73: upstream now uses `NVOS32_ATTR2` bit 28 for
+  `SKIP_IOMMU_MAPPING`, so the series' `NVOS32_ATTR2_FAIL_FAST` flag moved
+  to the free bit 24.
+
+Added:
+
+- 131: nvkms fetches the DRM primary plane's source rectangle with the
+  window's `SET_POINT_IN` instead of panning the head viewport, so a
+  cropped, offset or scaled primary plane shows the right content
+  (upstream issue [#1510][issue-1510]).
+- 132: under VRR, tearing flips are reported at the scanout they show up
+  in, not at the last vblank interrupt.
+- 133: the MemoryMapper worker refcount is `PORT_ATOMIC`, so clang builds
+  with C11 atomics (fixes 77, [gulafaran PR #2][gulafaran-pr-2] by
+  VeilSilence).
+
+The series applies cleanly to 620.70.06 (`tools/check-series.sh`). Built
+against 6.18.60, installed and loaded since the boot of 2026-11-05 19:03.
+
 ## 615.78.08
 
 Fork branch `ogkm/615.78.08`, 132 patches on the upstream tag `615.78.08`.
@@ -362,11 +405,14 @@ no longer logged as errors.
 - 35: retry scanout GEM allocations without compression when VRAM is
   fragmented, return `-ENOMEM` instead of `-EINVAL`.
 
+[gulafaran-pr-2]: https://github.com/gulafaran/open-gpu-kernel-modules/pull/2
+[issue-1510]: https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1510
 [pr-1278]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1278
 [pr-1286]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1286
 [pr-1368]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368
 [pr-1375]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1375
 [pr-1383]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1383
+[pr-1406]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1406
 [pr-1424]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1424
 [pr-1430]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1430
 [pr-1432]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1432

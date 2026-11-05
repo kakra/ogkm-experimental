@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Mon, 2 Nov 2026 22:21:34 +0000
+Subject: [PATCH] nvidia: limit the delays of a whole chunked I2C-over-AUX
+ message
+
+RmDpAuxI2CTransferChunked() restarts its defer and timeout limits with
+every 16 byte AUX transaction. A sink that defers every transaction of
+a long message can therefore keep rm_i2c_transfer() sleeping for
+hundreds of milliseconds with the API and GPU locks held, which stalls
+every other RM client, including the compositor.
+
+Also count the delays of the whole message and give up with a timeout
+after 64 of them. The per-transaction limits stay as they are. The
+chunked path only runs when the I2C transfer control has failed.
+
+Fixes: 6e3a1215 ("nvidia: fall back to chunked I2C-over-AUX for i2c-dev DP transfers")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/arch/nvalloc/unix/src/osapi.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/src/nvidia/arch/nvalloc/unix/src/osapi.c b/src/nvidia/arch/nvalloc/unix/src/osapi.c
+index 72ce03e0..e2455c9a 100644
+--- a/src/nvidia/arch/nvalloc/unix/src/osapi.c
++++ b/src/nvidia/arch/nvalloc/unix/src/osapi.c
+@@ -3439,6 +3439,12 @@ NvBool NV_API_CALL rm_is_supported_pci_device(
+ //
+ #define RM_DP_AUX_I2C_MAX_DEFERS   16
+ #define RM_DP_AUX_I2C_MAX_TIMEOUTS 3
++//
++// The limits above restart with every AUX transaction of a message. Also limit
++// the delays of the whole message, so a sink that defers every transaction of
++// a long message can't hold the locks for hundreds of milliseconds.
++//
++#define RM_DP_AUX_I2C_MAX_DELAYS   64
+ 
+ /*
+  * Performs an I2C transfer over the DP AUX channel, split into AUX transactions.
+@@ -3464,6 +3470,7 @@ static NV_STATUS RmDpAuxI2CTransferChunked
+     NvU32      done     = 0;
+     NvU32      defers   = 0;
+     NvU32      timeouts = 0;
++    NvU32      delays   = 0;
+ 
+     pParams = portMemAllocNonPaged(sizeof(*pParams));
+     if (pParams == NULL)
+@@ -3510,7 +3517,8 @@ static NV_STATUS RmDpAuxI2CTransferChunked
+ 
+         if (status == NV_ERR_TIMEOUT)
+         {
+-            if (++timeouts >= RM_DP_AUX_I2C_MAX_TIMEOUTS)
++            if ((++timeouts >= RM_DP_AUX_I2C_MAX_TIMEOUTS) ||
++                (++delays > RM_DP_AUX_I2C_MAX_DELAYS))
+             {
+                 break;
+             }
+@@ -3556,7 +3564,8 @@ static NV_STATUS RmDpAuxI2CTransferChunked
+ 
+         if (bDefer)
+         {
+-            if (++defers > RM_DP_AUX_I2C_MAX_DEFERS)
++            if ((++defers > RM_DP_AUX_I2C_MAX_DEFERS) ||
++                (++delays > RM_DP_AUX_I2C_MAX_DELAYS))
+             {
+                 status = NV_ERR_TIMEOUT;
+                 break;

@@ -1,0 +1,564 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 14:43:21 +0100
+Subject: [PATCH] nvkms: add low framerate compensation for VRR
+
+Below the display's minimum refresh rate, the hardware repeats the current
+frame when SET_DISPLAY_RATE's MIN_REFRESH_INTERVAL expires, however close the
+next frame is. A flip that arrives during that scanout has to wait for it to
+finish, up to a whole scanout.
+
+When the frame rate gets close to the minimum, predict the next frame's duration
+and repeat the current frame at even intervals through the cursor channel's
+RELEASE_ELV, like cursor motion does. That leaves the scanout idle when the next
+frame is due. The hardware timer stays armed, so a frame that takes longer than
+predicted is no worse off than without LFC.
+
+The thresholds and the choice of multiplier follow amdgpu's
+apply_below_the_range(). Unlike amdgpu's repeats, these are timed by software, and
+a wrong one costs a real frame up to a whole scanout, so:
+
+- Predict with the shorter of the last two frames, so that a single slow frame
+  or uneven frame pacing falls back to the hardware timer.
+- Time repeats from the flip, not from the last repeat, so that timer latency
+  doesn't add up.
+- Skip a repeat if its timer ran so late that it could collide with the next
+  frame, or if the last flip is still pending, e.g. on an acquire fence.
+- Stop for 2 s after 5 new frames in a row arrive during a repeat's scanout.
+
+Displays with a maximum refresh rate below twice the minimum, displays without a
+minimum refresh rate, media VRR (which runs at a fixed virtual refresh rate
+instead of stall lock) and tearing flips don't use LFC. Disable with
+/sys/module/nvidia_modeset/parameters/vrr_lfc. nvkms_vrr_lfc_event() is a kprobe
+point for what LFC does, because functions in the NVKMS core can't be probed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../nvidia-modeset/nvidia-modeset-linux.c     |  16 +
+ .../nvidia-modeset-os-interface.h             |  13 +
+ src/nvidia-modeset/include/nvkms-types.h      |  16 +
+ src/nvidia-modeset/include/nvkms-vrr.h        |   3 +
+ .../include/nvidia-modeset-os-interface.h     |  13 +
+ src/nvidia-modeset/src/nvkms-evo.c            |   1 +
+ src/nvidia-modeset/src/nvkms-hw-flip.c        |  26 ++
+ src/nvidia-modeset/src/nvkms-vrr.c            | 314 ++++++++++++++++++
+ 8 files changed, 402 insertions(+)
+
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+index d971c774..8532772d 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+@@ -113,6 +113,13 @@ MODULE_PARM_DESC(modeset_changed_heads_only,
+                  "When a DRM commit needs a modeset, only modeset the CRTCs that "
+                  "need one and flip the others, instead of modesetting all of them");
+ 
++static bool vrr_lfc = true;
++module_param_named(vrr_lfc, vrr_lfc, bool, 0644);
++MODULE_PARM_DESC(vrr_lfc,
++                 "Low framerate compensation: when the frame rate gets close to the "
++                 "minimum VRR refresh rate, repeat frames at a predicted interval "
++                 "instead of only when the display's minimum refresh rate forces it");
++
+ /* These parameters are used for fault injection tests.  Normally the defaults
+  * should be used. */
+ MODULE_PARM_DESC(fail_malloc, "Fail the Nth call to nvkms_alloc");
+@@ -303,6 +310,15 @@ NvBool nvkms_modeset_changed_heads_only(void)
+     return READ_ONCE(modeset_changed_heads_only);
+ }
+ 
++NvBool nvkms_vrr_lfc(void)
++{
++    return READ_ONCE(vrr_lfc);
++}
++
++noinline void nvkms_vrr_lfc_event(NvU32 apiHead, enum NvKmsVrrLfcEvent event)
++{
++}
++
+ NvBool nvkms_debug_logging(void)
+ {
+     return debug != 0;
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+index b7d73c69..585bbc4a 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+@@ -130,6 +130,19 @@ enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void);
+ NvBool nvkms_enable_overlay_layers(void);
+ NvBool nvkms_opportunistic_flip_sync(void);
+ NvBool nvkms_modeset_changed_heads_only(void);
++NvBool nvkms_vrr_lfc(void);
++
++/*
++ * What LFC did, for kprobes: functions in the NVKMS core can't be probed.
++ */
++enum NvKmsVrrLfcEvent {
++    NVKMS_VRR_LFC_EVENT_REPEAT = 0,
++    NVKMS_VRR_LFC_EVENT_SKIP_LATE = 1,
++    NVKMS_VRR_LFC_EVENT_SKIP_FLIP_PENDING = 2,
++    NVKMS_VRR_LFC_EVENT_COLLISION = 3,
++    NVKMS_VRR_LFC_EVENT_BACKOFF = 4,
++};
++void nvkms_vrr_lfc_event(NvU32 apiHead, enum NvKmsVrrLfcEvent event);
+ NvBool nvkms_debug_logging(void);
+ void nvkms_extcon_report_hdmi(NvBool state);
+ void nvkms_extcon_report_hdmi_audio(NvBool state);
+diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
+index 9a62d639..276e7c42 100644
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -2109,6 +2109,19 @@ typedef struct _NVDispVblankApiHeadState {
+ 
+ } NVDispVblankApiHeadState;
+ 
++typedef struct _NVVrrLfcState {
++    nvkms_timer_handle_t *repeatTimer;
++    NvU64 lastFlipUs;
++    NvU64 lastRepeatUs;
++    NvU64 backoffUntilUs;
++    NvU32 lastIntervalUs;
++    NvU32 frameUs;
++    NvU32 multiplier;
++    NvU32 repeatsLeft;
++    NvU32 collisions;
++    NvBool active;
++} NVVrrLfcState;
++
+ typedef struct _NVDispEvoRec {
+     NvU8       gpuLogIndex;
+     NVDevEvoPtr pDevEvo;
+@@ -2163,6 +2176,9 @@ typedef struct _NVDispEvoRec {
+         NvBool hasPlatformCookie;
+ 
+         nvkms_timer_handle_t *unstallTimer;
++
++        // Low framerate compensation state, per apiHead.
++        NVVrrLfcState lfc[NVKMS_MAX_HEADS_PER_DISP];
+     } vrr;
+ 
+     NVFrameLockEvoPtr pFrameLockEvo;
+diff --git a/src/nvidia-modeset/include/nvkms-vrr.h b/src/nvidia-modeset/include/nvkms-vrr.h
+index d6e1f0ec..985e298f 100644
+--- a/src/nvidia-modeset/include/nvkms-vrr.h
++++ b/src/nvidia-modeset/include/nvkms-vrr.h
+@@ -46,6 +46,9 @@ void nvAdjustHwModeTimingsForVrrEvo(
+ NvBool nvAnyActiveVrrHeads(const NVDevEvoRec *pDevEvo);
+ void nvDisableVrr(NVDispEvoRec *pDispEvo, NVEvoUpdateState *updateState);
+ void nvEnableVrr(NVDispEvoRec *pDispEvo, NVEvoUpdateState *updateState);
++void nvVrrLfcNotifyFlip(NVDispEvoPtr pDispEvo, const NvU32 apiHead,
++                        const NvBool tearing);
++void nvVrrLfcCancel(NVDevEvoPtr pDevEvo);
+ void nvCancelVrrFrameReleaseTimers(NVDevEvoPtr pDevEvo,
+                                    const NvU32 applyAllowVrrApiHeadMask);
+ void nvSetVrrActive(NVDispEvoRec *pDispEvo,
+diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+index b7d73c69..585bbc4a 100644
+--- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
++++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+@@ -130,6 +130,19 @@ enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void);
+ NvBool nvkms_enable_overlay_layers(void);
+ NvBool nvkms_opportunistic_flip_sync(void);
+ NvBool nvkms_modeset_changed_heads_only(void);
++NvBool nvkms_vrr_lfc(void);
++
++/*
++ * What LFC did, for kprobes: functions in the NVKMS core can't be probed.
++ */
++enum NvKmsVrrLfcEvent {
++    NVKMS_VRR_LFC_EVENT_REPEAT = 0,
++    NVKMS_VRR_LFC_EVENT_SKIP_LATE = 1,
++    NVKMS_VRR_LFC_EVENT_SKIP_FLIP_PENDING = 2,
++    NVKMS_VRR_LFC_EVENT_COLLISION = 3,
++    NVKMS_VRR_LFC_EVENT_BACKOFF = 4,
++};
++void nvkms_vrr_lfc_event(NvU32 apiHead, enum NvKmsVrrLfcEvent event);
+ NvBool nvkms_debug_logging(void);
+ void nvkms_extcon_report_hdmi(NvBool state);
+ void nvkms_extcon_report_hdmi_audio(NvBool state);
+diff --git a/src/nvidia-modeset/src/nvkms-evo.c b/src/nvidia-modeset/src/nvkms-evo.c
+index 1708d1a2..bcd241f5 100644
+--- a/src/nvidia-modeset/src/nvkms-evo.c
++++ b/src/nvidia-modeset/src/nvkms-evo.c
+@@ -5614,6 +5614,7 @@ void nvFreeCoreChannelEvo(NVDevEvoPtr pDevEvo)
+ 
+     const NvU32 fullApiHeadMask = ~0u;
+     nvCancelVrrFrameReleaseTimers(pDevEvo, fullApiHeadMask);
++    nvVrrLfcCancel(pDevEvo);
+ 
+     nvCancelLowerDispBandwidthTimer(pDevEvo);
+ 
+diff --git a/src/nvidia-modeset/src/nvkms-hw-flip.c b/src/nvidia-modeset/src/nvkms-hw-flip.c
+index cd41dd69..f09704fc 100644
+--- a/src/nvidia-modeset/src/nvkms-hw-flip.c
++++ b/src/nvidia-modeset/src/nvkms-hw-flip.c
+@@ -3271,6 +3271,32 @@ void nvPostFlip(NVDevEvoRec *pDevEvo,
+     // and not currently flipping, since we need to wait for the timer for that head
+     nvCancelVrrFrameReleaseTimers(pDevEvo, applyAllowVrrApiHeadMask);
+ 
++    for (sd = 0; sd < pDevEvo->numSubDevices; sd++) {
++        NVDispEvoPtr pDispEvo = pDevEvo->gpus[sd].pDispEvo;
++        NvU32 apiHead;
++
++        if (!pWorkArea->sd[sd].changed || skipUpdate) {
++            continue;
++        }
++
++        // Cursor-only flips don't bring a new frame.
++        for (apiHead = 0; apiHead < pDevEvo->numApiHeads; apiHead++) {
++            const NVFlipEvoHwState *pNewState;
++
++            head = nvGetPrimaryHwHeadFromMask(
++                pDispEvo->apiHeadState[apiHead].hwHeadsMask);
++            if (head == NV_INVALID_HEAD) {
++                continue;
++            }
++
++            pNewState = &pWorkArea->sd[sd].head[head].newState;
++            if (pNewState->dirty.layer[NVKMS_MAIN_LAYER]) {
++                nvVrrLfcNotifyFlip(pDispEvo, apiHead,
++                                   pNewState->layer[NVKMS_MAIN_LAYER].tearing);
++            }
++        }
++    }
++
+     for (sd = 0; sd < pDevEvo->numSubDevices; sd++) {
+         if (!pWorkArea->sd[sd].changed) {
+             continue;
+diff --git a/src/nvidia-modeset/src/nvkms-vrr.c b/src/nvidia-modeset/src/nvkms-vrr.c
+index 092ae159..aa45a0e0 100644
+--- a/src/nvidia-modeset/src/nvkms-vrr.c
++++ b/src/nvidia-modeset/src/nvkms-vrr.c
+@@ -79,6 +79,7 @@
+  *     c. (EVO only) RM's VRR state machine is suspended.
+  */
+ 
++static void VrrLfcCancelOneDisp(NVDispEvoPtr pDispEvo);
+ static void ConfigVrrPstateSwitch(NVDispEvoPtr pDispEvo,
+                                   NvBool vrrEnabled,
+                                   NvBool vrrState,
+@@ -373,6 +374,8 @@ void nvDisableVrr(NVDispEvoRec *pDispEvo, NVEvoUpdateState *updateState)
+     NVDevEvoRec *pDevEvo = pDispEvo->pDevEvo;
+     NVDpyEvoRec *pDpyEvo;
+ 
++    VrrLfcCancelOneDisp(pDispEvo);
++
+     for (head = 0; head < pDevEvo->numHeads; head++) {
+         pHeadState = &pDispEvo->headState[head];
+ 
+@@ -922,6 +925,317 @@ VrrUnstallTimer(void *dataPtr, NvU32 dataU32)
+     pDispEvo->vrr.unstallTimer = NULL;
+ }
+ 
++/*
++ * Low framerate compensation (LFC).
++ *
++ * Below the display's minimum refresh rate, the hardware repeats the current
++ * frame when SET_DISPLAY_RATE's MIN_REFRESH_INTERVAL expires, however close the
++ * next frame is. A flip that arrives during that scanout has to wait for it to
++ * finish.
++ *
++ * So, when the frame rate gets close to the minimum, predict that the next
++ * frame takes as long as the last one and repeat the current frame at even
++ * intervals, leaving the scanout idle when the next frame is due. The hardware
++ * timer stays armed, so a frame that takes longer than predicted is no worse
++ * off than without LFC. LFC needs a maximum refresh rate of at least twice the
++ * minimum, to have an interval to repeat at.
++ *
++ * The thresholds and the choice of multiplier follow amdgpu's
++ * apply_below_the_range(), with these differences, because the repeats are timed
++ * by software and a wrong repeat costs a real frame up to a whole scanout:
++ *
++ *  - Predict with the shorter of the last two frames, so that a single slow
++ *    frame or uneven frame pacing falls back to the hardware timer.
++ *  - Don't repeat while the last flip is still pending, e.g. on an acquire
++ *    fence: it would show up during that repeat's scanout.
++ *  - Stop for a while if new frames keep arriving during repeats, like amdgpu's
++ *    flip interval workaround stops varying the refresh rate.
++ */
++#define NVKMS_VRR_LFC_MAX_MARGIN_US   2500
++#define NVKMS_VRR_LFC_DRIFT_MARGIN_US 2000
++#define NVKMS_VRR_LFC_GUARD_US        1000
++#define NVKMS_VRR_LFC_MAX_FRAME_US    200000
++#define NVKMS_VRR_LFC_MAX_COLLISIONS  5
++#define NVKMS_VRR_LFC_BACKOFF_US      2000000
++#define NVKMS_VRR_LFC_TIMER_SLACK_US  1000
++
++static NvU32 LfcMidPointDelta(const NvU32 frameUs, const NvU32 multiplier,
++                              const NvU32 midPointUs)
++{
++    const NvU32 intervalUs = frameUs / multiplier;
++
++    return (intervalUs > midPointUs) ? (intervalUs - midPointUs) :
++                                       (midPointUs - intervalUs);
++}
++
++/*!
++ * Choose how many refreshes to split a frame into.
++ *
++ * \param[in] frameUs     The duration of the frame.
++ * \param[in] minUs       The duration of a refresh at the maximum refresh rate.
++ * \param[in] maxUs       The duration of a refresh at the minimum refresh rate.
++ * \param[in] maxFrameUs  The frame duration that LFC is centered on.
++ * \param[in] current     The current multiplier, or 0 if there is none.
++ *
++ * \return  The number of refreshes; less than 2 means no repeats.
++ */
++static NvU32 LfcChooseMultiplier(const NvU32 frameUs, const NvU32 minUs,
++                                 const NvU32 maxUs, const NvU32 maxFrameUs,
++                                 const NvU32 current)
++{
++    const NvU32 midPointUs = (minUs + maxUs) / 2;
++    const NvU32 minIntervalUs = minUs + NVKMS_VRR_LFC_GUARD_US;
++    const NvU32 ceil = (frameUs + midPointUs - 1) / midPointUs;
++    const NvU32 floor = frameUs / midPointUs;
++    const NvU32 ceilDelta = LfcMidPointDelta(frameUs, ceil, midPointUs);
++    const NvU32 floorDelta = (floor != 0) ?
++        LfcMidPointDelta(frameUs, floor, midPointUs) : NV_U32_MAX;
++    const NvU32 deltaDiff = (ceilDelta > floorDelta) ?
++        (ceilDelta - floorDelta) : (floorDelta - ceilDelta);
++    NvU32 multiplier;
++
++    if ((frameUs / ceil) < minIntervalUs) {
++        multiplier = floor;
++    } else if (floor < 2) {
++        multiplier = ceil;
++    } else if (ceilDelta < floorDelta) {
++        multiplier = ceil;
++    } else {
++        multiplier = floor;
++    }
++
++    // Prefer the current multiplier, unless it has drifted too far.
++    if ((current != 0) &&
++        (deltaDiff < NVKMS_VRR_LFC_DRIFT_MARGIN_US) &&
++        ((frameUs / current) < maxFrameUs) &&
++        ((frameUs / current) >= minIntervalUs)) {
++        multiplier = current;
++    }
++
++    while ((multiplier > 1) && ((frameUs / multiplier) < minIntervalUs)) {
++        multiplier--;
++    }
++
++    return multiplier;
++}
++
++/*!
++ * Get the range of refresh durations, if the apiHead can use LFC.
++ */
++static NvBool LfcGetRefreshRange(const NVDispEvoRec *pDispEvo,
++                                 const NvU32 apiHead,
++                                 NvU32 *pMinUs, NvU32 *pMaxUs)
++{
++    const NvU32 head =
++        nvGetPrimaryHwHeadFromMask(pDispEvo->apiHeadState[apiHead].hwHeadsMask);
++    const NVHwModeTimingsEvo *pTimings;
++
++    if ((head == NV_INVALID_HEAD) ||
++        !pDispEvo->apiHeadState[apiHead].vrr.active) {
++        return FALSE;
++    }
++
++    pTimings = &pDispEvo->headState[head].timings;
++
++    /*
++     * Only stall-lock (gaming) VRR repeats frames when the minimum refresh
++     * interval expires; media VRR runs at a fixed virtual refresh rate.
++     */
++    if ((pTimings->vrr.type != NVKMS_VRR_TYPE_GAMING) ||
++        (pTimings->vrr.minRefreshRate == 0) ||
++        (pTimings->pixelClockHz == 0)) {
++        return FALSE;
++    }
++
++    *pMaxUs = 1000000 / pTimings->vrr.minRefreshRate;
++    *pMinUs = axb_div_c_64(pTimings->rasterSize.y * 1000000ULL,
++                           pTimings->rasterSize.x, pTimings->pixelClockHz);
++
++    return (*pMinUs != 0) && (*pMaxUs >= (*pMinUs * 2));
++}
++
++/*!
++ * Return whether a flip on the main layer of the apiHead is still pending.
++ */
++static NvBool LfcFlipPending(NVDispEvoPtr pDispEvo, const NvU32 apiHead)
++{
++    NVDevEvoPtr pDevEvo = pDispEvo->pDevEvo;
++    NvU32 head;
++
++    FOR_EACH_EVO_HW_HEAD_IN_MASK(pDispEvo->apiHeadState[apiHead].hwHeadsMask, head) {
++        NvBool isIdle = FALSE;
++
++        if (!pDevEvo->hal->IsChannelIdle(pDevEvo,
++                                         pDevEvo->head[head].layer[NVKMS_MAIN_LAYER],
++                                         pDispEvo->displayOwner, &isIdle) ||
++            !isIdle) {
++            return TRUE;
++        }
++    }
++
++    return FALSE;
++}
++
++static void LfcRepeatTimer(void *dataPtr, NvU32 apiHead);
++
++/*!
++ * Schedule the next repeat, relative to the flip so that late timers don't add
++ * up: a repeat that ends up skipped lets the hardware timer run out instead,
++ * possibly just before the next frame.
++ */
++static void LfcScheduleRepeat(NVDispEvoPtr pDispEvo, const NvU32 apiHead,
++                              const NvU64 nowUs, const NvU64 earliestUs)
++{
++    NVVrrLfcState *pLfc = &pDispEvo->vrr.lfc[apiHead];
++    const NvU64 targetUs =
++        NV_MAX(pLfc->lastFlipUs +
++               (((NvU64)(pLfc->multiplier - pLfc->repeatsLeft) * pLfc->frameUs) /
++                pLfc->multiplier),
++               earliestUs);
++
++    pLfc->repeatTimer =
++        nvkms_alloc_timer(LfcRepeatTimer, pDispEvo, apiHead,
++                          (targetUs > (nowUs + NVKMS_VRR_LFC_TIMER_SLACK_US)) ?
++                              (targetUs - nowUs - NVKMS_VRR_LFC_TIMER_SLACK_US) : 0);
++}
++
++static void LfcRepeatTimer(void *dataPtr, NvU32 apiHead)
++{
++    NVDispEvoPtr pDispEvo = dataPtr;
++    NVDevEvoPtr pDevEvo = pDispEvo->pDevEvo;
++    NVVrrLfcState *pLfc = &pDispEvo->vrr.lfc[apiHead];
++    NvU32 minUs, maxUs, head;
++    NvU64 nowUs;
++
++    nvkms_free_timer(pLfc->repeatTimer);
++    pLfc->repeatTimer = NULL;
++
++    if (!nvkms_vrr_lfc() ||
++        !LfcGetRefreshRange(pDispEvo, apiHead, &minUs, &maxUs)) {
++        return;
++    }
++
++    if (LfcFlipPending(pDispEvo, apiHead)) {
++        nvkms_vrr_lfc_event(apiHead, NVKMS_VRR_LFC_EVENT_SKIP_FLIP_PENDING);
++        return;
++    }
++
++    // If this timer ran late, a repeat could collide with the next frame.
++    nowUs = nvkms_get_usec();
++    if ((nowUs + minUs + NVKMS_VRR_LFC_GUARD_US) >
++        (pLfc->lastFlipUs + pLfc->frameUs)) {
++        nvkms_vrr_lfc_event(apiHead, NVKMS_VRR_LFC_EVENT_SKIP_LATE);
++        return;
++    }
++
++    FOR_EACH_EVO_HW_HEAD_IN_MASK(pDispEvo->apiHeadState[apiHead].hwHeadsMask, head) {
++        if (nvHeadIsActive(pDispEvo, head)) {
++            pDevEvo->cursorHal->ReleaseElv(pDevEvo, head);
++        }
++    }
++
++    pLfc->lastRepeatUs = nowUs;
++    nvkms_vrr_lfc_event(apiHead, NVKMS_VRR_LFC_EVENT_REPEAT);
++
++    if (--pLfc->repeatsLeft > 0) {
++        LfcScheduleRepeat(pDispEvo, apiHead, nowUs,
++                          nowUs + minUs + NVKMS_VRR_LFC_GUARD_US);
++    }
++}
++
++/*!
++ * Update LFC for a flip with a new frame on an apiHead.
++ */
++void nvVrrLfcNotifyFlip(NVDispEvoPtr pDispEvo, const NvU32 apiHead,
++                        const NvBool tearing)
++{
++    NVVrrLfcState *pLfc = &pDispEvo->vrr.lfc[apiHead];
++    const NvU64 nowUs = nvkms_get_usec();
++    const NvU64 intervalUs = nowUs - pLfc->lastFlipUs;
++    const NvU64 lastRepeatUs = pLfc->lastRepeatUs;
++    const NvU32 prevIntervalUs = pLfc->lastIntervalUs;
++    NvU32 minUs = 0, maxUs = 0, marginUs, maxFrameUs;
++    const NvBool haveRange =
++        LfcGetRefreshRange(pDispEvo, apiHead, &minUs, &maxUs);
++
++    nvkms_free_timer(pLfc->repeatTimer);
++    pLfc->repeatTimer = NULL;
++    pLfc->repeatsLeft = 0;
++    pLfc->lastRepeatUs = 0;
++    pLfc->lastIntervalUs =
++        ((pLfc->lastFlipUs != 0) && (intervalUs <= NVKMS_VRR_LFC_MAX_FRAME_US)) ?
++            intervalUs : 0;
++    pLfc->lastFlipUs = nowUs;
++
++    if (haveRange && (lastRepeatUs != 0)) {
++        if ((nowUs - lastRepeatUs) >= minUs) {
++            pLfc->collisions = 0;
++        } else {
++            nvkms_vrr_lfc_event(apiHead, NVKMS_VRR_LFC_EVENT_COLLISION);
++
++            if (++pLfc->collisions >= NVKMS_VRR_LFC_MAX_COLLISIONS) {
++                nvkms_vrr_lfc_event(apiHead, NVKMS_VRR_LFC_EVENT_BACKOFF);
++                pLfc->collisions = 0;
++                pLfc->backoffUntilUs = nowUs + NVKMS_VRR_LFC_BACKOFF_US;
++            }
++        }
++    }
++
++    // A tearing flip doesn't have to wait for a scanout to finish.
++    if (!nvkms_vrr_lfc() || tearing || !haveRange ||
++        (pLfc->lastIntervalUs == 0) || (prevIntervalUs == 0) ||
++        (nowUs < pLfc->backoffUntilUs)) {
++        pLfc->active = FALSE;
++        pLfc->multiplier = 0;
++        return;
++    }
++
++    pLfc->frameUs = NV_MIN(pLfc->lastIntervalUs, prevIntervalUs);
++
++    marginUs = NV_MIN(maxUs - (2 * minUs), NVKMS_VRR_LFC_MAX_MARGIN_US);
++    maxFrameUs = maxUs - marginUs;
++
++    if ((pLfc->frameUs + (marginUs / 2)) < maxFrameUs) {
++        pLfc->active = FALSE;
++    } else if (pLfc->frameUs > (maxFrameUs + (marginUs / 2))) {
++        pLfc->active = TRUE;
++    }
++
++    if (!pLfc->active) {
++        pLfc->multiplier = 0;
++        return;
++    }
++
++    pLfc->multiplier = LfcChooseMultiplier(pLfc->frameUs, minUs, maxUs,
++                                           maxFrameUs, pLfc->multiplier);
++
++    if (pLfc->multiplier > 1) {
++        pLfc->repeatsLeft = pLfc->multiplier - 1;
++        LfcScheduleRepeat(pDispEvo, apiHead, nowUs, nowUs);
++    }
++}
++
++static void VrrLfcCancelOneDisp(NVDispEvoPtr pDispEvo)
++{
++    NvU32 apiHead;
++
++    for (apiHead = 0; apiHead < ARRAY_LEN(pDispEvo->vrr.lfc); apiHead++) {
++        nvkms_free_timer(pDispEvo->vrr.lfc[apiHead].repeatTimer);
++        nvkms_memset(&pDispEvo->vrr.lfc[apiHead], 0,
++                     sizeof(pDispEvo->vrr.lfc[apiHead]));
++    }
++}
++
++void nvVrrLfcCancel(NVDevEvoPtr pDevEvo)
++{
++    NVDispEvoPtr pDispEvo;
++    NvU32 dispIndex;
++
++    FOR_ALL_EVO_DISPLAYS(pDispEvo, dispIndex, pDevEvo) {
++        VrrLfcCancelOneDisp(pDispEvo);
++    }
++}
++
+ /*!
+  * Schedule a timer to trigger a VRR unstall if no flip occurs soon.
+  *

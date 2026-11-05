@@ -33,7 +33,7 @@ risk. No backup, no mercy. ;-)
 
 | Driver release | Series | Fork branch |
 |---|---|---|
-| 615.78.08 | [`patches/615.78.08/`](patches/615.78.08/) | [`ogkm/615.78.08`](https://github.com/kakra/open-gpu-kernel-modules/tree/ogkm/615.78.08) |
+| 620.70.06 | [`patches/620.70.06/`](patches/620.70.06/) | [`ogkm/620.70.06`](https://github.com/kakra/open-gpu-kernel-modules/tree/ogkm/620.70.06) |
 
 ## Layout
 
@@ -52,8 +52,8 @@ risk. No backup, no mercy. ;-)
 On a clone of the upstream repository:
 
 ```sh
-git checkout -b ogkm 615.78.08
-git am /path/to/ogkm-experimental/patches/615.78.08/*.patch
+git checkout -b ogkm 620.70.06
+git am /path/to/ogkm-experimental/patches/620.70.06/*.patch
 make modules -j$(nproc)
 ```
 

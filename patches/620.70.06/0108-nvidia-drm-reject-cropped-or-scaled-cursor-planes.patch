@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 13:07:21 +0100
+Subject: [PATCH] nvidia-drm: reject cropped or scaled cursor planes
+
+The cursor can't crop or scale: NVKMS always shows the whole surface at its
+own size. cursor_plane_req_config_update() only used the framebuffer and
+CRTC_X/Y, so a commit with a source rectangle or CRTC size that doesn't match
+the framebuffer passed and showed the wrong image. KWin can put client
+surfaces on the cursor plane when their size on screen matches a size hint,
+even if the buffer is larger. Fail the commit, so that the compositor can fall
+back to composition.
+
+KWin's own cursor, aquamarine, wlroots, mutter and the legacy cursor ioctls all
+use the whole framebuffer at its own size, so they aren't affected.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-crtc.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+index 8ed23e92..81d577fd 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -318,6 +318,20 @@ cursor_plane_req_config_update(struct drm_plane *plane,
+     if (req_config->surface == NULL) {
+         return -EINVAL;
+     }
++
++    /*
++     * The cursor can't crop or scale: NVKMS always shows the whole surface at
++     * its own size. Fail the commit instead of showing the wrong image, so that
++     * the compositor can fall back to composition.
++     */
++    if (plane_state->src_x != 0 || plane_state->src_y != 0 ||
++        plane_state->src_w != (plane_state->fb->width << 16) ||
++        plane_state->src_h != (plane_state->fb->height << 16) ||
++        plane_state->crtc_w != plane_state->fb->width ||
++        plane_state->crtc_h != plane_state->fb->height) {
++        return -EINVAL;
++    }
++
+     req_config->dstX = plane_state->crtc_x;
+     req_config->dstY = plane_state->crtc_y;
+ 

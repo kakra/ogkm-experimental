@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 10:07:27 +0100
+Subject: [PATCH] nvkms: don't wake the NVKMS worker for unneeded non-stall
+ interrupts
+
+NVKMS registers for every GPU non-stall interrupt (NV01_EVENT_NONSTALL_INTR
+on the subdevice). Those come with every semaphore release that asks for
+one, which includes the fences of all GPU clients, and for each one
+NonStallInterruptCallback() allocates a timer that runs
+nvKmsServiceNonStallInterrupt() on the NVKMS kthread with the global
+nvkms_lock held. That function only services deferred request FIFOs
+(NVKMS_IOCTL_REGISTER_DEFERRED_REQUEST_FIFO, used by X11 swap groups) and
+pending headSurface viewport flips. On a Wayland desktop neither exists,
+so all of it is wasted: a GFP_ATOMIC allocation, a kthread wakeup and an
+nvkms_lock acquisition per interrupt, about one per frame of every GL
+client. On an RTX 4080 Laptop that was 10.9k/s with glmark2-wayland, and
+with a video playing on the desktop 418/s, 27 % of the NVKMS kthread's
+1543 nvkms_lock acquisitions per second. NVIDIA's own XXX comment in the
+callback asks for a lighter-weight check.
+
+Count the deferred request FIFOs and headSurface channels of all devices
+in nvEvoGlobal.nonStallWorkCount, changed with nvkms_lock held where they
+are registered/unregistered and installed into/removed from
+pDispEvo->pHsChannel[], and return early from the callback while it is
+zero. The callback can't take nvkms_lock (it runs within RM's locks and
+can't dereference the device's ref_ptr without it), so it reads the
+counter without a lock. That's enough: the count goes up before the
+client gets the FIFO handle and before headSurface renders, so the
+interrupts they cause see it non-zero. Teardown paths that don't decrement
+it only make the callback queue work as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/include/nvkms-types.h          |  8 ++++++++
+ src/nvidia-modeset/src/nvkms-headsurface-config.c |  4 ++++
+ src/nvidia-modeset/src/nvkms-rm.c                 | 12 ++++++++++++
+ src/nvidia-modeset/src/nvkms-surface.c            |  6 ++++++
+ 4 files changed, 30 insertions(+)
+
+diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
+index b9b7a935..0e0c8b0e 100644
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -3029,6 +3029,14 @@ typedef struct {
+ #endif
+ 
+     struct NvKmsPerOpen *nvKmsPerOpen;
++
++    /*
++     * Number of deferred request FIFOs and headSurface channels, on all
++     * devices: the things nvKmsServiceNonStallInterrupt() services. Changed
++     * with the global NVKMS lock held; NonStallInterruptCallback() reads it
++     * without the lock.
++     */
++    NvU32 nonStallWorkCount;
+ } NVEvoGlobal;
+ 
+ extern NVEvoGlobal nvEvoGlobal;
+diff --git a/src/nvidia-modeset/src/nvkms-headsurface-config.c b/src/nvidia-modeset/src/nvkms-headsurface-config.c
+index 87b294f1..c473f351 100644
+--- a/src/nvidia-modeset/src/nvkms-headsurface-config.c
++++ b/src/nvidia-modeset/src/nvkms-headsurface-config.c
+@@ -2354,6 +2354,8 @@ void nvHsConfigStart(
+                 (pHsConfigOneHead->pHsChannel == NULL)) {
+                 nvHsFreeChannel(pDispEvo->pHsChannel[apiHead]);
+                 pDispEvo->pHsChannel[apiHead] = NULL;
++                nvAssert(nvEvoGlobal.nonStallWorkCount > 0);
++                nvEvoGlobal.nonStallWorkCount--;
+                 continue;
+             }
+ 
+@@ -2364,6 +2366,8 @@ void nvHsConfigStart(
+             nvAssert(pDispEvo->pHsChannel[apiHead] == NULL);
+             pDispEvo->pHsChannel[apiHead] = pHsConfigOneHead->pHsChannel;
+             pHsConfigOneHead->pHsChannel = NULL;
++            /* See NonStallInterruptCallback(). */
++            nvEvoGlobal.nonStallWorkCount++;
+         }
+     }
+ 
+diff --git a/src/nvidia-modeset/src/nvkms-rm.c b/src/nvidia-modeset/src/nvkms-rm.c
+index 38097a4c..3f7eb43e 100644
+--- a/src/nvidia-modeset/src/nvkms-rm.c
++++ b/src/nvidia-modeset/src/nvkms-rm.c
+@@ -4307,7 +4307,19 @@ static void NonStallInterruptCallback(
+      * XXX It might be nice to use a lighter-weight lock here to check if any
+      * requests are pending in any NvKmsDeferredRequestFifo before scheduling
+      * nvKmsServiceNonStallInterrupt().
++     *
++     * Non-stall interrupts come with every semaphore release that requests
++     * one, e.g. for each fence of every GPU client, so this would wake the
++     * NVKMS worker and take the nvkms_lock for each of them (thousands per
++     * second under load). nvKmsServiceNonStallInterrupt() only services
++     * deferred request FIFOs and headSurface channels; skip it while none
++     * exist. The count is read without the lock: it changes with the lock
++     * held, before the client can use a new FIFO or headSurface renders, so
++     * any interrupt they cause sees it non-zero.
+      */
++    if (*(volatile const NvU32 *)&nvEvoGlobal.nonStallWorkCount == 0) {
++        return;
++    }
+ 
+     (void) nvkms_alloc_timer_with_ref_ptr(
+         nvKmsServiceNonStallInterrupt, /* callback */
+diff --git a/src/nvidia-modeset/src/nvkms-surface.c b/src/nvidia-modeset/src/nvkms-surface.c
+index 18154cdb..8867a225 100644
+--- a/src/nvidia-modeset/src/nvkms-surface.c
++++ b/src/nvidia-modeset/src/nvkms-surface.c
+@@ -1663,6 +1663,9 @@ NVDeferredRequestFifoRec *nvEvoRegisterDeferredRequestFifo(
+ 
+     nvEvoIncrementSurfaceRefCnts(pSurfaceEvo);
+ 
++    /* Non-stall interrupts need servicing now; see NonStallInterruptCallback(). */
++    nvEvoGlobal.nonStallWorkCount++;
++
+     return pDeferredRequestFifo;
+ }
+ 
+@@ -1676,6 +1679,9 @@ void nvEvoUnregisterDeferredRequestFifo(
+     nvAssert(pDeferredRequestFifo->fifo != NULL);
+     nvAssert(pDeferredRequestFifo->pSurfaceEvo != NULL);
+ 
++    nvAssert(nvEvoGlobal.nonStallWorkCount > 0);
++    nvEvoGlobal.nonStallWorkCount--;
++
+     nvHsLeaveSwapGroup(pDevEvo, pDeferredRequestFifo, FALSE /* teardown */);
+ 
+     nvRmApiUnmapMemory(

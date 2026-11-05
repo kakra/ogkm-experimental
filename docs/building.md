@@ -12,14 +12,14 @@ user-space driver of exactly that release.
 ```sh
 git clone https://github.com/NVIDIA/open-gpu-kernel-modules.git
 cd open-gpu-kernel-modules
-git checkout -b ogkm 615.78.08
-git am /path/to/ogkm-experimental/patches/615.78.08/*.patch
+git checkout -b ogkm 620.70.06
+git am /path/to/ogkm-experimental/patches/620.70.06/*.patch
 make modules -j$(nproc)
 sudo make modules_install -j$(nproc)
 ```
 
 Install the user-space driver of the same release without its kernel modules,
-e.g. `sh NVIDIA-Linux-x86_64-615.78.08.run --no-kernel-modules`, or let the
+e.g. `sh NVIDIA-Linux-x86_64-620.70.06.run --no-kernel-modules`, or let the
 distribution package provide it.
 
 To check that a series applies and builds without touching the system:

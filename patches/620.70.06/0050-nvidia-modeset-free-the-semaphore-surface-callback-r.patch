@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: JD Daniels <jd@greenlightdata.ca>
+Date: Mon, 26 Oct 2026 23:26:32 +0100
+Subject: [PATCH] nvidia-modeset: free the semaphore surface callback record
+ when the waiter is already signalled
+
+nvKmsKapiRegisterSemaphoreSurfaceCallback() allocates the callback
+record before asking RM to register a waiter. When RM returns
+NVOS_STATUS_ERROR_ALREADY_SIGNALLED it has not stored the record, and
+the function neither frees it nor hands it back to the caller, so it
+leaks.
+
+nvidia-drm takes this path for every semaphore surface fence whose GPU
+work completes before the waiter is registered, i.e. most composited
+frames on a compositor that waits its render fence before each commit.
+It shows up as unreclaimable kmalloc-64 slab growing at frame rate
+(upstream PR 1368).
+
+Free the record on that return. nvKmsKapiFree(NULL) is fine when no
+callback was requested.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/kapi/src/nvkms-kapi-sync.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi-sync.c b/src/nvidia-modeset/kapi/src/nvkms-kapi-sync.c
+index 1b243d64..0d81a958 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi-sync.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi-sync.c
+@@ -445,6 +445,11 @@ nvKmsKapiRegisterSemaphoreSurfaceCallback(
+         }
+         return NVKMS_KAPI_REG_WAITER_SUCCESS;
+     case NVOS_STATUS_ERROR_ALREADY_SIGNALLED:
++        /*
++         * No waiter was registered, so neither the callback nor
++         * unregisterSemaphoreSurfaceCallback() will ever free cb.
++         */
++        nvKmsKapiFree(cb);
+         return NVKMS_KAPI_REG_WAITER_ALREADY_SIGNALLED;
+     default:
+         break;

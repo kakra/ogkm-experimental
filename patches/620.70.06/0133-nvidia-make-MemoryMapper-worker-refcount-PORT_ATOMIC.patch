@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VeilSilence <BoneFeaR@proton.me>
+Date: Sat, 31 Oct 2026 19:47:06 +0300
+Subject: [PATCH] nvidia: make MemoryMapper worker refcount PORT_ATOMIC
+
+MemoryMapperWorkerParams::numRefs is incremented and decremented with
+portAtomicIncrementU32()/portAtomicDecrementU32(), but the field is a
+plain NvU32.
+
+With the C11 atomics backend (NVPORT_HAS_C11_ATOMICS=1, which GCC and
+clang use for kernel C builds), those macros expand to
+atomic_fetch_add_explicit()/atomic_fetch_sub_explicit() and require a
+pointer to an _Atomic type.  clang rejects the build:
+
+  src/kernel/gpu/mem_mgr/mem_mapper.c:197:9: error: address argument to
+  atomic operation must be a pointer to _Atomic type ('NvU32 *' invalid)
+  src/kernel/gpu/mem_mgr/mem_mapper.c:374:5: ...
+  src/kernel/gpu/mem_mgr/mem_mapper.c:596:5: ...
+
+Use PORT_ATOMIC, the nvport portability annotation already used by other
+generated headers (for example g_gpu_mgr_nvoc.h), so the C11 backend gets
+_Atomic and the builtins backends get volatile.
+
+Build-tested with clang 23 against Linux 7.3; the changed construct also
+compiles with GCC 16.2.0 under -std=gnu11.
+
+Fixes: 5167bd2e387c ("nvidia: fix MemoryMapper worker refcount race and waiter callback UAF")
+---
+ src/nvidia/generated/g_mem_mapper_nvoc.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/nvidia/generated/g_mem_mapper_nvoc.h b/src/nvidia/generated/g_mem_mapper_nvoc.h
+index eb013c24..0dfaad77 100644
+--- a/src/nvidia/generated/g_mem_mapper_nvoc.h
++++ b/src/nvidia/generated/g_mem_mapper_nvoc.h
+@@ -103,7 +103,7 @@ typedef struct MemoryMapper MemoryMapper;
+ typedef struct
+ {
+     struct MemoryMapper *pMemoryMapper;
+-    NvU32         numRefs;
++    PORT_ATOMIC NvU32 numRefs;
+     PORT_RWLOCK  *pLock;
+     struct OBJGPU *pGpu;
+     NVOS10_EVENT_KERNEL_CALLBACK_EX semaphoreCallback;

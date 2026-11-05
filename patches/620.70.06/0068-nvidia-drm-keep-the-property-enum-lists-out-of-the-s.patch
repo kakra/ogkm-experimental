@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Wed, 28 Oct 2026 18:24:28 +0100
+Subject: [PATCH] nvidia-drm: keep the property enum lists out of the stack
+ frame
+
+nv_drm_create_properties() builds its enum lists for
+drm_property_create_enum() as automatic arrays, so they are copied to
+the stack on every call. The function is inlined into
+nv_drm_dev_load(), and with the Broadcast RGB list added that frame
+grows to 1072 bytes, past the 1024 byte -Wframe-larger-than limit.
+
+drm_property_create_enum() only reads the lists while creating the
+property, so make them static const, including the color format and
+output bpc lists that 620.70.06 added.
+
+[Tom Englund: also make the underscan enum list static.]
+
+Fixes: f7b3142a5b70 ("nvidia-drm: add the Broadcast RGB connector property")
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-drv.c | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index da7ab0cf..ede48a33 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -476,7 +476,7 @@ static void nv_drm_enumerate_encoders_and_connectors
+  */
+ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+ {
+-    const struct drm_prop_enum_list colorspace_enum_list[] = {
++    static const struct drm_prop_enum_list colorspace_enum_list[] = {
+         { .type = NV_DRM_INPUT_COLOR_SPACE_NONE,
+           .name = "None" },
+         { .type = NV_DRM_INPUT_COLOR_SPACE_SCRGB_LINEAR,
+@@ -485,7 +485,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "BT.2100 PQ" },
+     };
+ 
+-    const struct drm_prop_enum_list tf_enum_list[] = {
++    static const struct drm_prop_enum_list tf_enum_list[] = {
+         { .type = NV_DRM_TRANSFER_FUNCTION_LINEAR,
+           .name = "Linear" },
+         { .type = NV_DRM_TRANSFER_FUNCTION_PQ,
+@@ -494,7 +494,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "Default" },
+     };
+ 
+-    const struct drm_prop_enum_list dithering_mode_enum_list[] = {
++    static const struct drm_prop_enum_list dithering_mode_enum_list[] = {
+         { .type = NV_DRM_DITHERING_MODE_AUTO,
+           .name = "auto" },
+         { .type = NV_DRM_DITHERING_MODE_OFF,
+@@ -509,7 +509,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "on" },
+     };
+ 
+-    const struct drm_prop_enum_list broadcast_rgb_enum_list[] = {
++    static const struct drm_prop_enum_list broadcast_rgb_enum_list[] = {
+         { .type = NV_DRM_BROADCAST_RGB_AUTO,
+           .name = "Automatic" },
+         { .type = NV_DRM_BROADCAST_RGB_FULL,
+@@ -518,7 +518,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "Limited 16:235" },
+     };
+ 
+-    const struct drm_prop_enum_list underscan_enum_list[] = {
++    static const struct drm_prop_enum_list underscan_enum_list[] = {
+         { .type = NV_DRM_UNDERSCAN_OFF,
+           .name = "off" },
+         { .type = NV_DRM_UNDERSCAN_ON,
+@@ -527,7 +527,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "auto" },
+     };
+ 
+-    const struct drm_prop_enum_list hdcp_level_enum_list[] = {
++    static const struct drm_prop_enum_list hdcp_level_enum_list[] = {
+         { .type = NVKMS_CONTENT_PROTECTION_OFF,
+           .name = "HDCP_OFF" },
+         { .type = NVKMS_CONTENT_PROTECTION_HDCP1X_ON,
+@@ -540,7 +540,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "HDCP_FAILED" },
+     };
+ 
+-    const struct drm_prop_enum_list color_format_enum_list[] = {
++    static const struct drm_prop_enum_list color_format_enum_list[] = {
+         { .type = NV_DRM_CONNECTOR_COLOR_FORMAT_AUTO,
+           .name = "auto" },
+         { .type = NV_DRM_CONNECTOR_COLOR_FORMAT_RGB,
+@@ -551,7 +551,7 @@ static int nv_drm_create_properties(struct nv_drm_device *nv_dev)
+           .name = "YCbCr444" },
+     };
+ 
+-    const struct drm_prop_enum_list output_bpc_enum_list[] = {
++    static const struct drm_prop_enum_list output_bpc_enum_list[] = {
+         { .type = NV_DRM_CONNECTOR_OUTPUT_BPC_AUTO,
+           .name = "auto" },
+         { .type = NV_DRM_CONNECTOR_OUTPUT_BPC_6,

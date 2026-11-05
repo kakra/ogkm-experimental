@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 10:08:09 +0100
+Subject: [PATCH] nvidia: take the API lock for read for DMA map and unmap
+
+NV04_MAP_MEMORY_DMA and NV04_UNMAP_MEMORY_DMA take the RM API lock for
+write, so every GPU virtual mapping change of any client stops all other
+clients' RM calls, including controls that only need the lock for read. A
+video player in Firefox maps and unmaps ~60 buffers per second this way.
+
+These calls only work on objects of the calling client, which resserv
+already locks for write, and do the page table and VA space work under the
+GPU group lock from serverResLock_Prologue. Before that lock they only look
+objects up and reserve page table memory from the VA space's pool, which is
+protected by its own mutex. With the API lock taken for read, allocs, frees,
+dups and the other write-locked APIs are still excluded; only read-locked
+calls of other clients can now run alongside, and those that skip the GPU
+lock in the memory/DMA area are static capability queries or work on their
+own client's objects.
+
+This is what the RmRoApiLock INTER_MAP/INTER_UNMAP registry bits do,
+without needing the registry key. The lock access is looked up once per
+call and reused for the release, and nested unmaps from a free that
+already holds the API lock do not take or release it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/src/kernel/rmapi/mapping.c | 27 +++++++++++++++++++++++++--
+ 1 file changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/src/nvidia/src/kernel/rmapi/mapping.c b/src/nvidia/src/kernel/rmapi/mapping.c
+index 47d059ca..08d4f5bc 100644
+--- a/src/nvidia/src/kernel/rmapi/mapping.c
++++ b/src/nvidia/src/kernel/rmapi/mapping.c
+@@ -527,6 +527,27 @@ rmapiUnmapWithSecInfoTls
+     return status;
+ }
+ 
++//
++// DMA map/unmap (NV04_MAP_MEMORY_DMA / NV04_UNMAP_MEMORY_DMA) only work on
++// objects of the calling client, which resserv locks for write, and do the
++// page table and VA space work under the GPU group lock taken by
++// serverResLock_Prologue. Before that lock they only look objects up and
++// reserve page table memory from the VA space's pool, which has its own
++// mutex. The API lock in write mode additionally serialized them against
++// every other client's RM calls; with it taken for read only allocs, frees
++// and the other write-locked APIs are still excluded. This is what the
++// RmRoApiLock INTER_MAP/INTER_UNMAP bits do, without the registry key.
++//
++static NvBool
++_rmapiDmaMapUseReadOnlyLock(RS_LOCK_ENUM lock)
++{
++#if defined(NV_UNIX)
++    return (lock == RS_LOCK_TOP);
++#else
++    return NV_FALSE;
++#endif
++}
++
+ NV_STATUS
+ serverInterMapLookupLockFlags
+ (
+@@ -538,7 +559,8 @@ serverInterMapLookupLockFlags
+ {
+     NV_ASSERT_OR_RETURN(pAccess != NULL, NV_ERR_INVALID_ARGUMENT);
+ 
+-    *pAccess = (serverSupportsReadOnlyLock(pServer, lock, RS_API_INTER_MAP))
++    *pAccess = (serverSupportsReadOnlyLock(pServer, lock, RS_API_INTER_MAP) ||
++                _rmapiDmaMapUseReadOnlyLock(lock))
+         ? LOCK_ACCESS_READ
+         : LOCK_ACCESS_WRITE;
+     return NV_OK;
+@@ -555,7 +577,8 @@ serverInterUnmapLookupLockFlags
+ {
+     NV_ASSERT_OR_RETURN(pAccess != NULL, NV_ERR_INVALID_ARGUMENT);
+ 
+-    *pAccess = (serverSupportsReadOnlyLock(pServer, lock, RS_API_INTER_UNMAP))
++    *pAccess = (serverSupportsReadOnlyLock(pServer, lock, RS_API_INTER_UNMAP) ||
++                _rmapiDmaMapUseReadOnlyLock(lock))
+         ? LOCK_ACCESS_READ
+         : LOCK_ACCESS_WRITE;
+     return NV_OK;

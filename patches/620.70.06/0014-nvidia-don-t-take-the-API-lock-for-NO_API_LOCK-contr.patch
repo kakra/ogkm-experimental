@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sun, 18 Oct 2026 19:55:03 +0200
+Subject: [PATCH] nvidia: don't take the API lock for NO_API_LOCK controls' GPU
+ reference
+
+With dynamic power management enabled (NVreg_DynamicPowerManagement),
+rmapiPrologue() and rmapiEpilogue() acquire the RM API lock in READ mode
+around every external control to reference/unreference the GPUs, even when
+the control itself is flagged RMCTRL_FLAGS_NO_API_LOCK. The only such
+control, NV_SEMAPHORE_SURFACE_CTRL_CMD_REGISTER_WAITER, is what nvidia-drm
+calls (through KAPI) for every semaphore surface fence wait, e.g. from the
+compositor's main thread for every explicit-sync client buffer. It thereby
+waits for every API lock writer: measured 15-25 ms per GL client exit
+(KWin's main thread blocked in DRM ioctl 0x55 while glmark2 freed its device
+under the API lock), twice per exit.
+
+REGISTER_WAITER only works on semaphore surfaces, which are restricted to
+sysmem, and CPU-side waiter lists and notifications, so it doesn't need the
+GPU awake. Skip the GPU access reference (and with it the API lock) for
+controls flagged NO_API_LOCK.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/src/kernel/rmapi/control.c | 23 +++++++++++++++++++----
+ 1 file changed, 19 insertions(+), 4 deletions(-)
+
+diff --git a/src/nvidia/src/kernel/rmapi/control.c b/src/nvidia/src/kernel/rmapi/control.c
+index c2222a74..3ac50815 100644
+--- a/src/nvidia/src/kernel/rmapi/control.c
++++ b/src/nvidia/src/kernel/rmapi/control.c
+@@ -595,10 +595,24 @@ _rmapiRmControl(NvHandle hClient, NvHandle hObject, NvU32 cmd, NvP64 pUserParams
+             }
+         }
+ 
++        //
++        // With dynamic power management, rmapiPrologue() and rmapiEpilogue()
++        // take the API lock (READ) to reference/unreference the GPUs, so even
++        // a NO_API_LOCK control waits for every API lock writer (e.g. another
++        // process freeing a device, tens of ms). The only NO_API_LOCK control,
++        // the semaphore surface REGISTER_WAITER, works on sysmem semaphores and
++        // CPU-side waiter lists and doesn't need the GPU awake: skip the
++        // reference for it.
++        //
++        const NvBool bSkipGpuAccessRef = (getCtrlInfoStatus == NV_OK) &&
++                                         ((ctrlFlags & RMCTRL_FLAGS_NO_API_LOCK) != 0);
+         RM_API_CONTEXT rmApiContext = {0};
+-        rmStatus = rmapiPrologue(pRmApi, &rmApiContext);
+-        if (rmStatus != NV_OK)
+-            goto epilogue;
++        if (!bSkipGpuAccessRef)
++        {
++            rmStatus = rmapiPrologue(pRmApi, &rmApiContext);
++            if (rmStatus != NV_OK)
++                goto epilogue;
++        }
+ 
+         //
+         // If this is an internal request within the same RM instance, make
+@@ -634,7 +648,8 @@ _rmapiRmControl(NvHandle hClient, NvHandle hObject, NvU32 cmd, NvP64 pUserParams
+         rmStatus = serverControl(&g_resServ, &rmCtrlParams);
+ 
+ epilogue:
+-        rmapiEpilogue(pRmApi, &rmApiContext);
++        if (!bSkipGpuAccessRef)
++            rmapiEpilogue(pRmApi, &rmApiContext);
+     }
+ done:
+ 

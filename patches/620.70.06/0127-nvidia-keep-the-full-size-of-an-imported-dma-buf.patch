@@ -1,0 +1,202 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sun, 1 Nov 2026 03:18:37 +0100
+Subject: [PATCH] nvidia: keep the full size of an imported dma-buf
+
+nv_dma_import_dma_buf() returned dma_buf->size through an NvU32, and the
+RM memdesc helpers and the KAPI getSystemMemoryHandleFrom{DmaBuf,Sgt}()
+limit argument were 32 bits too. A dma-buf of 4 GiB or more got a memdesc
+for the size modulo 4 GiB: the GPU saw only part of the buffer, and
+nv_load_dma_map_scatterlist() wrote DMA addresses for the whole sg table
+past the end of the shorter IOVA array. Reached by dma-buf fd imports from
+userspace and by every PRIME import into nvidia-drm.
+
+Carry the size as 64 bits all the way.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nv.h                    |  4 ++--
+ kernel-open/common/inc/nvkms-kapi.h            |  4 ++--
+ kernel-open/nvidia/nv-dmabuf.c                 |  4 ++--
+ src/nvidia-modeset/kapi/interface/nvkms-kapi.h |  4 ++--
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c       |  6 +++---
+ src/nvidia/arch/nvalloc/unix/include/nv.h      |  4 ++--
+ src/nvidia/arch/nvalloc/unix/src/osmemdesc.c   | 10 +++++-----
+ 7 files changed, 18 insertions(+), 18 deletions(-)
+
+diff --git a/kernel-open/common/inc/nv.h b/kernel-open/common/inc/nv.h
+index 4e63c612..3777c988 100644
+--- a/kernel-open/common/inc/nv.h
++++ b/kernel-open/common/inc/nv.h
+@@ -1085,8 +1085,8 @@ struct drm_gem_object;
+ 
+ NV_STATUS NV_API_CALL nv_dma_import_sgt  (nv_dma_device_t *, struct sg_table *, struct drm_gem_object *);
+ void NV_API_CALL nv_dma_release_sgt(struct sg_table *, struct drm_gem_object *);
+-NV_STATUS NV_API_CALL nv_dma_import_dma_buf      (nv_dma_device_t *, struct dma_buf *, NvBool, NvU32 *, struct sg_table **, nv_dma_buf_t **);
+-NV_STATUS NV_API_CALL nv_dma_import_from_fd      (nv_dma_device_t *, NvS32, NvBool, NvU32 *, struct sg_table **, nv_dma_buf_t **);
++NV_STATUS NV_API_CALL nv_dma_import_dma_buf      (nv_dma_device_t *, struct dma_buf *, NvBool, NvU64 *, struct sg_table **, nv_dma_buf_t **);
++NV_STATUS NV_API_CALL nv_dma_import_from_fd      (nv_dma_device_t *, NvS32, NvBool, NvU64 *, struct sg_table **, nv_dma_buf_t **);
+ void      NV_API_CALL nv_dma_release_dma_buf     (nv_dma_buf_t *);
+ 
+ void      NV_API_CALL nv_schedule_uvm_isr        (nv_state_t *);
+diff --git a/kernel-open/common/inc/nvkms-kapi.h b/kernel-open/common/inc/nvkms-kapi.h
+index def32947..ff191234 100644
+--- a/kernel-open/common/inc/nvkms-kapi.h
++++ b/kernel-open/common/inc/nvkms-kapi.h
+@@ -1406,7 +1406,7 @@ struct NvKmsKapiFunctionsTable {
+     (*getSystemMemoryHandleFromSgt)(struct NvKmsKapiDevice *device,
+                                     NvP64 sgt,
+                                     NvP64 gem,
+-                                    NvU32 limit);
++                                    NvU64 limit);
+ 
+     /*
+      * Import dma-buf in the memory handle.
+@@ -1422,7 +1422,7 @@ struct NvKmsKapiFunctionsTable {
+     struct NvKmsKapiMemory*
+     (*getSystemMemoryHandleFromDmaBuf)(struct NvKmsKapiDevice *device,
+                                        NvP64 dmaBuf,
+-                                       NvU32 limit);
++                                       NvU64 limit);
+ 
+     /*!
+      * Import a semaphore surface allocated elsewhere to NVKMS and return a
+diff --git a/kernel-open/nvidia/nv-dmabuf.c b/kernel-open/nvidia/nv-dmabuf.c
+index dabcfb20..c2967668 100644
+--- a/kernel-open/nvidia/nv-dmabuf.c
++++ b/kernel-open/nvidia/nv-dmabuf.c
+@@ -1915,7 +1915,7 @@ NV_STATUS NV_API_CALL nv_dma_import_dma_buf
+     nv_dma_device_t *dma_dev,
+     struct dma_buf *dma_buf,
+     NvBool is_ro_device_map,
+-    NvU32 *size,
++    NvU64 *size,
+     struct sg_table **sgt,
+     nv_dma_buf_t **import_priv
+ )
+@@ -2002,7 +2002,7 @@ NV_STATUS NV_API_CALL nv_dma_import_from_fd
+     nv_dma_device_t *dma_dev,
+     NvS32 fd,
+     NvBool is_ro_device_map,
+-    NvU32 *size,
++    NvU64 *size,
+     struct sg_table **sgt,
+     nv_dma_buf_t **import_priv
+ )
+diff --git a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+index def32947..ff191234 100644
+--- a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
++++ b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+@@ -1406,7 +1406,7 @@ struct NvKmsKapiFunctionsTable {
+     (*getSystemMemoryHandleFromSgt)(struct NvKmsKapiDevice *device,
+                                     NvP64 sgt,
+                                     NvP64 gem,
+-                                    NvU32 limit);
++                                    NvU64 limit);
+ 
+     /*
+      * Import dma-buf in the memory handle.
+@@ -1422,7 +1422,7 @@ struct NvKmsKapiFunctionsTable {
+     struct NvKmsKapiMemory*
+     (*getSystemMemoryHandleFromDmaBuf)(struct NvKmsKapiDevice *device,
+                                        NvP64 dmaBuf,
+-                                       NvU32 limit);
++                                       NvU64 limit);
+ 
+     /*!
+      * Import a semaphore surface allocated elsewhere to NVKMS and return a
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index 22832064..6e11ee84 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -2050,7 +2050,7 @@ static struct NvKmsKapiMemory*
+ GetSystemMemoryHandleFromDmaBufSgtHelper(struct NvKmsKapiDevice *device,
+                                          NvU32 descriptorType,
+                                          NvP64 descriptor,
+-                                         NvU32 limit)
++                                         NvU64 limit)
+ {
+     NvU32 ret;
+     NV_OS_DESC_MEMORY_ALLOCATION_PARAMS memAllocParams = {0};
+@@ -2112,7 +2112,7 @@ static struct NvKmsKapiMemory*
+ GetSystemMemoryHandleFromSgt(struct NvKmsKapiDevice *device,
+                              NvP64 sgt,
+                              NvP64 gem,
+-                             NvU32 limit)
++                             NvU64 limit)
+ {
+     NVOS32_DESCRIPTOR_TYPE_OS_SGT_PTR_PARAMETERS params = {
+         .sgt = sgt,
+@@ -2126,7 +2126,7 @@ GetSystemMemoryHandleFromSgt(struct NvKmsKapiDevice *device,
+ static struct NvKmsKapiMemory*
+ GetSystemMemoryHandleFromDmaBuf(struct NvKmsKapiDevice *device,
+                                 NvP64 dmaBuf,
+-                                NvU32 limit)
++                                NvU64 limit)
+ {
+     return GetSystemMemoryHandleFromDmaBufSgtHelper(
+         device, NVOS32_DESCRIPTOR_TYPE_OS_DMA_BUF_PTR, dmaBuf, limit);
+diff --git a/src/nvidia/arch/nvalloc/unix/include/nv.h b/src/nvidia/arch/nvalloc/unix/include/nv.h
+index 4c30191d..f014964f 100644
+--- a/src/nvidia/arch/nvalloc/unix/include/nv.h
++++ b/src/nvidia/arch/nvalloc/unix/include/nv.h
+@@ -1083,8 +1083,8 @@ struct drm_gem_object;
+ 
+ NV_STATUS NV_API_CALL nv_dma_import_sgt  (nv_dma_device_t *, struct sg_table *, struct drm_gem_object *);
+ void NV_API_CALL nv_dma_release_sgt(struct sg_table *, struct drm_gem_object *);
+-NV_STATUS NV_API_CALL nv_dma_import_dma_buf      (nv_dma_device_t *, struct dma_buf *, NvBool, NvU32 *, struct sg_table **, nv_dma_buf_t **);
+-NV_STATUS NV_API_CALL nv_dma_import_from_fd      (nv_dma_device_t *, NvS32, NvBool, NvU32 *, struct sg_table **, nv_dma_buf_t **);
++NV_STATUS NV_API_CALL nv_dma_import_dma_buf      (nv_dma_device_t *, struct dma_buf *, NvBool, NvU64 *, struct sg_table **, nv_dma_buf_t **);
++NV_STATUS NV_API_CALL nv_dma_import_from_fd      (nv_dma_device_t *, NvS32, NvBool, NvU64 *, struct sg_table **, nv_dma_buf_t **);
+ void      NV_API_CALL nv_dma_release_dma_buf     (nv_dma_buf_t *);
+ 
+ void      NV_API_CALL nv_schedule_uvm_isr        (nv_state_t *);
+diff --git a/src/nvidia/arch/nvalloc/unix/src/osmemdesc.c b/src/nvidia/arch/nvalloc/unix/src/osmemdesc.c
+index 43524f05..a52fef0f 100644
+--- a/src/nvidia/arch/nvalloc/unix/src/osmemdesc.c
++++ b/src/nvidia/arch/nvalloc/unix/src/osmemdesc.c
+@@ -769,7 +769,7 @@ _createMemdescFromDmaBufSgtHelper
+     NvU32    flags,
+     void *pImportPriv,
+     struct sg_table *pImportSgt,
+-    NvU32 size,
++    NvU64 size,
+     MEMORY_DESCRIPTOR **ppMemDesc,
+     void **ppPrivate,
+     MEM_DATA_RELEASE_CALL_BACK *pMemDataReleaseCallback
+@@ -954,7 +954,7 @@ _createMemdescFromDmaBuf
+     NvU32    flags,
+     nv_dma_buf_t *pImportPriv,
+     struct sg_table *pImportSgt,
+-    NvU32 size,
++    NvU64 size,
+     MEMORY_DESCRIPTOR **ppMemDesc,
+     void **ppPrivate
+ )
+@@ -978,7 +978,7 @@ _createMemdescFromSgt
+     NvU32    flags,
+     struct drm_gem_object *pImportPrivGem,
+     struct sg_table *pImportSgt,
+-    NvU32 size,
++    NvU64 size,
+     MEMORY_DESCRIPTOR **ppMemDesc,
+     void **ppPrivate
+ )
+@@ -1028,7 +1028,7 @@ osCreateOsDescriptorFromFileHandle
+     NV_STATUS rmStatus = NV_OK;
+     nv_state_t *nv = NV_GET_NV_STATE(pGpu);
+     nv_dma_device_t *dma_dev = NULL;
+-    NvU32 size = 0;
++    NvU64 size = 0;
+     nv_dma_buf_t *pImportPriv = NULL;
+     struct sg_table *pImportSgt = NULL;
+     NvBool bRoDeviceMap = NV_FALSE;
+@@ -1116,7 +1116,7 @@ osCreateOsDescriptorFromDmaBufPtr
+     NV_STATUS rmStatus = NV_OK;
+     nv_state_t *nv = NV_GET_NV_STATE(pGpu);
+     nv_dma_device_t *dma_dev = NULL;
+-    NvU32 size = 0;
++    NvU64 size = 0;
+     nv_dma_buf_t *pImportPriv = NULL;
+     struct sg_table *pImportSgt = NULL;
+     void *dmaBuf = (void*)((NvUPtr)pDescriptor);

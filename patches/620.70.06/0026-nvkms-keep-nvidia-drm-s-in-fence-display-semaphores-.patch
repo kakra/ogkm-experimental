@@ -1,0 +1,137 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 10:05:35 +0100
+Subject: [PATCH] nvkms: keep nvidia-drm's in-fence display semaphores in
+ system memory
+
+For every plane with an in-fence, nv_drm_atomic_commit() picks a display
+semaphore with nvKms->tryInitDisplaySemaphore(), which reads the
+semaphore's current value from the CPU to check that the display engine
+has released it. On dGPUs the KAPI semaphore pool is allocated in video
+memory, so that check is an uncached read through BAR1.
+
+On an RTX 4080 Laptop (AD104) playing an NVDEC video stream in Firefox
+under KWin (240 Hz eDP), that single read cost 125-150 us on every fenced
+commit: LBR branch stacks show exactly one try per commit (no scan over
+busy slots), and function_graph shows commits with an in-fence at p50
+169 us against 36 us for commits without one. That is about 3 % of a
+240 Hz frame, spent on the compositor's commit thread.
+
+Allocate the pool in system memory instead, the way the KAPI notifier
+surface already is. The allocation uses the display NISO coherency mode
+(write-back if display NISO access is coherent, otherwise write-combined),
+so the display engine sees the CPU's READY writes and the CPU sees the
+engine's DONE releases, as it does for notifiers. SOC display keeps using
+system memory as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../kapi/include/nvkms-kapi-notifiers.h       |  2 +-
+ .../kapi/src/nvkms-kapi-notifiers.c           | 33 ++++++-------------
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      | 10 ++++--
+ 3 files changed, 19 insertions(+), 26 deletions(-)
+
+diff --git a/src/nvidia-modeset/kapi/include/nvkms-kapi-notifiers.h b/src/nvidia-modeset/kapi/include/nvkms-kapi-notifiers.h
+index fa8ab09b..348b4a4f 100644
+--- a/src/nvidia-modeset/kapi/include/nvkms-kapi-notifiers.h
++++ b/src/nvidia-modeset/kapi/include/nvkms-kapi-notifiers.h
+@@ -72,7 +72,7 @@ static inline NvU32 NVKMS_KAPI_NOTIFIER_OFFSET(NvU32 head,
+ }
+ 
+ NvBool nvKmsKapiAllocateNotifiers(struct NvKmsKapiDevice *device);
+-NvBool nvKmsKapiAllocateSemaphores(struct NvKmsKapiDevice *device, NvBool inVideoMemory);
++NvBool nvKmsKapiAllocateSemaphores(struct NvKmsKapiDevice *device);
+ 
+ void nvKmsKapiFreeNisoSurface(struct NvKmsKapiDevice *device,
+                               struct NvKmsKapiNisoSurface *surf);
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c b/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c
+index 9f7d4301..c8eb5767 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c
+@@ -103,8 +103,7 @@ static void InitNotifier(struct NvKmsKapiDevice *device,
+ 
+ static NvBool AllocateNisoSurface(struct NvKmsKapiDevice *device,
+                                   struct NvKmsKapiNisoSurface *surface,
+-                                  NvU64 size,
+-                                  NvBool inVideoMemory)
++                                  NvU64 size)
+ {
+     struct NvKmsRegisterSurfaceParams surfParams = {};
+     NV_STATUS status = 0;
+@@ -121,21 +120,12 @@ static NvBool AllocateNisoSurface(struct NvKmsKapiDevice *device,
+         return NV_FALSE;
+     }
+ 
+-    if (inVideoMemory) {
+-        ret = nvKmsKapiAllocateVideoMemory(device,
+-                                           surface->hRmHandle,
+-                                           NvKmsSurfaceMemoryLayoutPitch,
+-                                           size,
+-                                           NVKMS_KAPI_ALLOCATION_TYPE_NOTIFIER,
+-                                           &compressible);
+-    } else {
+-        ret = nvKmsKapiAllocateSystemMemory(device,
+-                                            surface->hRmHandle,
+-                                            NvKmsSurfaceMemoryLayoutPitch,
+-                                            size,
+-                                            NVKMS_KAPI_ALLOCATION_TYPE_NOTIFIER,
+-                                            &compressible);
+-    }
++    ret = nvKmsKapiAllocateSystemMemory(device,
++                                        surface->hRmHandle,
++                                        NvKmsSurfaceMemoryLayoutPitch,
++                                        size,
++                                        NVKMS_KAPI_ALLOCATION_TYPE_NOTIFIER,
++                                        &compressible);
+ 
+     if (!ret) {
+         nvFreeUnixRmHandle(&device->handleAllocator, surface->hRmHandle);
+@@ -208,8 +198,7 @@ NvBool nvKmsKapiAllocateNotifiers(struct NvKmsKapiDevice *device)
+ 
+     if (!AllocateNisoSurface(device,
+                              &device->notifier,
+-                             NVKMS_KAPI_NOTIFIERS_SURFACE_SIZE,
+-                             NV_FALSE /* inVideoMemory */)) {
++                             NVKMS_KAPI_NOTIFIERS_SURFACE_SIZE)) {
+         return NV_FALSE;
+     }
+ 
+@@ -246,15 +235,13 @@ static void ResetSemaphore(struct NvKmsKapiDevice *device,
+ 
+ #define NVKMS_KAPI_SEMAPHORE_SURFACE_SIZE 0x1000
+ 
+-NvBool nvKmsKapiAllocateSemaphores(struct NvKmsKapiDevice *device,
+-                                   NvBool inVideoMemory)
++NvBool nvKmsKapiAllocateSemaphores(struct NvKmsKapiDevice *device)
+ {
+     NvU32 index;
+ 
+     if (!AllocateNisoSurface(device,
+                              &device->semaphore,
+-                             NVKMS_KAPI_SEMAPHORE_SURFACE_SIZE,
+-                             inVideoMemory)) {
++                             NVKMS_KAPI_SEMAPHORE_SURFACE_SIZE)) {
+         return NV_FALSE;
+     }
+ 
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index e3d92b53..ba1a1923 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -663,8 +663,14 @@ static NvBool KmsAllocateDevice(struct NvKmsKapiDevice *device)
+         goto done;
+     }
+ 
+-    /* Allocate semaphore memory in video memory whenever available */
+-    if (!nvKmsKapiAllocateSemaphores(device, !device->isSOC)) {
++    /*
++     * Allocate semaphore memory in system memory: nvidia-drm reads a
++     * semaphore from the CPU on every commit with a plane in-fence, and an
++     * uncached read of video memory through BAR1 took ~130 us on a dGPU
++     * (AD104). The display engine already accesses the notifier surface in
++     * system memory the same way.
++     */
++    if (!nvKmsKapiAllocateSemaphores(device)) {
+         nvKmsKapiLogDebug(
+             "Failed to allocate Semaphore objects for GPU ID 0x%08x",
+             device->gpuId);
