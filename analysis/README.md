@@ -11,6 +11,7 @@ open questions. Raw data is in `evidence/`.
 | [2026-10-26-lock-stalls](2026-10-26-lock-stalls.md) | Lock stalls in the sysmem free/alloc and display paths | free path fixed and verified, alloc path open |
 | [2026-10-26-xid109-cyberpunk](2026-10-26-xid109-cyberpunk.md) | Xid 109 in Cyberpunk 2077 | known upstream issue, not a regression |
 | [2026-10-28-vaspace-overlap](2026-10-28-vaspace-overlap.md) | "can't update VA space" at `gpu_vaspace.c:4502` | cause in the user space driver, no kernel fix |
+| [2026-11-07-rm-ro-api-lock](2026-11-07-rm-ro-api-lock.md) | Read-only RM API lock (`RmRoApiLock`), overlap with the series | registry key under test |
 
 ## Open findings without an analysis yet
 
