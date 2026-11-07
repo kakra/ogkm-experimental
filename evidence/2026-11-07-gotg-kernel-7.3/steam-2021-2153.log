@@ -1,0 +1,14 @@
+2026-11-07T20:21:32+01:00 host systemd[2324]: Started app-steam-app1088850-60603.scope.
+2026-11-07T20:21:39+01:00 host steam[4217]: Fossilize INFO: Overriding serialization path: "/mnt/xfs-storage/user/.cache/shadercache/1088850/fozpipelinesv6/steamapprun_pipeline_cache".
+2026-11-07T20:21:40+01:00 host foreground_booster[2523]: setting "app-steam-app1088850-60603.scope" weight to 100 times normal weight
+2026-11-07T20:21:44+01:00 host foreground_booster[2523]: Removing "app-steam-app1088850-60603.scope" from cache
+2026-11-07T20:21:48+01:00 host foreground_booster[2523]: setting "app-steam-app1088850-60603.scope" weight to 100 times normal weight
+2026-11-07T20:21:48+01:00 host steam[4217]: Fossilize WARN: Compute pipeline handle 0x00007f8e90000ed0 is not registered.
+2026-11-07T20:21:48+01:00 host steam[4217]: It has either not been recorded, or it failed to be recorded earlier (which is expected if application uses an extension that is not recognized by Fossilize).
+2026-11-07T20:21:49+01:00 host steam[4217]: Fossilize WARN: Graphics pipeline handle 0x00007f8e6407d0d0 is not registered.
+2026-11-07T20:21:49+01:00 host steam[4217]: It has either not been recorded, or it failed to be recorded earlier (which is expected if application uses an extension that is not recognized by Fossilize).
+2026-11-07T20:21:49+01:00 host steam[4217]: Fossilize WARN: Graphics pipeline handle 0x00007f8e6407dc50 is not registered.
+2026-11-07T20:21:49+01:00 host steam[4217]: It has either not been recorded, or it failed to be recorded earlier (which is expected if application uses an extension that is not recognized by Fossilize).
+2026-11-07T20:21:49+01:00 host steam[4217]: Fossilize WARN:  ... warning spam detected at fossilize_errors.hpp:163, silencing.
+2026-11-07T21:53:01+01:00 host foreground_booster[2523]: Removing "app-steam-app1088850-60603.scope" from cache
+2026-11-07T21:53:02+01:00 host systemd[2324]: app-steam-app1088850-60603.scope: Consumed 5h 30min 14.052s CPU time over 1h 31min 29.335s wall clock time, 8.1G memory peak.

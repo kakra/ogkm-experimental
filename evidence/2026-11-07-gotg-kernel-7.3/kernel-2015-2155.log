@@ -1,0 +1,79 @@
+2026-11-07T20:21:20+01:00 host kernel: usb 1-4.5: USB disconnect, device number 12
+2026-11-07T20:21:36+01:00 host kernel: x86/split lock detection: #AC: gotg.exe/60853 took a split_lock trap at address: 0x15aa4b3b7
+2026-11-07T20:21:36+01:00 host kernel: umip: gotg.exe[60853] ip:15165a61c sp:10f560: SGDT instruction cannot be used by applications.
+2026-11-07T20:21:36+01:00 host kernel: umip: gotg.exe[60853] ip:15165a61c sp:10f560: For now, expensive software emulation returns the result.
+2026-11-07T20:21:36+01:00 host kernel: umip: gotg.exe[60853] ip:15197a322 sp:10f560: SGDT instruction cannot be used by applications.
+2026-11-07T20:21:36+01:00 host kernel: umip: gotg.exe[60853] ip:15197a322 sp:10f560: For now, expensive software emulation returns the result.
+2026-11-07T20:21:38+01:00 host kernel: umip: gotg.exe[60853] ip:14dd89b85 sp:10f4d0: SGDT instruction cannot be used by applications.
+2026-11-07T20:21:48+01:00 host kernel: x86/split lock detection: #AC: ZRenderManager:/61150 took a split_lock trap at address: 0x1449d57b0
+2026-11-07T20:21:49+01:00 host kernel: x86/split lock detection: #AC: JobWorkerThread/60980 took a split_lock trap at address: 0x150bbd40e
+2026-11-07T20:21:50+01:00 host kernel: x86/split lock detection: #AC: gotg.exe/61131 took a split_lock trap at address: 0x1490e6610
+2026-11-07T20:21:50+01:00 host kernel: x86/split lock detection: #AC: gotg.exe/61129 took a split_lock trap at address: 0x1556b0b4c
+2026-11-07T20:21:51+01:00 host kernel: x86/split lock detection: #AC: JobWorkerThread/60982 took a split_lock trap at address: 0x14517e705
+2026-11-07T20:21:52+01:00 host kernel: x86/split lock detection: #AC: JobWorkerThread/60983 took a split_lock trap at address: 0x15e07e2d7
+2026-11-07T20:21:52+01:00 host kernel: x86/split lock detection: #AC: JobWorkerThread/60979 took a split_lock trap at address: 0x14f6dda17
+2026-11-07T20:21:52+01:00 host kernel: x86/split lock detection: #AC: JobWorkerThread/60977 took a split_lock trap at address: 0x15ccb72aa
+2026-11-07T20:21:53+01:00 host kernel: x86/split lock detection: #AC: JobWorkerThread/60976 took a split_lock trap at address: 0x14f724a8a
+2026-11-07T20:21:54+01:00 host kernel: x86/split lock detection: #AC: JobWorkerThread/60981 took a split_lock trap at address: 0x149c8f0f3
+2026-11-07T20:21:55+01:00 host kernel: x86/split lock detection: #AC: JobWorkerThread/60978 took a split_lock trap at address: 0x1490e6610
+2026-11-07T20:24:50+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: status != NV_OK @ gpu_vaspace.c:4088
+2026-11-07T20:24:50+01:00 host kernel: NVRM: nvCheckOkFailedNoLog: Check failed: Invalid argument to call [NV_ERR_INVALID_ARGUMENT] (0x0000001F) returned from _gvaspaceMappingInsert(pGVAS, pGpu, pVASBlock, vaLo, vaHi, flags) @ gpu_vaspace.c:1804
+2026-11-07T20:24:50+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: NV_OK == status @ virt_mem_allocator_gm107.c:2481
+2026-11-07T20:24:50+01:00 host kernel: NVRM: dmaAllocMapping_GM107: can't update VA space for mapping @vaddr=0x29720000
+2026-11-07T20:24:59+01:00 host kernel: [drm:nv_drm_gem_alloc_nvkms_memory_ioctl [nvidia_drm]] *ERROR* [nvidia-drm] [GPU ID 0x00000100] Failed to allocate NVKMS memory of size 3342336 for scanout GEM object of Chrome_ChildIOT[4846]
+2026-11-07T20:29:27+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x800000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:29:28+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:29:28+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:29:29+01:00 host kernel: NVRM: --- last print repeated 4 times ---
+2026-11-07T20:29:29+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:29:29+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:29:49+01:00 host kernel: NVRM: --- last print repeated 4 times ---
+2026-11-07T20:29:49+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:29:49+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:29:55+01:00 host kernel: perf: interrupt took too long (2532 > 2500), lowering kernel.perf_event_max_sample_rate to 78900
+2026-11-07T20:30:23+01:00 host kernel: NVRM: --- last print repeated 1 times ---
+2026-11-07T20:30:23+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: status != NV_OK @ gpu_vaspace.c:4088
+2026-11-07T20:30:23+01:00 host kernel: NVRM: nvCheckOkFailedNoLog: Check failed: Invalid argument to call [NV_ERR_INVALID_ARGUMENT] (0x0000001F) returned from _gvaspaceMappingInsert(pGVAS, pGpu, pVASBlock, vaLo, vaHi, flags) @ gpu_vaspace.c:1804
+2026-11-07T20:30:23+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: NV_OK == status @ virt_mem_allocator_gm107.c:2481
+2026-11-07T20:30:23+01:00 host kernel: NVRM: dmaAllocMapping_GM107: can't update VA space for mapping @vaddr=0x29720000
+2026-11-07T20:31:18+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:31:20+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:31:20+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:31:50+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:31:50+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:32:16+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: status != NV_OK @ gpu_vaspace.c:4088
+2026-11-07T20:32:16+01:00 host kernel: NVRM: nvCheckOkFailedNoLog: Check failed: Invalid argument to call [NV_ERR_INVALID_ARGUMENT] (0x0000001F) returned from _gvaspaceMappingInsert(pGVAS, pGpu, pVASBlock, vaLo, vaHi, flags) @ gpu_vaspace.c:1804
+2026-11-07T20:32:16+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: NV_OK == status @ virt_mem_allocator_gm107.c:2481
+2026-11-07T20:32:16+01:00 host kernel: NVRM: dmaAllocMapping_GM107: can't update VA space for mapping @vaddr=0x29720000
+2026-11-07T20:33:17+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: status != NV_OK @ gpu_vaspace.c:4088
+2026-11-07T20:33:17+01:00 host kernel: NVRM: nvCheckOkFailedNoLog: Check failed: Invalid argument to call [NV_ERR_INVALID_ARGUMENT] (0x0000001F) returned from _gvaspaceMappingInsert(pGVAS, pGpu, pVASBlock, vaLo, vaHi, flags) @ gpu_vaspace.c:1804
+2026-11-07T20:33:17+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: NV_OK == status @ virt_mem_allocator_gm107.c:2481
+2026-11-07T20:33:17+01:00 host kernel: NVRM: dmaAllocMapping_GM107: can't update VA space for mapping @vaddr=0x28720000
+2026-11-07T20:35:33+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:35:33+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:36:03+01:00 host kernel: NVRM: --- last print repeated 7 times ---
+2026-11-07T20:36:03+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:36:04+01:00 host kernel: NVRM: GPU0 sysmemConstruct_IMPL: Sysmem alloc of 0x1000000 bytes with page size 0x10000 failed, retrying with page size 0x1000.
+2026-11-07T20:43:41+01:00 host kernel: NVRM: --- last print repeated 3 times ---
+2026-11-07T20:43:41+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: status != NV_OK @ gpu_vaspace.c:4088
+2026-11-07T20:43:41+01:00 host kernel: NVRM: nvCheckOkFailedNoLog: Check failed: Invalid argument to call [NV_ERR_INVALID_ARGUMENT] (0x0000001F) returned from _gvaspaceMappingInsert(pGVAS, pGpu, pVASBlock, vaLo, vaHi, flags) @ gpu_vaspace.c:1804
+2026-11-07T20:43:41+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: NV_OK == status @ virt_mem_allocator_gm107.c:2481
+2026-11-07T20:43:41+01:00 host kernel: NVRM: dmaAllocMapping_GM107: can't update VA space for mapping @vaddr=0x52fb0000
+2026-11-07T20:45:20+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: status != NV_OK @ gpu_vaspace.c:4088
+2026-11-07T20:45:20+01:00 host kernel: NVRM: nvCheckOkFailedNoLog: Check failed: Invalid argument to call [NV_ERR_INVALID_ARGUMENT] (0x0000001F) returned from _gvaspaceMappingInsert(pGVAS, pGpu, pVASBlock, vaLo, vaHi, flags) @ gpu_vaspace.c:1804
+2026-11-07T20:45:20+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: NV_OK == status @ virt_mem_allocator_gm107.c:2481
+2026-11-07T20:45:20+01:00 host kernel: NVRM: dmaAllocMapping_GM107: can't update VA space for mapping @vaddr=0x53fb0000
+2026-11-07T20:46:47+01:00 host kernel: [drm:nv_drm_gem_alloc_nvkms_memory_ioctl [nvidia_drm]] *ERROR* [nvidia-drm] [GPU ID 0x00000100] Failed to allocate NVKMS memory of size 3342336 for scanout GEM object of Chrome_ChildIOT[4846]
+2026-11-07T20:46:48+01:00 host kernel: [drm:nv_drm_gem_alloc_nvkms_memory_ioctl [nvidia_drm]] *ERROR* [nvidia-drm] [GPU ID 0x00000100] Failed to allocate NVKMS memory of size 3342336 for scanout GEM object of Chrome_ChildIOT[4846]
+2026-11-07T20:46:48+01:00 host kernel: [drm:nv_drm_gem_alloc_nvkms_memory_ioctl [nvidia_drm]] *ERROR* [nvidia-drm] [GPU ID 0x00000100] Failed to allocate NVKMS memory of size 3342336 for scanout GEM object of Chrome_ChildIOT[4846]
+2026-11-07T20:46:48+01:00 host kernel: [drm:nv_drm_gem_alloc_nvkms_memory_ioctl [nvidia_drm]] *ERROR* [nvidia-drm] [GPU ID 0x00000100] Failed to allocate NVKMS memory of size 3342336 for scanout GEM object of Chrome_ChildIOT[4846]
+2026-11-07T20:46:49+01:00 host kernel: [drm:nv_drm_gem_alloc_nvkms_memory_ioctl [nvidia_drm]] *ERROR* [nvidia-drm] [GPU ID 0x00000100] Failed to allocate NVKMS memory of size 3342336 for scanout GEM object of Chrome_ChildIOT[4846]
+2026-11-07T20:55:06+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: status != NV_OK @ gpu_vaspace.c:4088
+2026-11-07T20:55:06+01:00 host kernel: NVRM: nvCheckOkFailedNoLog: Check failed: Invalid argument to call [NV_ERR_INVALID_ARGUMENT] (0x0000001F) returned from _gvaspaceMappingInsert(pGVAS, pGpu, pVASBlock, vaLo, vaHi, flags) @ gpu_vaspace.c:1804
+2026-11-07T20:55:06+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: NV_OK == status @ virt_mem_allocator_gm107.c:2481
+2026-11-07T20:55:06+01:00 host kernel: NVRM: dmaAllocMapping_GM107: can't update VA space for mapping @vaddr=0x57a00000
+2026-11-07T21:08:09+01:00 host kernel: perf: interrupt took too long (3171 > 3165), lowering kernel.perf_event_max_sample_rate to 63000
+2026-11-07T21:13:14+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: status != NV_OK @ gpu_vaspace.c:4088
+2026-11-07T21:13:14+01:00 host kernel: NVRM: nvCheckOkFailedNoLog: Check failed: Invalid argument to call [NV_ERR_INVALID_ARGUMENT] (0x0000001F) returned from _gvaspaceMappingInsert(pGVAS, pGpu, pVASBlock, vaLo, vaHi, flags) @ gpu_vaspace.c:1804
+2026-11-07T21:13:14+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: NV_OK == status @ virt_mem_allocator_gm107.c:2481
+2026-11-07T21:13:14+01:00 host kernel: NVRM: dmaAllocMapping_GM107: can't update VA space for mapping @vaddr=0x58a00000
