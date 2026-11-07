@@ -83,9 +83,14 @@ fault buffer asks for huge pages and retries with 4 KB
 
 ## Locks
 
-- **RM API lock:** an rwsem. Alloc, free, map, unmap and controls take it for
-  writing unless the class sets an RO flag. SystemMemory allocates under the
-  RO lock (taken after the kernel allocation) but frees under the RW lock.
+- **RM API lock:** an rwsem. Which APIs may take it for reading is set by a
+  mask; without the `RmRoApiLock` registry key it only allows flagged
+  controls (`RMCTRL_FLAGS_API_LOCK_READONLY`). Everything else takes it for
+  writing, including allocations of classes flagged
+  `RS_FLAGS_ACQUIRE_RO_API_LOCK_ON_ALLOC` such as SystemMemory: that flag only
+  counts with the ALLOC bit of the key. SystemMemory takes the GPU lock only
+  after the kernel allocation, but the API lock is held for the whole ioctl.
+  Details and bit layout: `analysis/2026-11-07-rm-ro-api-lock.md`.
 - **RM GPU lock:** also needed by the display interrupt bottom half. A long
   GPU lock holder delays vblank and flip events on all heads.
 - **`nvkms_lock`:** one semaphore for nearly all of NVKMS: every KAPI ioctl

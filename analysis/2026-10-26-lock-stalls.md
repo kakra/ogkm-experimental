@@ -16,8 +16,11 @@
   `nvkms_kthread_q`, and with `nvidia_drm.vblank=1` also the RG vblank
   callbacks. A long holder delays all heads.
 - The **RM API lock** is an rwsem. A writer blocks new readers. Alloc, free,
-  map, unmap and controls take it for writing unless the class sets an RO
-  flag.
+  map, unmap and controls take it for writing unless the `RmRoApiLock`
+  registry key allows the read lock for that API (and, for alloc and
+  controls, the class or control is flagged for it). Without the key, only
+  flagged controls take the read lock; see
+  [2026-11-07-rm-ro-api-lock](2026-11-07-rm-ro-api-lock.md).
 - The **RM GPU lock** is also needed by the display interrupt bottom half.
   Long GPU lock holders delay vblank and flip events.
 
@@ -25,8 +28,10 @@
 
 - `resource_list.h`: SystemMemory has
   `RS_FLAGS_ACQUIRE_GPUS_LOCK_ON_FREE | RS_FLAGS_ACQUIRE_RO_API_LOCK_ON_ALLOC`.
-  Allocation runs under the RO API lock, free under the GPU lock **and** the
-  RW API lock.
+  Free runs under the GPU lock **and** the RW API lock. Allocation also takes
+  the API lock for write: the RO flag only takes effect with the ALLOC bit of
+  the `RmRoApiLock` registry key (corrected 2026-11-07, see
+  [2026-11-07-rm-ro-api-lock](2026-11-07-rm-ro-api-lock.md)).
 - `system_mem.c`: on allocation the lock is deliberately taken only after the
   kernel allocation. The free path has no counterpart; `memdescFree()` runs
   completely under the locks.
@@ -75,9 +80,10 @@ a fresh boot with little fragmentation.
 After patch 44, the slowest path is the allocation of non-cached sysmem
 (2026-10-27): `set_pages_array_uc` 128 calls of 8 to 16 ms and 17 of 32 to
 64 ms; `nv_alloc_system_pages` 152 of 8 to 16 ms, 17 of 32 to 64 ms, one of
-256 to 512 ms. This runs synchronously in the allocating thread under the RO
-API lock and holds off writers. It matches stutter while a game streams in
-assets.
+256 to 512 ms. This runs synchronously in the allocating thread under the
+API lock, which is taken for write without the `RmRoApiLock` registry key and
+then holds off every other RM client. It matches stutter while a game streams
+in assets.
 
 Idea, not implemented: a pool of pages that already carry the WC/UC memtype,
 so neither allocation nor free changes PAT. Needs a size limit and a
@@ -124,5 +130,7 @@ measured whether this causes visible stutter on the other displays.
   GET_SURFACE_INFO, non-stall interrupt handling, push buffer wrap without
   yield.
 
-Not recommended: the `RmRoApiLock` registry key (experimental, affects all of
-RM).
+The `RmRoApiLock` registry key was not recommended here at first
+(experimental, affects all of RM). NVIDIA has since recommended
+`RmRoApiLock=0x27a` and is working on a read-only default; see
+[2026-11-07-rm-ro-api-lock](2026-11-07-rm-ro-api-lock.md).
