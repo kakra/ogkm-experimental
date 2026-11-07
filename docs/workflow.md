@@ -46,6 +46,12 @@ Only the current release is maintained. On a new upstream release `<new>`:
 3. Drop patches that landed upstream (`git cherry` or the upstream
    changelog), and re-check the open pull requests the series carries.
    Resolve conflicts in the fork, one commit at a time.
+   Also check for changes the changelog does not mention:
+   - Read-only RM API lock default: run the greps in
+     `analysis/2026-11-07-rm-ro-api-lock.md` ("Detecting a new default
+     upstream"). If the default mask gained ALLOC, MAP, UNMAP or the INTER
+     bits, drop the DMA map/unmap read lock patch where it is covered and
+     update the `RmRoApiLock` entry in `docs/tuning.md`.
 4. Point the submodule at the new branch:
    `git config -f .gitmodules submodule.driver.branch ogkm/<new>`.
 5. `cp patches/<old>/sources.tsv patches/<new>/` (create the directory),

@@ -34,6 +34,7 @@ order 9 once Unmovable pageblocks are spread over the zone
 | `nvidia-drm.modeset=1`, `nvidia-drm.fbdev=1` | keep | required for Wayland compositors |
 | `nvidia_drm.vblank` | default | on by default with the series, off upstream; `1` enables the RG vblank callbacks under `nvkms_lock` (see `docs/driver-internals.md`), `0` turns them off |
 | `nvidia_drm.deadline_boost` | default | only exists with the series (patch 2); `0` turns the deadline boost off |
+| `NVreg_RegistryDwords="RmRoApiLock=0x27a"` | under test | recommended by NVIDIA in egl-wayland issue 164: read API lock for alloc, CPU and DMA map/unmap, controls stay as by default. Allocations of sysmem then no longer block every other RM client. NVIDIA mentions known, unlikely alloc races. Append with `;` to an existing `RegistryDwords` value; check with `grep -i registry /proc/driver/nvidia/params`. See `analysis/2026-11-07-rm-ro-api-lock.md` |
 
 ## Games
 
