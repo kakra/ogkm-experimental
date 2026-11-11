@@ -1,8 +1,9 @@
 # How the driver works (the parts that matter here)
 
-Notes from reading the 615.78.08 source while chasing the problems in
-`analysis/`. File and line references are for 615.78.08 and drift between
-releases; search for the function names.
+Notes from reading the source while chasing the problems in `analysis/`.
+Written against 615.78.08 and kept current for 620.70.06 where checked.
+File and line references are for 615.78.08 unless a 620.70.06 reference is
+given, and drift between releases; search for the function names.
 
 ## Components
 
@@ -21,8 +22,8 @@ releases; search for the function names.
 and NVKMS only as prebuilt objects (`nvidia/nv-kernel.o_binary`,
 `nvidia-modeset/nv-modeset-kernel.o_binary`). Patches that touch `src/` can
 only be built from the full source: the git repository or the
-`NVIDIA-kernel-module-source-<release>.tar.xz` tarball. In the 615.78.08
-series, 29 of 45 patches touch `src/`.
+`NVIDIA-kernel-module-source-<release>.tar.xz` tarball. In the 620.70.06
+series, 85 of 140 patches touch `src/`.
 
 ## Where VRAM goes when it is full
 
@@ -44,7 +45,7 @@ series, 29 of 45 patches touch `src/`.
   (`memdescGetAdjustedPageSize`).
 - `sysmemConstruct()` falls back to smaller page sizes only for
   `NVOS32_ATTR_PAGE_SIZE_DEFAULT` in stock drivers. Explicit BIG/HUGE requests
-  fail as soon as no block of that order is free (patch 42 of the 615.78.08
+  fail as soon as no block of that order is free (patch 0074 of the 620.70.06
   series changes this). On GA102, `bSysmemPageSizeDefaultAllowLargePages` is
   false, so only explicit requests use large pages.
 - `nv_compute_gfp_mask()` sets `__GFP_RETRY_MAYFAIL` for every order. For
@@ -123,15 +124,16 @@ fault buffer asks for huge pages and retries with 4 KB
 - `dmaAllocMapping_GM107: can't update VA space` with `gpu_vaspace.c`
   asserts: user space mapped an already mapped GPU VA range or unmapped part
   of one. RM rejects it; no process name is logged. The GotG case at
-  `gpu_vaspace.c:4502` is a stale VA in the user space driver
+  `gpu_vaspace.c:4502` (`:4088` in 620.70.06, in the same function
+  `_gvaspaceMappingInsert()`) is a stale VA in the user space driver
   (`analysis/2026-10-28-vaspace-overlap.md`); `tools/trace/nv-vaspace-ioctl.bt`
   shows the caller.
 
 ## Useful tracing points
 
 Function names that kprobes can attach to in `nvidia.ko` (not inlined in
-615.78.08): `nv_alloc_system_pages`, `nv_free_system_pages`. Struct offsets
-for `nv_alloc_t` change between releases; check with
+615.78.08 and 620.70.06): `nv_alloc_system_pages`, `nv_free_system_pages`.
+Struct offsets for `nv_alloc_t` change between releases; check with
 `pahole -C nv_alloc_s /sys/kernel/btf/nvidia` before using
 `tools/trace/nv-sysmem-fail-trace.sh` on a new release. The RM core
 (`nv-kernel.o`, e.g. `gvaspaceMap_IMPL`, `dmaAllocMapping_GM107`) cannot be
