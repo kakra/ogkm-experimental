@@ -13,7 +13,7 @@ body:
     id: release
     attributes:
       label: Driver release it applies to
-      placeholder: 615.78.08
+      placeholder: 620.70.06
     validations:
       required: true
   - type: textarea

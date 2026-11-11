@@ -13,7 +13,7 @@ body:
     id: release
     attributes:
       label: Driver release and series
-      placeholder: 615.78.08 stock / ogkm/615.78.08 at 706df0ca
+      placeholder: 620.70.06 stock / ogkm/620.70.06 at 22d5b88d
     validations:
       required: true
   - type: input

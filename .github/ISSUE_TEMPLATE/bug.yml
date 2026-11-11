@@ -17,7 +17,7 @@ body:
     attributes:
       label: Driver release and series
       description: Output of `cat /sys/module/nvidia/version`, and the series you applied (fork branch commit, or `patches/<release>/` at a commit of this repository).
-      placeholder: 615.78.08, ogkm/615.78.08 at 706df0ca
+      placeholder: 620.70.06, ogkm/620.70.06 at 22d5b88d
     validations:
       required: true
   - type: dropdown
@@ -34,7 +34,7 @@ body:
     id: system
     attributes:
       label: GPU, kernel, distribution
-      placeholder: RTX 3080 Ti (GA102), 6.18.58, Gentoo
+      placeholder: RTX 3080 Ti (GA102), 7.3.4, Gentoo
     validations:
       required: true
   - type: input
