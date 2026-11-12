@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 7 Nov 2026 19:31:09 +0100
+Subject: [PATCH] nvidia-drm: put pitch-layout offscreen GEM memory in system
+ memory
+
+GBM_BO_USE_LINEAR buffers without SCANOUT, which both NVIDIA's GBM
+backend and ours allocate as pitch layout with NV_GEM_ALLOC_NO_SCANOUT,
+are what userspace allocates to share with other devices: an iGPU that
+renders or displays them, or a USB or BMC display. Those importers need
+the buffer's pages, but nvidia-drm can't give a scatterlist for video
+memory (prime_get_sg_table returns -ENOMEM), so the import fails and the
+buffer can't leave the NVIDIA GPU.
+
+Allocate such memory in system memory from the start; its pages work for
+every importer. NVIDIA's GL can't render to pitch-linear images, so
+same-GPU use of these buffers is limited to sampling and uploads.
+Block-linear and scanout memory stays in video memory, and the
+video-to-system-memory fallback only runs when video memory was tried.
+
+Refusing the attachment instead would break importers like udl and gud
+that only vmap the buffer, which works for video memory.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../nvidia-drm/nvidia-drm-gem-nvkms-memory.c      | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
+index a2d71782..760fbba4 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
+@@ -718,7 +718,17 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+     allocParams.type = (p->flags & NV_GEM_ALLOC_NO_SCANOUT) ?
+         NVKMS_KAPI_ALLOCATION_TYPE_OFFSCREEN : NVKMS_KAPI_ALLOCATION_TYPE_SCANOUT;
+     allocParams.size = p->memory_size;
+-    allocParams.useVideoMemory = nv_dev->hasVideoMemory;
++    /*
++     * Pitch-layout offscreen memory (GBM_BO_USE_LINEAR without SCANOUT) is
++     * what userspace allocates to share with other devices: an iGPU
++     * rendering or displaying it, a USB or BMC display. Importers need its
++     * pages (prime_get_sg_table), which video memory doesn't have, so put
++     * it in system memory from the start. NVIDIA's GL can't render to
++     * pitch-linear images anyway, so same-GPU use is limited to sampling
++     * and uploads. Block-linear and scanout memory stays in video memory.
++     */
++    allocParams.useVideoMemory = nv_dev->hasVideoMemory &&
++        (p->block_linear || !(p->flags & NV_GEM_ALLOC_NO_SCANOUT));
+     allocParams.compressible = &p->compressible;
+ 
+     pMemory = nvKms->allocateMemory(nv_dev->pDevice, &allocParams);
+@@ -740,7 +750,8 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+         pMemory = nvKms->allocateMemory(nv_dev->pDevice, &allocParams);
+     }
+ 
+-    if (pMemory == NULL && (p->flags & NV_GEM_ALLOC_NO_SCANOUT)) {
++    if (pMemory == NULL && allocParams.useVideoMemory &&
++        (p->flags & NV_GEM_ALLOC_NO_SCANOUT)) {
+         if (__ratelimit(&log_rs)) {
+             NV_DRM_DEV_LOG_INFO(
+                     nv_dev,

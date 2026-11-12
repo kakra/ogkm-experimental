@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Fri, 6 Nov 2026 14:11:59 +0100
+Subject: [PATCH] nvkms: don't wait for the post-flip IMP update under
+ nvkms_lock
+
+TryToDoPostFlipIMP() lowers the usage bounds and re-enables the mid-frame
+and DWCF watermark once flips no longer need them, and waited for that
+core channel update with nvDoIMPUpdateEvo(). With an IMP change the
+update takes a display supervisor round trip through RM, 10-15 ms, all of
+it under nvkms_lock, which stalls every client's flips.
+
+Kick the update off without waiting for it. Lowering only happens on
+channels without pending methods, and a flip that needs the higher usage
+bounds or the watermark disabled again goes through PreFlipIMP(), whose
+synchronous core channel update completes after this one, so no flip can
+run against bounds it exceeds.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/nvkms-hw-flip.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/nvidia-modeset/src/nvkms-hw-flip.c b/src/nvidia-modeset/src/nvkms-hw-flip.c
+index f66e4924..590fb861 100644
+--- a/src/nvidia-modeset/src/nvkms-hw-flip.c
++++ b/src/nvidia-modeset/src/nvkms-hw-flip.c
+@@ -3139,7 +3139,18 @@ TryToDoPostFlipIMP(void *dataPtr, NvU32 dataU32)
+         }
+ 
+         if (update) {
+-            nvDoIMPUpdateEvo(pDispEvo, &updateState);
++            /*
++             * Don't wait for the update to complete: with an IMP change that
++             * takes a display supervisor round trip through RM, 10-15 ms,
++             * all of it under nvkms_lock, which stalls every client's flips.
++             * Lowering only happens on channels without pending methods,
++             * and a flip that needs the higher usage bounds or the
++             * watermark disabled again goes through PreFlipIMP(), whose
++             * synchronous core channel update completes after this one, so
++             * no flip can run against bounds it exceeds.
++             */
++            nvEvoUpdateAndKickOff(pDispEvo, FALSE /* sync */, &updateState,
++                                  TRUE /* releaseElv */);
+         }
+     }
+ }

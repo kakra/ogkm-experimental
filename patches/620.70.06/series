@@ -131,3 +131,10 @@
 0131-nvkms-fetch-the-DRM-primary-plane-s-source-rectangle.patch
 0132-nvidia-drm-report-VRR-tearing-flips-at-the-scanout-t.patch
 0133-nvidia-make-MemoryMapper-worker-refcount-PORT_ATOMIC.patch
+0134-nvkms-don-t-wait-for-the-post-flip-IMP-update-under-.patch
+0135-nvkms-check-the-EDID-VRR-maximum-and-HDMI-2.1-VRRmin.patch
+0136-nvkms-don-t-reprogram-an-unchanged-cursor-image-on-f.patch
+0137-nvidia-drm-put-pitch-layout-offscreen-GEM-memory-in-.patch
+0138-nvidia-fix-dmem-cgroup-region-name-format-string-and.patch
+0139-nvidia-don-t-propagate-unprovided-TGPU-PPMD-limits-f.patch
+0140-nvidia-drm-publish-the-full-EDID-including-HF-EEODB-.patch

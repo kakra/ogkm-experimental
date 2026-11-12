@@ -1,0 +1,146 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Wed, 11 Nov 2026 14:17:37 +0100
+Subject: [PATCH] nvidia-drm: publish the full EDID, including HF-EEODB
+ extension blocks
+
+nvidia-drm passed the NVKMS EDID as a bare struct edid to
+drm_connector_update_edid_property(). That legacy interface sizes the
+blob from the base block's extension count, which ignores the HDMI
+Forum EDID Extension Override Data Block. HDMI 2.1 sinks that announce
+more than one extension block through EEODB keep the base count at 1,
+so userspace only saw the first two blocks (256 of 384 bytes on an
+ASUS XG27AQDMG), even though NVKMS parses all of them for its mode list.
+
+Keep the EDID length NVKMS returns and publish it through the
+struct drm_edid interface (drm_edid_alloc() + drm_edid_connector_update())
+where the kernel has it, so the blob and the DRM core's display_info see
+the whole EDID. Older kernels keep the legacy path.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/conftest.sh                       | 17 ++++++++++++++
+ kernel-open/nvidia-drm/nvidia-drm-connector.c |  5 ++++-
+ kernel-open/nvidia-drm/nvidia-drm-connector.h |  1 +
+ kernel-open/nvidia-drm/nvidia-drm-helper.h    | 22 ++++++++++++++++++-
+ kernel-open/nvidia-drm/nvidia-drm-sources.mk  |  1 +
+ 5 files changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/conftest.sh b/kernel-open/conftest.sh
+index 921370dc..7f6aba6b 100755
+--- a/kernel-open/conftest.sh
++++ b/kernel-open/conftest.sh
+@@ -1731,6 +1731,23 @@ compile_test() {
+             compile_check_conftest "$CODE" "NV_DRM_ATOMIC_HELPER_LEGACY_GAMMA_SET_PRESENT" "" "functions"
+         ;;
+ 
++        drm_edid_connector_update)
++            #
++            # Determine if the function drm_edid_connector_update() is
++            # present, together with the struct drm_edid interface
++            # (drm_edid_alloc()/drm_edid_free()) it takes.
++            #
++            # Added in v6.0 (2022) by the struct drm_edid series.
++            #
++            CODE="
++            #include <drm/drm_edid.h>
++            void conftest_drm_edid_connector_update(void) {
++                drm_edid_connector_update();
++            }"
++
++            compile_check_conftest "$CODE" "NV_DRM_EDID_CONNECTOR_UPDATE_PRESENT" "" "functions"
++        ;;
++
+         drm_plane_create_color_properties)
+             #
+             # Determine if the function drm_plane_create_color_properties() is
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index 33cfa41f..4061566f 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -392,6 +392,7 @@ __nv_drm_detect_encoder(struct NvKmsKapiDynamicDisplayParams *pDetectParams,
+                 memcpy(nv_connector->edid,
+                        pDetectParams->edid.buffer,
+                        pDetectParams->edid.bufferSize);
++                nv_connector->edid_size = pDetectParams->edid.bufferSize;
+             } else {
+                 NV_DRM_LOG_ERR("Out of Memory");
+             }
+@@ -422,6 +423,7 @@ static enum drm_connector_status __nv_drm_connector_detect_internal(
+     if (nv_connector->edid != NULL) {
+         nv_drm_free(nv_connector->edid);
+         nv_connector->edid = NULL;
++        nv_connector->edid_size = 0;
+     }
+ 
+     nv_drm_connector_set_allm_capable(nv_connector, NV_FALSE);
+@@ -900,7 +902,8 @@ static int nv_drm_connector_get_modes(struct drm_connector *connector)
+ 
+ 
+     if (nv_connector->edid != NULL) {
+-        nv_drm_connector_update_edid_property(connector, nv_connector->edid);
++        nv_drm_connector_update_edid_property(connector, nv_connector->edid,
++                                              nv_connector->edid_size);
+     }
+ 
+     nv_drm_connector_clear_native_modes(nv_connector);
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.h b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+index 66bceb24..0fed387c 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+@@ -59,6 +59,7 @@ struct nv_drm_connector {
+ 
+     struct nv_drm_encoder *nv_detected_encoder;
+     struct edid *edid;
++    size_t edid_size;
+ 
+     enum NvKmsContentProtection cp;
+     bool cp_event_pending;
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-helper.h b/kernel-open/nvidia-drm/nvidia-drm-helper.h
+index 2ef27fce..82f91f92 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-helper.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-helper.h
+@@ -363,10 +363,30 @@ nv_drm_connector_attach_encoder(struct drm_connector *connector,
+ #endif
+ }
+ 
++#include <drm/drm_edid.h>
++
++/*
++ * Publish the EDID exactly as NVKMS read it. The legacy struct edid
++ * interface sizes the blob from the base block's extension count, which
++ * drops the blocks announced by an HDMI Forum EEODB (HDMI 2.1 sinks with
++ * more than one extension block keep the base count at 1).
++ */
+ static inline int
+ nv_drm_connector_update_edid_property(struct drm_connector *connector,
+-                                      const struct edid *edid)
++                                      const struct edid *edid,
++                                      size_t size)
+ {
++#if defined(NV_DRM_EDID_CONNECTOR_UPDATE_PRESENT)
++    const struct drm_edid *drm_edid = drm_edid_alloc(edid, size);
++
++    if (drm_edid != NULL) {
++        int ret = drm_edid_connector_update(connector, drm_edid);
++
++        drm_edid_free(drm_edid);
++        return ret;
++    }
++#endif
++
+ #if defined(NV_DRM_CONNECTOR_FUNCS_HAVE_MODE_IN_NAME)
+     return drm_mode_connector_update_edid_property(connector, edid);
+ #else
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-sources.mk b/kernel-open/nvidia-drm/nvidia-drm-sources.mk
+index 9c83ff66..bdcfe5a9 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-sources.mk
++++ b/kernel-open/nvidia-drm/nvidia-drm-sources.mk
+@@ -65,6 +65,7 @@ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_connector_attach_hdr_output_metadata_p
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_plane_create_color_properties
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_plane_create_zpos_immutable_property
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_atomic_helper_legacy_gamma_set
++NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_edid_connector_update
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += vmf_insert_mixed
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_gem_prime_mmap
+ NV_CONFTEST_FUNCTION_COMPILE_TESTS += drm_sysfs_connector_property_event
