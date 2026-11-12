@@ -5,7 +5,40 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 620.70.06
 
-Fork branch `ogkm/620.70.06`, 133 patches on the upstream tag `620.70.06`.
+Fork branch `ogkm/620.70.06`, 140 patches on the upstream tag `620.70.06`.
+
+### 2026-11-12: seven patches from Tom Englund's branch (134 to 140)
+
+Added from Tom Englund's branch `patches`:
+
+- 134: nvkms no longer waits for the post-flip IMP update while holding
+  `nvkms_lock`. With an IMP change that wait took 10 to 15 ms and stalled
+  the flips of all clients.
+- 135: nvkms only enables VRR on Adaptive-Sync displays for modes within
+  the EDID VRR maximum, ignores invalid HDMI 2.1 VRRmin/VRRmax values, and
+  a new HDMI sink without VRR no longer keeps the VRR caps of the previous
+  one.
+- 136: nvkms doesn't reprogram an unchanged cursor image on flips.
+- 137: nvidia-drm puts pitch-layout GEM memory that isn't used for
+  scanout in system memory, so other devices that need its pages (an iGPU,
+  USB displays) can import it.
+- 138: the dmem cgroup region name is passed as an argument instead of as
+  the format string, and the uncharge no longer reads the pool after the
+  references held by the charge are dropped.
+- 139: a TGPU or PPMD limit that the SBIOS doesn't provide with
+  PSHARESTATUS no longer triggers the "PshareStatus" assertion on every
+  SBIOS status change.
+- 140: nvidia-drm publishes the full EDID, including HF-EEODB extension
+  blocks.
+
+The series applies cleanly to 620.70.06 (`tools/check-series.sh`). Built
+against 7.3.4 (`tools/gentoo-patch.sh` of this revision), installed and
+booted on 2026-11-12 01:07. In the first 20 minutes after the boot: no
+Xid, VA space, FRL link training or dmem messages in the kernel log. VRR
+is still offered on both DisplayPort monitors and the TV; the 2560x2880
+HDMI monitor doesn't offer it, as before. All four EDIDs are 256 bytes
+and none of the sinks uses HF-EEODB, so 140 has no visible effect on this
+system.
 
 ### 2026-11-05: the series moves to 620.70.06
 
