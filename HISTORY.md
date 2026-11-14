@@ -5,7 +5,37 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 620.70.06
 
-Fork branch `ogkm/620.70.06`, 140 patches on the upstream tag `620.70.06`.
+Fork branch `ogkm/620.70.06`, 143 patches on the upstream tag `620.70.06`.
+
+### 2026-11-13: three patches from Tom Englund's branch (141 to 143)
+
+Added from Tom Englund's branch `patches`:
+
+- 141: nvidia-drm handles display change, content protection, HDCP
+  topology and MST connect events in a work item instead of on the NVKMS
+  event thread. A topology event during a blocking atomic commit could
+  deadlock the commit against its own flip event until the 3 s timeout,
+  followed by the WARN in `__nv_drm_handle_flip_event()`. The work reads
+  the HDCP topology through a new `NVKMS_IOCTL_GET_HDCP_TOPOLOGY` without
+  DRM locks. From VeilSilence.
+- 142: upstream PR [#1539][pr-1539], the UVM channel notifier arrays are
+  zeroed after allocation. With `NVreg_InitializeSystemMemoryAllocations=0`
+  a stale error notifier could latch a UVM fatal error (Xid 154) on the
+  first push.
+- 143: upstream PR [#1542][pr-1542], a failed DMA mapping list insert no
+  longer unlinks a VirtualMemory that still has mappings from
+  `DevMemoryTable`. Before, the later unlink could oops in `btreeUnlink()`
+  (upstream issue [#1540][issue-1540]) or leave a cycle that hung all
+  clients under the RM API lock. Also frees the new mapping node when
+  the `DevMemoryTable` insert itself fails.
+
+The series applies cleanly to 620.70.06 (`tools/check-series.sh`). Built
+against 7.3.4 (`tools/gentoo-patch.sh` of this revision), installed and
+booted on 2026-11-14 01:27. In the first 5 minutes after the boot: no
+Xid, VA space, FRL link training, dmem or flip event messages in the
+kernel log, no "Failed to insert new mapping node". VRR and EDIDs are
+unchanged from 140. None of the three fixes has a visible effect on this
+system yet; built and booted, not tested against the problems they fix.
 
 ### 2026-11-12: seven patches from Tom Englund's branch (134 to 140)
 
@@ -440,6 +470,7 @@ no longer logged as errors.
 
 [gulafaran-pr-2]: https://github.com/gulafaran/open-gpu-kernel-modules/pull/2
 [issue-1510]: https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1510
+[issue-1540]: https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1540
 [pr-1278]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1278
 [pr-1286]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1286
 [pr-1368]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368
@@ -456,3 +487,5 @@ no longer logged as errors.
 [pr-1500]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1500
 [pr-1505]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1505
 [pr-1506]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1506
+[pr-1539]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1539
+[pr-1542]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1542
