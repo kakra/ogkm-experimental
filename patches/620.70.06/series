@@ -138,3 +138,6 @@
 0138-nvidia-fix-dmem-cgroup-region-name-format-string-and.patch
 0139-nvidia-don-t-propagate-unprovided-TGPU-PPMD-limits-f.patch
 0140-nvidia-drm-publish-the-full-EDID-including-HF-EEODB-.patch
+0141-nvidia-drm-handle-display-events-off-the-NVKMS-event.patch
+0142-nvidia-zero-UVM-channel-notifier-arrays-after-alloca.patch
+0143-nvidia-keep-the-VirtualMemory-in-DevMemoryTable-when.patch

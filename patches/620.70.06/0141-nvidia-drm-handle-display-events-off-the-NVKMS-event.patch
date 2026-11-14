@@ -1,0 +1,924 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: VeilSilence <BoneFeaR@proton.me>
+Date: Thu, 12 Nov 2026 09:56:28 +0100
+Subject: [PATCH] nvidia-drm: handle display events off the NVKMS event thread
+
+The NVKMS event thread also delivers the flip completions that a
+blocking atomic commit waits for, while holding connection_mutex. The
+display change, content protection and HDCP topology handlers took
+mode_config.mutex on that thread. The content protection work holds
+mode_config.mutex and waits for connection_mutex, so a topology event
+arriving during a blocking commit closed a cycle: the commit waited for
+its flip event, which sat behind the topology handler, which waited for
+the work, which waited for the commit. The commit then hit its 3 s
+timeout, drained the flip list by hand and tripped the WARN in
+__nv_drm_handle_flip_event() when the real event arrived.
+
+The event thread now only records what changed per display under a
+spinlock and queues the work. The work reads the HDCP topology through
+a new NVKMS_IOCTL_GET_HDCP_TOPOLOGY with no DRM locks held, then
+publishes content protection, topology and connection state under the
+modeset locks. NVKMS no longer copies the topology into the connector
+when sending the event; it only records whether it may be read. The
+ioctl writes through a caller-supplied pointer, so it is refused for
+user space clients.
+
+The MST dynamic display connected event took mode_config.mutex on the
+event thread too, in nv_drm_add_encoder(). It is recorded the same way;
+the work adds the encoder with no DRM lock held, before publishing
+anything else for that display, and sends the hotplug event.
+
+The display event work now queues hotplug_event_work, so unload cancels
+it before the hotplug work instead of after.
+
+Co-Authored-By: Tom Englund <tomenglund26@gmail.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nvkms-kapi.h           |  23 ++-
+ kernel-open/nvidia-drm/nvidia-drm-connector.c |   5 +-
+ kernel-open/nvidia-drm/nvidia-drm-connector.h |   5 +-
+ kernel-open/nvidia-drm/nvidia-drm-drv.c       | 127 ++++++++++---
+ kernel-open/nvidia-drm/nvidia-drm-encoder.c   | 177 +++++++++++++++---
+ kernel-open/nvidia-drm/nvidia-drm-encoder.h   |  13 ++
+ kernel-open/nvidia-drm/nvidia-drm-priv.h      |  37 ++++
+ src/nvidia-modeset/include/nvkms-types.h      |   7 +-
+ src/nvidia-modeset/interface/nvkms-api.h      |  38 ++++
+ .../kapi/interface/nvkms-kapi.h               |  23 ++-
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c      |  32 +++-
+ src/nvidia-modeset/src/nvkms.c                |  53 +++++-
+ 12 files changed, 467 insertions(+), 73 deletions(-)
+
+diff --git a/kernel-open/common/inc/nvkms-kapi.h b/kernel-open/common/inc/nvkms-kapi.h
+index ff191234..ef9e7f25 100644
+--- a/kernel-open/common/inc/nvkms-kapi.h
++++ b/kernel-open/common/inc/nvkms-kapi.h
+@@ -534,7 +534,6 @@ struct NvKmsKapiEventDisplayCpChanged {
+ 
+ struct NvKmsKapiEventDisplayCpTopologyChanged {
+     NvKmsKapiDisplay display;
+-    const void *topology;
+ };
+ 
+ struct NvKmsKapiEventDynamicDisplayConnected {
+@@ -971,6 +970,28 @@ struct NvKmsKapiFunctionsTable {
+         struct NvKmsKapiDynamicDisplayParams *params
+     );
+ 
++    /*!
++     * Read the HDCP topology of the specified display.
++     *
++     * \param [in]  device    A device allocated using allocateDevice().
++     *
++     * \param [in]  display   A display handle from getDisplays().
++     *
++     * \param [out] topology  Buffer of NVKMS_HDCP_TOPOLOGY_SIZE bytes.
++     *
++     * \param [out] valid     NV_FALSE when the topology was cleared and
++     *                        the buffer is zeroed; NULL may be passed.
++     *
++     * \return NV_TRUE on success, NV_FALSE otherwise.
++     */
++    NvBool (*getHdcpTopology)
++    (
++        struct NvKmsKapiDevice *device,
++        NvKmsKapiDisplay display,
++        void *topology,
++        NvBool *valid
++    );
++
+     /*!
+      * Allocate some unformatted video or system memory of the specified size.
+      *
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index 4061566f..9dfc03d4 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -1795,8 +1795,8 @@ void nv_drm_connector_update_content_protection(struct nv_drm_connector *nv_conn
+ #endif
+ }
+ 
+-int nv_drm_connector_update_topology_property(struct nv_drm_connector *nv_connector,
+-                                              const void *topology)
++int nv_drm_connector_update_topology_property(
++    struct nv_drm_connector *nv_connector, const void *topology)
+ {
+ #ifdef NV_DRM_SUPPORT_CONTENT_PROTECTION_PROPERTY
+     struct drm_connector *connector = &nv_connector->base;
+@@ -1831,6 +1831,7 @@ int nv_drm_connector_update_topology_property(struct nv_drm_connector *nv_connec
+                                             topology,
+                                             &connector->base,
+                                             nv_dev->nv_hdcp_topology_property);
++
+     // Generate uevent on cp property when topology is updated
+ #if defined(NV_DRM_SYSFS_CONNECTOR_PROPERTY_EVENT_PRESENT)
+     drm_sysfs_connector_property_event(connector,
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.h b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+index 0fed387c..9b0ad46f 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+@@ -62,7 +62,6 @@ struct nv_drm_connector {
+     size_t edid_size;
+ 
+     enum NvKmsContentProtection cp;
+-    bool cp_event_pending;
+ 
+     atomic_t connection_status_dirty;
+ 
+@@ -164,8 +163,8 @@ bool nv_drm_connector_revoke_permissions(struct drm_device *dev,
+                                          struct nv_drm_connector *nv_connector);
+ void nv_drm_connector_update_link_status(struct drm_connector *connector);
+ void nv_drm_connector_update_content_protection(struct nv_drm_connector *nv_connector);
+-int nv_drm_connector_update_topology_property(struct nv_drm_connector *nv_connector,
+-                                              const void *topology);
++int nv_drm_connector_update_topology_property(
++    struct nv_drm_connector *nv_connector, const void *topology);
+ 
+ bool nv_drm_connector_get_native_mode(struct nv_drm_connector *nv_connector,
+                                       int vrefresh,
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index d7f6a075..0afe5d52 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -185,8 +185,7 @@ static void nv_drm_event_callback(const struct NvKmsKapiEvent *event)
+         case NVKMS_EVENT_TYPE_DPY_CP_TOPOLOGY_CHANGED:
+             nv_drm_handle_display_cp_topology_change(
+                 nv_dev,
+-                event->u.displayCpTopologyChanged.display,
+-                event->u.displayCpTopologyChanged.topology);
++                event->u.displayCpTopologyChanged.display);
+             break;
+ 
+         case NVKMS_EVENT_TYPE_DYNAMIC_DPY_CONNECTED:
+@@ -329,7 +328,6 @@ static void nv_drm_sort_dynamic_displays_by_dp_addr
+     sort(infos, nDynamicDisplays, sizeof(*infos), nv_drm_disp_cmp, NULL);
+ }
+ 
+-
+ /*
+  * Helper function to initialize drm_device::mode_config from
+  * NvKmsKapiDevice's resource information.
+@@ -859,33 +857,105 @@ static void nv_drm_handle_hotplug_event(struct work_struct *work)
+     drm_kms_helper_hotplug_event(nv_dev->dev);
+ }
+ 
+-static void nv_drm_handle_content_protection_event_work(struct work_struct *work)
++/*
++ * Publish every recorded display event.  The topology read runs with no DRM
++ * lock held: the kapi call takes the global NVKMS lock, and nothing else in
++ * the driver takes a modeset lock while holding it.  The publication itself
++ * runs under the modeset locks, because the content protection property,
++ * nv_connector->cp and the connector status flag all belong to them.
++ */
++static void nv_drm_publish_display_events(struct nv_drm_device *nv_dev)
++{
++    struct drm_device *dev = nv_dev->dev;
++    struct nv_drm_display_event pending[NVKMS_KAPI_MAX_CONNECTORS];
++    unsigned int num_pending;
++    unsigned int i;
++    NvBool hotplug = FALSE;
++
++    /*
++     * Take the whole set under the lock and clear it before releasing.  An
++     * event arriving from here on gets a fresh slot and its own run of the
++     * work, so nothing recorded during this pass is lost.
++     */
++    spin_lock(&nv_dev->display_event_lock);
++    num_pending = nv_dev->num_display_events;
++    memcpy(pending, nv_dev->display_events,
++           num_pending * sizeof(pending[0]));
++    nv_dev->num_display_events = 0;
++    spin_unlock(&nv_dev->display_event_lock);
++
++    for (i = 0; i < num_pending; i++) {
++        u8 *topology = nv_dev->hdcp_topology;
++        NvBool valid = FALSE;
++        NvBool read_ok = FALSE;
++
++        /*
++         * A new MST display needs its encoder before the updates below can
++         * find it.  nv_drm_add_encoder() takes mode_config.mutex itself.
++         */
++        if (pending[i].dynamic_connected &&
++            nv_drm_handle_dynamic_display_connect_update(nv_dev,
++                                                         pending[i].display)) {
++            hotplug = TRUE;
++        }
++
++        if (pending[i].topology_changed) {
++            /*
++             * NVKMS fills the buffer with no DRM lock held and keeps no
++             * pointer to it; the property copies the bytes out before this
++             * slot is reused by the next iteration.  valid is FALSE when
++             * the topology was cleared: the buffer is zeroed and RM is not
++             * queried, because its state is in flux at that moment.
++             */
++            read_ok = nvKms->getHdcpTopology(nv_dev->pDevice,
++                                             pending[i].display, topology,
++                                             &valid);
++
++            if (!read_ok) {
++                NV_DRM_DEV_LOG_ERR(nv_dev,
++                                   "Failed to read HDCP topology for display "
++                                   "%d", pending[i].display);
++            }
++        }
++
++        mutex_lock(&dev->mode_config.mutex);
++        drm_modeset_lock(&dev->mode_config.connection_mutex, NULL);
++
++        if (pending[i].cp_changed) {
++            nv_drm_handle_display_cp_update(nv_dev, pending[i].display,
++                                            pending[i].cp);
++        }
++
++        if (read_ok) {
++            nv_drm_handle_display_cp_topology_update(nv_dev,
++                                                     pending[i].display,
++                                                     topology);
++        }
++
++        if (pending[i].connection_changed) {
++            nv_drm_handle_display_connection_update(nv_dev,
++                                                    pending[i].display);
++            hotplug = TRUE;
++        }
++
++        drm_modeset_unlock(&dev->mode_config.connection_mutex);
++        mutex_unlock(&dev->mode_config.mutex);
++    }
++
++    if (hotplug) {
++        queue_delayed_work(nv_drm_percpu_wq, &nv_dev->hotplug_event_work, 0);
++    }
++}
++
++static void nv_drm_handle_cp_event_work(struct work_struct *work)
+ {
+     struct delayed_work *dwork = to_delayed_work(work);
+     struct nv_drm_device *nv_dev =
+         container_of(dwork, struct nv_drm_device,
+                      content_protection_event_work);
+-    struct drm_device *dev = nv_dev->dev;
+-    struct drm_connector *connector;
+-    struct drm_connector_list_iter conn_iter;
+ 
+-    mutex_lock(&dev->mode_config.mutex);
+-    drm_modeset_lock(&dev->mode_config.connection_mutex, NULL);
++    nv_drm_publish_display_events(nv_dev);
+ 
+-    drm_connector_list_iter_begin(dev, &conn_iter);
+-
+-    drm_for_each_connector_iter(connector, &conn_iter) {
+-        struct nv_drm_connector *nv_connector = to_nv_connector(connector);
+-        if (nv_connector->cp_event_pending) {
+-            nv_connector->cp_event_pending = false;
+-            nv_drm_connector_update_content_protection(nv_connector);
+-        }
+-    }
+-
+-    drm_connector_list_iter_end(&conn_iter);
+-
+-    drm_modeset_unlock(&dev->mode_config.connection_mutex);
+-    mutex_unlock(&dev->mode_config.mutex);
+ }
+ 
+ static int nv_drm_dev_load(struct drm_device *dev)
+@@ -1088,7 +1158,8 @@ static int nv_drm_dev_load(struct drm_device *dev)
+ 
+     INIT_DELAYED_WORK(&nv_dev->hotplug_event_work, nv_drm_handle_hotplug_event);
+     INIT_DELAYED_WORK(&nv_dev->content_protection_event_work,
+-                      nv_drm_handle_content_protection_event_work);
++                      nv_drm_handle_cp_event_work);
++    spin_lock_init(&nv_dev->display_event_lock);
+     atomic_set(&nv_dev->enable_event_handling, true);
+ 
+     init_waitqueue_head(&nv_dev->flip_event_wq);
+@@ -1132,11 +1203,14 @@ static void nv_drm_dev_unload(struct drm_device *dev)
+      * can see enable_event_handling=true and call schedule_delayed_work() after
+      * the cancel calls below return.  Neither worker takes nv_dev->lock, so
+      * cancel_delayed_work_sync() cannot deadlock here.
++     *
++     * The display event work queues hotplug_event_work, so cancel it first;
++     * otherwise it could requeue the hotplug work after that was cancelled.
+      */
+ 
+     atomic_set(&nv_dev->enable_event_handling, false);
+-    cancel_delayed_work_sync(&nv_dev->hotplug_event_work);
+     cancel_delayed_work_sync(&nv_dev->content_protection_event_work);
++    cancel_delayed_work_sync(&nv_dev->hotplug_event_work);
+     nv_drm_fence_deadline_fini(nv_dev);
+ 
+     /* Clean up output polling */
+@@ -2278,7 +2352,6 @@ static struct drm_driver nv_drm_driver = {
+ #endif
+ };
+ 
+-
+ /*
+  * Update the global nv_drm_driver for the intended features.
+  *
+@@ -2304,8 +2377,6 @@ void nv_drm_update_drm_driver_features(void)
+ #endif /* NV_DRM_DRIVER_HAS_DUMB_DESTROY */
+ }
+ 
+-
+-
+ #if defined(NV_DRM_DRM_MANAGED_H_PRESENT)
+ /*
+  * nv_drm_device is used by DRM files, GEM objects and fences that can outlive
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-encoder.c b/kernel-open/nvidia-drm/nvidia-drm-encoder.c
+index bc269a03..1af48820 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-encoder.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-encoder.c
+@@ -402,73 +402,189 @@ get_nv_encoder_from_nvkms_display(struct drm_device *dev,
+     return NULL;
+ }
+ 
++static void nv_drm_record_event(struct nv_drm_device *nv_dev,
++                                NvKmsKapiDisplay hDisplay,
++                                enum NvKmsContentProtection cp,
++                                unsigned int events);
++
+ void nv_drm_handle_display_change(struct nv_drm_device *nv_dev,
+                                   NvKmsKapiDisplay hDisplay)
+ {
+-    struct drm_device *dev = nv_dev->dev;
+-    struct nv_drm_encoder *nv_encoder = NULL;
++    /*
++     * Resolving the display walks the encoder list, which belongs to
++     * mode_config.mutex; the event thread must not wait for it, so the
++     * lookup moves to the work along with the marking.
++     */
++    nv_drm_record_event(nv_dev, hDisplay, NVKMS_CONTENT_PROTECTION_OFF,
++                        NV_DRM_EVENT_CONNECTION);
++}
+ 
+-    mutex_lock(&dev->mode_config.mutex);
++void nv_drm_handle_display_connection_update(struct nv_drm_device *nv_dev,
++                                             NvKmsKapiDisplay hDisplay)
++{
++    struct drm_device *dev = nv_dev->dev;
++    struct nv_drm_encoder *nv_encoder;
+ 
+     nv_encoder = get_nv_encoder_from_nvkms_display(dev, hDisplay);
+-
+-    mutex_unlock(&dev->mode_config.mutex);
+-
+     if (nv_encoder == NULL) {
+         return;
+     }
+ 
+-    nv_drm_connector_mark_connection_status_dirty(nv_encoder->nv_connector);
++    if (nv_encoder->nv_connector == NULL) {
++        return;
++    }
+ 
+-    queue_delayed_work(nv_drm_percpu_wq, &nv_dev->hotplug_event_work, 0);
++    nv_drm_connector_mark_connection_status_dirty(nv_encoder->nv_connector);
++}
++
++/*
++ * Record what changed for hDisplay.  The event thread owns no connector
++ * state and must not wait for the modeset locks, so this only fills the slot
++ * and queues the work; the work resolves the display and publishes.  If the
++ * display is already recorded, its slot is updated: the newest cp value wins
++ * and the flags accumulate.
++ *
++ * cp is only stored when NV_DRM_EVENT_CP_STATE is set; the other callers
++ * pass NVKMS_CONTENT_PROTECTION_OFF and the value is unused.
++ */
++static void nv_drm_record_event(struct nv_drm_device *nv_dev,
++                                NvKmsKapiDisplay hDisplay,
++                                enum NvKmsContentProtection cp,
++                                unsigned int events)
++{
++    struct nv_drm_display_event *pending = NULL;
++    unsigned int i;
++
++    spin_lock(&nv_dev->display_event_lock);
++
++    for (i = 0; i < nv_dev->num_display_events; i++) {
++        if (nv_dev->display_events[i].display == hDisplay) {
++            pending = &nv_dev->display_events[i];
++            break;
++        }
++    }
++
++    if (pending == NULL &&
++        nv_dev->num_display_events < NVKMS_KAPI_MAX_CONNECTORS) {
++        pending = &nv_dev->display_events[nv_dev->num_display_events++];
++        pending->display = hDisplay;
++        pending->cp_changed = FALSE;
++        pending->topology_changed = FALSE;
++        pending->connection_changed = FALSE;
++        pending->dynamic_connected = FALSE;
++    }
++
++    if (pending == NULL) {
++        NV_DRM_DEV_LOG_ERR(nv_dev,
++                           "Dropped display event for display %d", hDisplay);
++        spin_unlock(&nv_dev->display_event_lock);
++        return;
++    }
++
++    if (events & NV_DRM_EVENT_CP_STATE) {
++        pending->cp = cp;
++        pending->cp_changed = TRUE;
++    }
++
++    if (events & NV_DRM_EVENT_TOPOLOGY) {
++        pending->topology_changed = TRUE;
++    }
++
++    if (events & NV_DRM_EVENT_CONNECTION) {
++        pending->connection_changed = TRUE;
++    }
++
++    if (events & NV_DRM_EVENT_DYNAMIC_CONNECTED) {
++        pending->dynamic_connected = TRUE;
++    }
++
++    spin_unlock(&nv_dev->display_event_lock);
++
++    queue_delayed_work(nv_drm_percpu_wq,
++                       &nv_dev->content_protection_event_work, 0);
+ }
+ 
+ void nv_drm_handle_display_cp_change(struct nv_drm_device *nv_dev,
+                                      NvKmsKapiDisplay hDisplay,
+                                      enum NvKmsContentProtection cp)
+ {
+-    struct drm_device *dev = nv_dev->dev;
+-    struct nv_drm_encoder *nv_encoder = NULL;
++    nv_drm_record_event(nv_dev, hDisplay, cp, NV_DRM_EVENT_CP_STATE);
++}
++
++void nv_drm_handle_display_cp_update(struct nv_drm_device *nv_dev,
++                                     NvKmsKapiDisplay hDisplay,
++                                     enum NvKmsContentProtection cp)
++{
++    struct drm_device *dev = nv_dev->dev;
++    struct nv_drm_encoder *nv_encoder;
+ 
+-    mutex_lock(&dev->mode_config.mutex);
+     nv_encoder = get_nv_encoder_from_nvkms_display(dev, hDisplay);
+     if (nv_encoder == NULL) {
+-        mutex_unlock(&dev->mode_config.mutex);
++        NV_DRM_DEV_LOG_ERR(nv_dev,
++                           "Encoder not found for display %d", hDisplay);
+         return;
+     }
+ 
+     /*
+-     * Defer the DRM content protection update to a workqueue so that it
+-     * doesn't block flip events while waiting for dev->mode_config.connection_mutex.
++     * nv_drm_connector_update_content_protection() reads this field and
++     * requires mode_config.mutex for it, which is held here.
+      */
++    if (nv_encoder->nv_connector == NULL) {
++        return;
++    }
++
+     nv_encoder->nv_connector->cp = cp;
+-    nv_encoder->nv_connector->cp_event_pending = true;
+-    mutex_unlock(&dev->mode_config.mutex);
+-    queue_delayed_work(nv_drm_percpu_wq, &nv_dev->content_protection_event_work, 0);
++    nv_drm_connector_update_content_protection(nv_encoder->nv_connector);
+ }
+ 
+ void nv_drm_handle_display_cp_topology_change(struct nv_drm_device *nv_dev,
++                                              NvKmsKapiDisplay hDisplay)
++{
++    nv_drm_record_event(nv_dev, hDisplay, NVKMS_CONTENT_PROTECTION_OFF,
++                        NV_DRM_EVENT_TOPOLOGY);
++}
++
++void nv_drm_handle_display_cp_topology_update(struct nv_drm_device *nv_dev,
+                                               NvKmsKapiDisplay hDisplay,
+                                               const void *topology)
+ {
+     struct drm_device *dev = nv_dev->dev;
+-    struct nv_drm_encoder *nv_encoder = NULL;
+-
+-    mutex_lock(&dev->mode_config.mutex);
++    struct nv_drm_encoder *nv_encoder;
+ 
+     nv_encoder = get_nv_encoder_from_nvkms_display(dev, hDisplay);
+     if (nv_encoder == NULL) {
+-        NV_DRM_DEV_LOG_ERR(nv_dev, "Encoder not found for display %d", hDisplay);
+-        goto out;
++        NV_DRM_DEV_LOG_ERR(nv_dev,
++                           "Encoder not found for display %d", hDisplay);
++        return;
+     }
+-    nv_drm_connector_update_topology_property(nv_encoder->nv_connector, topology);
+ 
+-out:
+-    mutex_unlock(&dev->mode_config.mutex);
++    if (nv_encoder->nv_connector == NULL) {
++        return;
++    }
++
++    nv_drm_connector_update_topology_property(nv_encoder->nv_connector,
++                                              topology);
+ }
+ 
+ void nv_drm_handle_dynamic_display_connected(struct nv_drm_device *nv_dev,
+                                              NvKmsKapiDisplay hDisplay)
++{
++    /*
++     * Adding the encoder takes mode_config.mutex, which the event thread
++     * must not wait for; the work adds it before publishing anything else
++     * recorded for the display.
++     */
++    nv_drm_record_event(nv_dev, hDisplay, NVKMS_CONTENT_PROTECTION_OFF,
++                        NV_DRM_EVENT_DYNAMIC_CONNECTED);
++}
++
++/*
++ * Called from the display event work with no DRM lock held:
++ * nv_drm_add_encoder() takes mode_config.mutex itself.  Returns true if an
++ * encoder was added and a hotplug event should be sent.
++ */
++bool nv_drm_handle_dynamic_display_connect_update(struct nv_drm_device *nv_dev,
++                                                  NvKmsKapiDisplay hDisplay)
+ {
+     struct drm_device *dev = nv_dev->dev;
+ 
+@@ -477,17 +593,20 @@ void nv_drm_handle_dynamic_display_connected(struct nv_drm_device *nv_dev,
+ 
+     /*
+      * Look for an existing encoder with the same hDisplay and
+-     * use it if available.
++     * use it if available.  Only this work adds encoders after load, so
++     * the result stays valid after the lock is dropped.
+      */
+ 
++    mutex_lock(&dev->mode_config.mutex);
+     nv_encoder = get_nv_encoder_from_nvkms_display(dev, hDisplay);
++    mutex_unlock(&dev->mode_config.mutex);
+ 
+     if (nv_encoder != NULL) {
+         NV_DRM_DEV_LOG_INFO(
+             nv_dev,
+             "Encoder with NvKmsKapiDisplay 0x%08x already exists.",
+             hDisplay);
+-        return;
++        return false;
+     }
+ 
+     encoder = nv_drm_add_encoder(dev, hDisplay);
+@@ -497,9 +616,9 @@ void nv_drm_handle_dynamic_display_connected(struct nv_drm_device *nv_dev,
+             nv_dev,
+             "Failed to add encoder for NvKmsKapiDisplay 0x%08x",
+             hDisplay);
+-        return;
++        return false;
+     }
+ 
+-    queue_delayed_work(nv_drm_percpu_wq, &nv_dev->hotplug_event_work, 0);
++    return true;
+ }
+ #endif
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-encoder.h b/kernel-open/nvidia-drm/nvidia-drm-encoder.h
+index c572a116..e607909d 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-encoder.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-encoder.h
+@@ -61,12 +61,25 @@ void nv_drm_handle_display_cp_change(struct nv_drm_device *nv_dev,
+                                      enum NvKmsContentProtection cp);
+ 
+ void nv_drm_handle_display_cp_topology_change(struct nv_drm_device *nv_dev,
++                                              NvKmsKapiDisplay hDisplay);
++
++void nv_drm_handle_display_connection_update(struct nv_drm_device *nv_dev,
++                                             NvKmsKapiDisplay hDisplay);
++
++void nv_drm_handle_display_cp_update(struct nv_drm_device *nv_dev,
++                                     NvKmsKapiDisplay hDisplay,
++                                     enum NvKmsContentProtection cp);
++
++void nv_drm_handle_display_cp_topology_update(struct nv_drm_device *nv_dev,
+                                               NvKmsKapiDisplay hDisplay,
+                                               const void *topology);
+ 
+ void nv_drm_handle_dynamic_display_connected(struct nv_drm_device *nv_dev,
+                                              NvKmsKapiDisplay hDisplay);
+ 
++bool nv_drm_handle_dynamic_display_connect_update(struct nv_drm_device *nv_dev,
++                                                  NvKmsKapiDisplay hDisplay);
++
+ #endif /* NV_DRM_AVAILABLE */
+ 
+ #endif /* __NVIDIA_DRM_ENCODER_H__ */
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-priv.h b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+index d16394ea..9ec8157a 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-priv.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+@@ -193,6 +193,25 @@ struct nv_drm_deadline_slot {
+ };
+ #endif
+ 
++/*
++ * What changed for a display, recorded by the event thread.  The event
++ * thread only fills this in; the connector fields themselves are written by
++ * the work, under the modeset locks whose readers document that contract.
++ */
++struct nv_drm_display_event {
++    NvKmsKapiDisplay display;
++    enum NvKmsContentProtection cp;
++    NvBool cp_changed;
++    NvBool topology_changed;
++    NvBool connection_changed;
++    NvBool dynamic_connected;
++};
++
++#define NV_DRM_EVENT_CP_STATE      (1u << 0)
++#define NV_DRM_EVENT_TOPOLOGY      (1u << 1)
++#define NV_DRM_EVENT_CONNECTION    (1u << 2)
++#define NV_DRM_EVENT_DYNAMIC_CONNECTED (1u << 3)
++
+ struct nv_drm_device {
+     nv_gpu_info_t gpu_info;
+     MIGDeviceId gpu_mig_device;
+@@ -250,6 +269,24 @@ struct nv_drm_device {
+     struct delayed_work held_fbs_work;
+     atomic_t enable_event_handling;
+ 
++    /*
++     * Displays with a pending event: the event thread records them here,
++     * nv_drm_publish_display_events() drains the set.  One slot per
++     * connector is enough because a display is recorded at most once, and a
++     * later event for the same display updates its slot.
++     */
++    spinlock_t display_event_lock;
++    unsigned int num_display_events;
++    struct nv_drm_display_event display_events[NVKMS_KAPI_MAX_CONNECTORS];
++
++    /*
++     * Scratch buffer for the HDCP topology read in
++     * nv_drm_publish_display_events().  Only that work uses it, and a work
++     * item never runs concurrently with itself, so no lock is needed; it
++     * lives here because it is too large for the kernel stack.
++     */
++    u8 hdcp_topology[NVKMS_HDCP_TOPOLOGY_SIZE];
++
+     /**
+      * @flip_event_wq:
+      *
+diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
+index 7a0d2778..308de274 100644
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -1707,7 +1707,12 @@ typedef struct _NVConnectorEvoRec {
+ 
+     NvEldCase audioDevEldCase[NV_MAX_AUDIO_DEVICE_ENTRIES];
+ 
+-    NvU8 cpTopology[NVKMS_HDCP_TOPOLOGY_SIZE];
++    /*
++     * Whether the HDCP topology may be read from RM right now.  Sending the
++     * topology event with clear set means HDCP is off or being restarted,
++     * and RM must not be queried while its state is in flux.
++     */
++    NvBool cpTopologyValid;
+ 
+     NvBool isHdmiEnabled;
+ } NVConnectorEvoRec;
+diff --git a/src/nvidia-modeset/interface/nvkms-api.h b/src/nvidia-modeset/interface/nvkms-api.h
+index 62a26a07..be39d180 100644
+--- a/src/nvidia-modeset/interface/nvkms-api.h
++++ b/src/nvidia-modeset/interface/nvkms-api.h
+@@ -273,6 +273,7 @@ enum NvKmsIoctlCommand {
+     NVKMS_IOCTL_GET_NEXT_EVENTS,
+     NVKMS_IOCTL_MST_I2C_TRANSFER,
+     NVKMS_IOCTL_QUERY_HEAD_RASTER,
++    NVKMS_IOCTL_GET_HDCP_TOPOLOGY,
+ };
+ 
+ 
+@@ -2980,6 +2981,37 @@ struct NvKmsGetDpyAttributeParams {
+     struct NvKmsGetDpyAttributeReply reply;     /*! out */
+ };
+ 
++struct NvKmsGetHdcpTopologyRequest {
++    NvKmsDeviceHandle deviceHandle;
++    NvKmsDispHandle dispHandle;
++    NVDpyId dpyId;
++};
++
++struct NvKmsGetHdcpTopologyReply {
++    /*
++     * Destination for NVKMS_HDCP_TOPOLOGY_SIZE bytes.  The caller owns the
++     * buffer and keeps it alive for the duration of the call; NVKMS writes
++     * the bytes into it and keeps no pointer.
++     *
++     * Only the kernel client can set this: for a user space client the
++     * dispatcher zeroes the reply area and copies in the request area
++     * only, so the pointer is NULL there and GetHdcpTopology() refuses.
++     */
++    void *topology;
++
++    /*
++     * NV_FALSE when the topology was cleared: HDCP is off or being
++     * restarted, RM is not queried and the buffer is returned zeroed.
++     * That is a state of the display, not a failure of the call.
++     */
++    NvBool valid;
++};
++
++struct NvKmsGetHdcpTopologyParams {
++    struct NvKmsGetHdcpTopologyRequest request; /*! in */
++    struct NvKmsGetHdcpTopologyReply reply;     /*! out */
++};
++
+ 
+ struct NvKmsAttributeValidValuesCommonReply {
+     NvBool readable;
+@@ -3346,6 +3378,12 @@ struct NvKmsEventDpyCpChanged {
+ struct NvKmsEventDpyCpTopologyChanged  {
+     NvKmsDeviceHandle deviceHandle;
+     NVDpyId dpyId;
++    /*
++     * Unused: the client reads the topology with
++     * NVKMS_IOCTL_GET_HDCP_TOPOLOGY instead.  Kept because it is the
++     * largest member of struct NvKmsEvent, whose size sets the stride of
++     * the GET_NEXT_EVENTS reply array shared with user space clients.
++     */
+     const void *topology;
+ };
+ 
+diff --git a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+index ff191234..ef9e7f25 100644
+--- a/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
++++ b/src/nvidia-modeset/kapi/interface/nvkms-kapi.h
+@@ -534,7 +534,6 @@ struct NvKmsKapiEventDisplayCpChanged {
+ 
+ struct NvKmsKapiEventDisplayCpTopologyChanged {
+     NvKmsKapiDisplay display;
+-    const void *topology;
+ };
+ 
+ struct NvKmsKapiEventDynamicDisplayConnected {
+@@ -971,6 +970,28 @@ struct NvKmsKapiFunctionsTable {
+         struct NvKmsKapiDynamicDisplayParams *params
+     );
+ 
++    /*!
++     * Read the HDCP topology of the specified display.
++     *
++     * \param [in]  device    A device allocated using allocateDevice().
++     *
++     * \param [in]  display   A display handle from getDisplays().
++     *
++     * \param [out] topology  Buffer of NVKMS_HDCP_TOPOLOGY_SIZE bytes.
++     *
++     * \param [out] valid     NV_FALSE when the topology was cleared and
++     *                        the buffer is zeroed; NULL may be passed.
++     *
++     * \return NV_TRUE on success, NV_FALSE otherwise.
++     */
++    NvBool (*getHdcpTopology)
++    (
++        struct NvKmsKapiDevice *device,
++        NvKmsKapiDisplay display,
++        void *topology,
++        NvBool *valid
++    );
++
+     /*!
+      * Allocate some unformatted video or system memory of the specified size.
+      *
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index 6e11ee84..9056eb7c 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -3785,6 +3785,35 @@ static void SetContentType(
+     }
+ }
+ 
++static NvBool GetHdcpTopology(struct NvKmsKapiDevice *device,
++                              NvKmsKapiDisplay display,
++                              void *topology,
++                              NvBool *valid)
++{
++    struct NvKmsGetHdcpTopologyParams params = { };
++
++    if (device == NULL || topology == NULL) {
++        return NV_FALSE;
++    }
++
++    params.request.deviceHandle = device->hKmsDevice;
++    params.request.dispHandle = device->hKmsDisp;
++    params.request.dpyId = nvNvU32ToDpyId(display);
++    params.reply.topology = topology;
++
++    if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
++                               NVKMS_IOCTL_GET_HDCP_TOPOLOGY,
++                               &params, sizeof(params))) {
++        return NV_FALSE;
++    }
++
++    if (valid != NULL) {
++        *valid = params.reply.valid;
++    }
++
++    return NV_TRUE;
++}
++
+ static NvBool GetDisplayAttribute(
+     struct NvKmsKapiDevice *device,
+     NvKmsKapiDisplay display,
+@@ -4406,8 +4435,6 @@ static void DispatchKmsEvent
+         case NVKMS_EVENT_TYPE_DPY_CP_TOPOLOGY_CHANGED:
+             kapiEvent.u.displayCpTopologyChanged.display =
+                 nvDpyIdToNvU32(pEvent->u.dpyCpTopologyChanged.dpyId);
+-            kapiEvent.u.displayCpTopologyChanged.topology =
+-                pEvent->u.dpyCpTopologyChanged.topology;
+             break;
+         case NVKMS_EVENT_TYPE_DYNAMIC_DPY_CONNECTED:
+             kapiEvent.u.dynamicDisplayConnected.display =
+@@ -4785,6 +4812,7 @@ NvBool nvKmsKapiGetFunctionsTableInternal
+ 
+     funcsTable->getStaticDisplayInfo   = GetStaticDisplayInfo;
+     funcsTable->getDynamicDisplayInfo  = GetDynamicDisplayInfo;
++    funcsTable->getHdcpTopology        = GetHdcpTopology;
+ 
+     funcsTable->allocateMemory       = AllocateMemory;
+     funcsTable->importMemory         = ImportMemory;
+diff --git a/src/nvidia-modeset/src/nvkms.c b/src/nvidia-modeset/src/nvkms.c
+index 5ce26da8..3c65f1c9 100644
+--- a/src/nvidia-modeset/src/nvkms.c
++++ b/src/nvidia-modeset/src/nvkms.c
+@@ -3067,6 +3067,51 @@ static NvBool GetDpyAttributeValidValues(struct NvKmsPerOpen *pOpen,
+ }
+ 
+ 
++/*!
++ * Read the HDCP topology of the specified display.
++ *
++ * The client asks for the data when it is ready for it; the topology event
++ * only reports that it changed.
++ */
++static NvBool GetHdcpTopology(struct NvKmsPerOpen *pOpen, void *pParamsVoid)
++{
++    struct NvKmsGetHdcpTopologyParams *pParams = pParamsVoid;
++    NVDpyEvoPtr pDpyEvo;
++
++    /*
++     * Writing through a caller supplied pointer is only safe for the kernel
++     * client.  A user space open cannot supply the pointer at all, but the
++     * type check is what the reader should see first.
++     */
++    if (pOpen->clientType != NVKMS_CLIENT_KERNEL_SPACE ||
++        pParams->reply.topology == NULL) {
++        return FALSE;
++    }
++
++    pDpyEvo = GetPerOpenDpy(pOpen, pParams->request.deviceHandle,
++                            pParams->request.dpyId);
++    if (pDpyEvo == NULL) {
++        return FALSE;
++    }
++
++    if (pDpyEvo->pConnectorEvo == NULL) {
++        return FALSE;
++    }
++
++    if (!pDpyEvo->pConnectorEvo->cpTopologyValid) {
++        nvkms_memset(pParams->reply.topology, 0, NVKMS_HDCP_TOPOLOGY_SIZE);
++        pParams->reply.valid = FALSE;
++        return TRUE;
++    }
++
++    nvGetContentProtectionTopology(pDpyEvo->pConnectorEvo,
++                                   pParams->reply.topology);
++    pParams->reply.valid = TRUE;
++
++    return TRUE;
++}
++
++
+ /*!
+  * Set the value of the specified attribute.
+  */
+@@ -5125,6 +5170,7 @@ NvBool nvKmsIoctl(
+         ENTRY(NVKMS_IOCTL_GET_DPY_ATTRIBUTE, GetDpyAttribute),
+         ENTRY(NVKMS_IOCTL_GET_DPY_ATTRIBUTE_VALID_VALUES,
+               GetDpyAttributeValidValues),
++        ENTRY(NVKMS_IOCTL_GET_HDCP_TOPOLOGY, GetHdcpTopology),
+         ENTRY(NVKMS_IOCTL_SET_DISP_ATTRIBUTE, SetDispAttribute),
+         ENTRY(NVKMS_IOCTL_GET_DISP_ATTRIBUTE, GetDispAttribute),
+         ENTRY(NVKMS_IOCTL_GET_DISP_ATTRIBUTE_VALID_VALUES,
+@@ -6585,12 +6631,7 @@ static void SendDpyEventEvo(const NVDpyEvoRec *pDpyEvo,
+         case NVKMS_EVENT_TYPE_DPY_CP_TOPOLOGY_CHANGED:
+             event.u.dpyCpTopologyChanged.deviceHandle = deviceHandle;
+             event.u.dpyCpTopologyChanged.dpyId = pDpyEvo->id;
+-            event.u.dpyCpTopologyChanged.topology = (const void*)(pDpyEvo->pConnectorEvo->cpTopology);
+-            if (clear) {
+-                nvkms_memset(pDpyEvo->pConnectorEvo->cpTopology, 0, NVKMS_HDCP_TOPOLOGY_SIZE);
+-            } else {
+-                nvGetContentProtectionTopology(pDpyEvo->pConnectorEvo, pDpyEvo->pConnectorEvo->cpTopology);
+-            }
++            pDpyEvo->pConnectorEvo->cpTopologyValid = !clear;
+             break;
+ 
+         case NVKMS_EVENT_TYPE_DYNAMIC_DPY_CONNECTED:
