@@ -1,7 +1,7 @@
 # Read-only RM API lock (`RmRoApiLock`)
 
-- **Status:** registry key under test on 620.70.06 with the series; no
-  results yet
+- **Status:** registry key in use on 620.70.06 with the series since
+  2026-11-12; no regressions observed so far (see Results)
 - **Source:** NVIDIA's answer in egl-wayland issue [#164][egl-164]
   ([comment][egl-164-c]), which recommends
   `NVreg_RegistryDwords=RmRoApiLock=0x27a` and says that a read-only default
@@ -88,6 +88,23 @@ by NVIDIA):
 Where to look for problems while testing: several clients starting or
 exiting at the same time (a game starting while a browser and OBS run), new
 Xids, rendering errors, hangs.
+
+## Results (620.70.06, kernel 7.3.4)
+
+- The key is active: `/proc/driver/nvidia/params` shows
+  `RegistryDwords: "RmRoApiLock=0x27a"`.
+- Several gaming sessions over multiple boots without Xid, hang or rendering
+  errors. The kernel log of 2026-11-07 to 2026-11-14 holds no Xid at all.
+- The key is active since the boot of 2026-11-12 01:07 (the modprobe option
+  was set on 2026-11-07 22:36, after the boot before). The only RM errors are
+  the known `can't update VA space` triples (`gpu_vaspace.c:4088`): 35 before
+  the key (boot of 2026-11-07), 2 with the key (boot of 2026-11-12 01:07: 0,
+  boot of 2026-11-12 20:55: 2, boot of 2026-11-14: 0), the same signature as
+  before; they come from the user space driver (see
+  [vaspace overlap](2026-10-28-vaspace-overlap.md)) and are not related to the
+  API lock mode.
+- Not measured yet: the latency effect (`tools/trace/nv-pat-latency.bt`) and
+  stalls while several clients start or exit at the same time.
 
 ## Detecting a new default upstream
 
