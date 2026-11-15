@@ -5,7 +5,26 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 620.70.06
 
-Fork branch `ogkm/620.70.06`, 143 patches on the upstream tag `620.70.06`.
+Fork branch `ogkm/620.70.06`, 144 patches on the upstream tag `620.70.06`.
+
+### 2026-11-15: video memory pressure counters (144)
+
+- 144 (own, diagnostic, not meant for upstream): RM and nvidia-drm count
+  the paths that only run when video memory is short, with bytes and the
+  time of the last event, in `/proc/driver/nvidia/vram_pressure`: failed
+  video memory allocations, sysmem retries with smaller pages, failed
+  `NV_ESC_RM_MAP_MEMORY_DMA`/`UNMAP` calls (the "can't update VA space"
+  case), and the GEM fallbacks without compression, to sysmem, failures
+  and back-off refusals. `tools/vram-pressure.py` samples them (PSI-like
+  10/60/300 s averages, CSV recording, burst report). Motivation: Elite
+  Dangerous with a mod ran at 91 to 98 % of its DXGI budget with up to
+  4.4 GB spilled to sysmem, and the stutter at scene changes was only
+  visible with an nv-va-trace.bt round. nvidia-drm.ko now also links
+  against nvidia.ko directly. Built against 7.3.4, installed and booted
+  on 2026-11-15. In the first Elite Dangerous session `dma_map_fail`
+  counted 11 failures, matching the 11 "can't update VA space" lines in
+  the kernel log; `vidmem_alloc_fail` reached 610 and `gem_backoff` 102
+  within 10 minutes at 11.4 of 12 GB video memory in use.
 
 ### 2026-11-13: three patches from Tom Englund's branch (141 to 143)
 

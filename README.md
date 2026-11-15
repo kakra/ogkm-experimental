@@ -44,7 +44,7 @@ risk. No backup, no mercy. ;-)
 | `evidence/` | Raw data per investigation: logs, traces, memory statistics, with the exact steps to capture them |
 | `analysis/` | Summaries and evaluations that tie evidence, code paths and patches together |
 | `docs/` | Workflow, building, test system, patch reviews |
-| `tools/` | Export, check and log sanitizing scripts; `tools/trace/` holds the tracing scripts used for the evidence |
+| `tools/` | Export, check and log sanitizing scripts, `vram-pressure.py` for the counters of patch 144; `tools/trace/` holds the tracing scripts used for the evidence |
 | `HISTORY.md` | What changed in the series per driver release, and why |
 
 ## Using a series
