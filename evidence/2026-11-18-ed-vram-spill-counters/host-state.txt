@@ -1,0 +1,10 @@
+ 00:02:01 up 3 days,  7:05,  1 user,  load average: 2,61, 2,43, 3,76
+7.3.4-gentoo
+NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  620.70.06  Release Build  (portage@localhost)  So 15. Nov 16:41:10 CET 2026
+vm.anon_min_ratio=15
+vm.clean_low_ratio=0
+vm.clean_min_ratio=15
+vm.swappiness=60
+vm.watermark_boost_factor=15000
+vm.watermark_scale_factor=10
+vm.min_free_kbytes=262144

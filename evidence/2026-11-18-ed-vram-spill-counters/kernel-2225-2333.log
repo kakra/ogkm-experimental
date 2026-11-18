@@ -1,0 +1,29 @@
+2026-11-18T23:05:49+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: status != NV_OK @ gpu_vaspace.c:4088
+2026-11-18T23:05:49+01:00 host kernel: NVRM: nvCheckOkFailedNoLog: Check failed: Invalid argument to call [NV_ERR_INVALID_ARGUMENT] (0x0000001F) returned from _gvaspaceMappingInsert(pGVAS, pGpu, pVASBlock, vaLo, vaHi, flags) @ gpu_vaspace.c:1804
+2026-11-18T23:05:49+01:00 host kernel: NVRM: nvCheckFailedNoLog: Check failed: NV_OK == status @ virt_mem_allocator_gm107.c:2481
+2026-11-18T23:05:49+01:00 host kernel: NVRM: dmaAllocMapping_GM107: can't update VA space for mapping @vaddr=0x12ea00000
+2026-11-18T23:32:26+01:00 host kernel: Purging GPU memory, 15850 pages freed, 0 pages still pinned, 11962 pages left available.
+2026-11-18T23:32:27+01:00 host kernel: NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from _memdescAllocInternal(pMemDesc) @ mem_desc.c:1202
+2026-11-18T23:32:27+01:00 host kernel: NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY] (0x00000051) returned from rmStatus @ system_mem.c:601
+2026-11-18T23:32:27+01:00 host kernel: Purging GPU memory, 11899 pages freed, 0 pages still pinned, 13929 pages left available.
+2026-11-18T23:32:27+01:00 host kernel: Purging GPU memory, 0 pages freed, 0 pages still pinned, 13929 pages left available.
+2026-11-18T23:32:27+01:00 host kernel: chrome invoked oom-killer: gfp_mask=0x140dca(GFP_HIGHUSER_MOVABLE|__GFP_ZERO|__GFP_COMP), order=0, oom_score_adj=300
+2026-11-18T23:32:27+01:00 host kernel:  oom_kill_process.cold+0x8/0x8e
+2026-11-18T23:32:27+01:00 host kernel: Mem-Info:
+2026-11-18T23:32:27+01:00 host kernel: Normal free:351852kB boost:131072kB min:380896kB low:443352kB high:505808kB reserved_highatomic:0kB free_highatomic:0kB active_anon:6533044kB inactive_anon:7681608kB active_file:571868kB inactive_file:4098132kB unevictable:1069136kB writepending:6024kB zspages:285428kB present:31711232kB managed:31093020kB mlocked:1051868kB bounce:0kB free_pcp:88196kB local_pcp:900kB free_cma:0kB
+2026-11-18T23:32:27+01:00 host kernel: Free swap  = 25172036kB
+2026-11-18T23:32:27+01:00 host kernel: Total swap = 33554424kB
+2026-11-18T23:32:27+01:00 host kernel: Memory cgroup min protection 2620776kB -- low protection 21225592kB
+2026-11-18T23:32:27+01:00 host kernel: [  pid  ]   uid  tgid total_vm      rss rss_anon rss_file rss_shmem pgtables_bytes swapents oom_score_adj name
+2026-11-18T23:32:27+01:00 host kernel: oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),global_oom,task_memcg=/user.slice/user-1000.slice/user@1000.service/app.slice/app-steam-app359320-2209116.scope,task=EliteDangerous6,pid=2209757,uid=1000
+2026-11-18T23:32:27+01:00 host kernel: Out of memory: Killed process 2209757 (EliteDangerous6) total-vm:15135120kB, anon-rss:4252260kB, file-rss:291168kB, shmem-rss:6142896kB, UID:1000 pgtables:10844kB oom_score_adj:200
+2026-11-18T23:32:27+01:00 host kernel: Purging GPU memory, 0 pages freed, 0 pages still pinned, 13929 pages left available.
+2026-11-18T23:32:27+01:00 host kernel: Purging GPU memory, 1463 pages freed, 0 pages still pinned, 12466 pages left available.
+2026-11-18T23:32:27+01:00 host kernel: Purging GPU memory, 0 pages freed, 0 pages still pinned, 12466 pages left available.
+2026-11-18T23:32:27+01:00 host kernel: Purging GPU memory, 0 pages freed, 0 pages still pinned, 12466 pages left available.
+2026-11-18T23:32:27+01:00 host kernel: Purging GPU memory, 0 pages freed, 0 pages still pinned, 12466 pages left available.
+2026-11-18T23:32:27+01:00 host kernel: Purging GPU memory, 0 pages freed, 0 pages still pinned, 12466 pages left available.
+2026-11-18T23:32:27+01:00 host kernel: Purging GPU memory, 504 pages freed, 0 pages still pinned, 11962 pages left available.
+2026-11-18T23:32:27+01:00 host kernel: Purging GPU memory, 0 pages freed, 0 pages still pinned, 11962 pages left available.
+2026-11-18T23:32:27+01:00 host kernel: Purging GPU memory, 0 pages freed, 0 pages still pinned, 11962 pages left available.
+2026-11-18T23:32:27+01:00 host kernel: Purging GPU memory, 0 pages freed, 0 pages still pinned, 11962 pages left available.
