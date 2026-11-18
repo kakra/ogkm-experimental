@@ -3,6 +3,59 @@
 What changed in the series per driver release, and why. Newest first. Patch
 numbers refer to `patches/<release>/README.md`.
 
+## 620.73.04
+
+Fork branch `ogkm/620.73.04`, 145 patches on the upstream tag `620.73.04`.
+
+### 2026-11-18: move to 620.73.04 (145)
+
+NVIDIA released 620.73.04 with the release notes "Minor bug fixes and
+improvements". The changes in the kernel modules are described in
+[analysis/2026-11-18-620.73.04-upstream-changes.md](analysis/2026-11-18-620.73.04-upstream-changes.md):
+read-only memory hardening in RM, color pipeline, ILUT and TMO fixes in
+nvidia-drm, the HDCP topology blob moved from the connector state to the
+connector, the NVKMS PM lock around direct RM calls from KAPI, and
+nothing in the VA space, mapping or allocation paths.
+
+All 144 patches of 620.70.06 were carried over; none landed upstream
+completely. Changed in the rebase:
+
+- 51 (HDCP topology uevent): uses the connector's HDCP topology blob,
+  which 620.73.04 moved out of the connector state.
+- 52 (Broadcast RGB), 63 (underscan): context only, same move.
+- 54 (fix color pipeline state handling, Tom Englund): the part that
+  marked degamma and TMO changed only when there was something to clear
+  is upstream now in a different form and was dropped. The FMT_CTM blob
+  reference fix and the rejection of a color pipeline together with the
+  CRTC DEGAMMA_LUT or CTM remain.
+- 94 (free nv_drm_device with the last DRM device reference), 141
+  (display events off the NVKMS event thread): context only.
+- 124 (keep the plane ILUT in sync with the CRTC DEGAMMA_LUT, ElXreno,
+  upstream PR [#1506][pr-1506]): 620.73.04 sends the ILUT whenever it was
+  rebuilt, which covers a removed or replaced CRTC DEGAMMA_LUT. The patch
+  keeps only the rebuild when a plane moves onto another CRTC.
+
+Added from Tom Englund's branch `patches`:
+
+- 145: an unmap of a DMA mapping range that is no longer registered is a
+  no-op instead of failing with `NV_ERR_INVALID_OBJECT_HANDLE`. The failed
+  unmap left a server-side inter-mapping node behind, and a later mapping
+  at the same offset failed with "Duplicate inter mapping detected" and
+  `0 == (pMapNode->gpuMask & gpuMask)`. Related to upstream issues
+  [#1364][issue-1364] and [#1453][issue-1453] and to upstream PR
+  [#1483][pr-1483]. From veldenb.
+
+Not added: the two ACPI `_DDC` patches from the same branch (upstream PRs
+[#1545][pr-1545] and [#1546][pr-1546]). They only affect systems with an
+internal panel described by ACPI, which the test system does not have.
+
+Built against Linux 7.3.5 on the test system, installed and booted on
+2026-11-19 at 01:36. The kernel log of that boot has no Xid, no "can't
+update VA space", no "Duplicate inter mapping", no "Unmap of unregistered
+DMA mapping range" and no driver warning or oops; all
+`/proc/driver/nvidia/vram_pressure` counters were 0 five minutes after
+boot. Built and booted, not tested against the problems it fixes.
+
 ## 620.70.06
 
 Fork branch `ogkm/620.70.06`, 144 patches on the upstream tag `620.70.06`.
@@ -488,6 +541,8 @@ no longer logged as errors.
   fragmented, return `-ENOMEM` instead of `-EINVAL`.
 
 [gulafaran-pr-2]: https://github.com/gulafaran/open-gpu-kernel-modules/pull/2
+[issue-1364]: https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1364
+[issue-1453]: https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1453
 [issue-1510]: https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1510
 [issue-1540]: https://github.com/NVIDIA/open-gpu-kernel-modules/issues/1540
 [pr-1278]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1278
@@ -508,3 +563,5 @@ no longer logged as errors.
 [pr-1506]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1506
 [pr-1539]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1539
 [pr-1542]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1542
+[pr-1545]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1545
+[pr-1546]: https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1546
