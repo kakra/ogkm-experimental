@@ -1,4 +1,4 @@
 [submodule "driver"]
 	path = driver
 	url = https://github.com/kakra/open-gpu-kernel-modules.git
-	branch = ogkm/620.70.06
+	branch = ogkm/620.73.04

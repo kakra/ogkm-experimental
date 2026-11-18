@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 9 Nov 2026 17:01:53 +0100
+Subject: [PATCH] nvidia: don't propagate unprovided TGPU/PPMD limits from
+ PSHARESTATUS
+
+When the SBIOS flags a pending system parameter limit update but doesn't
+provide the TGPU or PPMD limit, the update helpers return
+NV_ERR_INVALID_DATA. They no longer assert on it, but the status still
+bubbled up through _pfmreqhndlrCallPshareStatus() and triggered the
+"PshareStatus" assertion in pfmreqhndlrHandleStatusChangeEvent() on every
+SBIOS status change notification. Ignore it like NV_ERR_NOT_SUPPORTED.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../kernel/platform/platform_request_handler_ctrl.c    | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/src/nvidia/src/kernel/platform/platform_request_handler_ctrl.c b/src/nvidia/src/kernel/platform/platform_request_handler_ctrl.c
+index addc3359..fe78bd2e 100644
+--- a/src/nvidia/src/kernel/platform/platform_request_handler_ctrl.c
++++ b/src/nvidia/src/kernel/platform/platform_request_handler_ctrl.c
+@@ -2489,8 +2489,13 @@ _pfmreqhndlrCallPshareStatus
+             _pfmreqhndlrResetCounter(pPfmreqhndlrData, PFM_REQ_HNDLR_LIMIT(PFM_REQ_HNDLR_TGPU_SENSOR), timeStamp);
+             _pfmreqhndlrResetCounter(pPfmreqhndlrData, PFM_REQ_HNDLR_LIMIT(PFM_REQ_HNDLR_PPMD_SENSOR), timeStamp);
+ 
++            //
++            // NV_ERR_INVALID_DATA: the limit is advertised but not provided
++            // right now, which the spec allows; see _pfmreqhndlrUpdatePpmdLimit().
++            //
+             lclStatus = _pfmreqhndlrUpdateTgpuLimit(pPlatformRequestHandler, pGpu);
+-            if ((NV_OK == status) && (NV_ERR_NOT_SUPPORTED != lclStatus))
++            if ((NV_OK == status) && (NV_ERR_NOT_SUPPORTED != lclStatus) &&
++                (NV_ERR_INVALID_DATA != lclStatus))
+             {
+                 status = lclStatus;
+             }
+@@ -2499,7 +2504,8 @@ _pfmreqhndlrCallPshareStatus
+             {
+                 // Run time PPMD update from the system
+                 lclStatus = _pfmreqhndlrUpdatePpmdLimit(pPlatformRequestHandler, pGpu, NV_FALSE);
+-                if ((NV_OK == status) && (NV_ERR_NOT_SUPPORTED != lclStatus))
++                if ((NV_OK == status) && (NV_ERR_NOT_SUPPORTED != lclStatus) &&
++                    (NV_ERR_INVALID_DATA != lclStatus))
+                 {
+                     status = lclStatus;
+                 }

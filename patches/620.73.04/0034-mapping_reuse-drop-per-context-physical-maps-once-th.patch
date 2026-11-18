@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sun, 25 Oct 2026 09:00:09 +0100
+Subject: [PATCH] mapping_reuse: drop per-context physical maps once they are
+ empty
+
+reusemappingdbMap() creates an allocCtxPhysicalMap node for every alloc
+context it sees, even for NO_REUSE and untracked mappings, and nothing removes
+it before reusemappingdbDestruct(). For BAR1 the alloc context is a
+Bar1MappingType that kbusUnmapFbAperture() frees as soon as its last mapping
+goes away, so every dynamic BAR1 mapping type ever created leaves a node
+behind for the lifetime of the BAR1 VA space. It also called
+mapInitIntrusive() on the result of mapInsertNew() before checking it for
+NULL.
+
+Only create the physical map when an entry is going to be tracked, and remove
+it when its last entry is unmapped or when the map call fails before
+inserting anything.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../libraries/mapping_reuse/mapping_reuse.c   | 39 ++++++++++++++-----
+ 1 file changed, 30 insertions(+), 9 deletions(-)
+
+diff --git a/src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c b/src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c
+index dc6729b4..8295c7fe 100644
+--- a/src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c
++++ b/src/nvidia/src/libraries/mapping_reuse/mapping_reuse.c
+@@ -72,6 +72,25 @@ reusemappingdbDestruct
+     portMemSet(pReuseMappingDb, 0, sizeof(*pReuseMappingDb));
+ }
+ 
++//
++// Physical maps are created per alloc context on demand. Drop one once its last
++// entry is gone, otherwise every alloc context that was ever mapped keeps a node
++// in allocCtxPhysicalMap until the database is destroyed.
++//
++static void
++_reusemappingdbPutPhysicalMap
++(
++    ReuseMappingDb *pReuseMappingDb,
++    ReuseMappingDbPhysicalMap *pPhysicalMap
++)
++{
++    if ((pPhysicalMap != NULL) && (mapCount(pPhysicalMap) == 0))
++    {
++        mapDestroy(pPhysicalMap);
++        mapRemove(&(pReuseMappingDb->allocCtxPhysicalMap), pPhysicalMap);
++    }
++}
++
+ /*!
+  * @brief   Unmap a range returned from a previous map calll
+  *
+@@ -133,6 +152,7 @@ reusemappingdbUnmap
+ 
+             mapRemove(&(pReuseMappingDb->virtualMap), pEntry);
+             mapRemove(pPhysicalMap, pEntry);
++            _reusemappingdbPutPhysicalMap(pReuseMappingDb, pPhysicalMap);
+ 
+             pReuseMappingDb->pUnmapCb(pReuseMappingDb->pGlobalCtx, pEntryAllocCtx, revRange);
+             PORT_FREE(pReuseMappingDb->pAllocator, pEntry);
+@@ -218,16 +238,8 @@ reusemappingdbMap
+     NV_ASSERT_OR_RETURN( bSingleRange || bNoReuse, NV_ERR_NOT_SUPPORTED);
+ 
+     pPhysicalMap = mapFind(&(pReuseMappingDb->allocCtxPhysicalMap), (NvU64) pAllocCtx);
+-    
+-    // We don't currently have any mappings for this alloc context, create new map
+-    if (pPhysicalMap == NULL)
+-    {
+-        pPhysicalMap = mapInsertNew(&(pReuseMappingDb->allocCtxPhysicalMap), (NvU64) pAllocCtx);
+-        mapInitIntrusive(pPhysicalMap);
+-        NV_ASSERT_OR_RETURN(pPhysicalMap != NULL, NV_ERR_NO_MEMORY);
+-    }
+ 
+-    if (!bNoReuse && bSingleRange)
++    if (!bNoReuse && bSingleRange && (pPhysicalMap != NULL))
+     {
+         ReuseMappingDbEntry *pEntry = mapFindLEQ(pPhysicalMap, range.start);
+         // If no range LEQ, then try GEQ
+@@ -270,6 +282,14 @@ reusemappingdbMap
+             }
+         }
+     }
++    // We don't currently have any mappings for this alloc context, create new map
++    if (bAddToMap && (pPhysicalMap == NULL))
++    {
++        pPhysicalMap = mapInsertNew(&(pReuseMappingDb->allocCtxPhysicalMap), (NvU64) pAllocCtx);
++        NV_ASSERT_OR_RETURN(pPhysicalMap != NULL, NV_ERR_NO_MEMORY);
++        mapInitIntrusive(pPhysicalMap);
++    }
++
+     // Initialize linked list of new entries
+     token.numNewEntries = 0;
+     token.pDb = pReuseMappingDb;
+@@ -326,5 +346,6 @@ err_unmap:
+         token.pList = token.pList->newMappingNode.pNextEntry;
+         PORT_FREE(pReuseMappingDb->pAllocator, pCur);
+     }
++    _reusemappingdbPutPhysicalMap(pReuseMappingDb, pPhysicalMap);
+     return status;
+ }

@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 09:42:22 +0100
+Subject: [PATCH] nvidia-drm: return an error pointer from PRIME import, don't
+ BUG on size
+
+nv_drm_gem_prime_import_sg_table() returned NULL when its allocation
+failed. drm_gem_prime_import_dev() only checks IS_ERR() and then writes
+obj->import_attach, a NULL dereference in the importing process (e.g.
+the compositor). It also BUG()ed on a dma-buf whose size is not a
+multiple of the page size, which comes from another driver. Return
+ERR_PTR(-ENOMEM) and ERR_PTR(-EINVAL) instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-gem-dma-buf.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-gem-dma-buf.c b/kernel-open/nvidia-drm/nvidia-drm-gem-dma-buf.c
+index 163a8ecf..e871422b 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-gem-dma-buf.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-gem-dma-buf.c
+@@ -142,13 +142,19 @@ nv_drm_gem_prime_import_sg_table(struct drm_device *dev,
+     struct nv_drm_gem_dma_buf *nv_dma_buf;
+     struct NvKmsKapiMemory *pMemory;
+ 
+-    if ((nv_dma_buf =
+-            nv_drm_calloc(1, sizeof(*nv_dma_buf))) == NULL) {
+-        return NULL;
++    // dma_buf->size must be a multiple of PAGE_SIZE
++    if (dma_buf->size % PAGE_SIZE) {
++        NV_DRM_DEV_LOG_ERR(nv_dev,
++            "DMA-BUF size 0x%zx is not a multiple of the page size",
++            dma_buf->size);
++        return ERR_PTR(-EINVAL);
+     }
+ 
+-    // dma_buf->size must be a multiple of PAGE_SIZE
+-    BUG_ON(dma_buf->size % PAGE_SIZE);
++    // The DRM core checks for an error pointer, not NULL
++    if ((nv_dma_buf =
++            nv_drm_calloc(1, sizeof(*nv_dma_buf))) == NULL) {
++        return ERR_PTR(-ENOMEM);
++    }
+ 
+     pMemory = NULL;
+     if (drm_core_check_feature(dev, DRIVER_MODESET)) {

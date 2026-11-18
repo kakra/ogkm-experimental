@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 10:25:20 +0100
+Subject: [PATCH] nvidia-drm: enable vblank support by default
+
+Turn nvidia_drm.vblank on by default, so DRM vblank events, vblank
+counters and timestamps work without a modprobe option.
+nvidia_drm.vblank=0 still turns it off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-linux.c        | 2 +-
+ kernel-open/nvidia-drm/nvidia-drm-os-interface.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-linux.c b/kernel-open/nvidia-drm/nvidia-drm-linux.c
+index d0b435fa..8343830c 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-linux.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-linux.c
+@@ -43,7 +43,7 @@ module_param_named(fbdev, nv_drm_fbdev_module_param, bool, 0444);
+ 
+ MODULE_PARM_DESC(
+     vblank,
+-    "Enable drm vblank notification support (1 = enable, 0 = disable (default))");
++    "Enable drm vblank notification support (1 = enable (default), 0 = disable)");
+ module_param_named(vblank, nv_drm_vblank_module_param, bool, 0444);
+ 
+ #if defined(NV_DRM_HAS_COLOROP)
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-os-interface.c b/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
+index fcf29441..b3d3f7d3 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-os-interface.c
+@@ -44,7 +44,7 @@
+ 
+ bool nv_drm_modeset_module_param = true;
+ bool nv_drm_fbdev_module_param = true;
+-bool nv_drm_vblank_module_param = false;
++bool nv_drm_vblank_module_param = true;
+ bool nv_drm_color_pipeline_module_param = true;
+ bool nv_drm_deadline_boost_module_param = true;
+ 

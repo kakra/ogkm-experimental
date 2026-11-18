@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 10:06:32 +0100
+Subject: [PATCH] nvkms: don't yield after wrapping a display push buffer
+
+nvEvoMakeRoom() waits for space in a display channel's push buffer
+(4 KiB per channel). When the space left before the end is too small and
+GET isn't at the start, it writes a jump to the start, kicks off and sets
+PUT to 0, which frees everything from the start up to GET. But it doesn't
+recompute fifo_free_count, which still holds the space that was left
+before the end, so the loop goes on to call nvkms_yield() (schedule())
+before reading GET again and finding the room. That happens once per lap
+of every channel's push buffer, from the flip path, with the global NVKMS
+lock and the DRM modeset locks held.
+
+On an RTX 4080 Laptop (AD104) with KWin flipping an external 160 Hz
+DisplayPort monitor while a video plays, a kprobe on nvkms_yield() saw
+exactly one yield per such wait, all in nvEvoMakeRoom() on the head's
+window channel, about every 50 ms (every 8-9 flips). The atomic commits
+that hit it took p50 197 us against 93 us for the others (p90 250 us
+against 121 us): when schedule() runs another task first, the commit
+thread loses about 100 us.
+
+Check for room again right after wrapping instead. The next pass reads GET
+with PUT at 0: either GET is back at 0 and the whole buffer is free, or the
+space up to GET is checked as before, so it can't wrap again and only
+yields if the channel really has to make progress first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/nvkms-dma.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/nvidia-modeset/src/nvkms-dma.c b/src/nvidia-modeset/src/nvkms-dma.c
+index 75e2046c..fed80fde 100644
+--- a/src/nvidia-modeset/src/nvkms-dma.c
++++ b/src/nvidia-modeset/src/nvkms-dma.c
+@@ -123,6 +123,16 @@ void nvEvoMakeRoom(NVEvoChannelPtr pChannel, NvU32 count)
+                     push_buffer->buffer = push_buffer->base;
+                     nvDmaKickoffEvo(pChannel);
+                     putOffset = 0;
++
++                    /*
++                     * The space from the start of the push buffer up to GET
++                     * is free now; check it without yielding first.
++                     * fifo_free_count still holds the space left before
++                     * the end, so falling through would always yield,
++                     * once per lap of the push buffer, with the NVKMS lock
++                     * held. With PUT at 0, the next pass can't wrap again.
++                     */
++                    continue;
+                 }
+                 else if (putOffset != push_buffer->put_offset) {
+                     nvDmaKickoffEvo(pChannel);

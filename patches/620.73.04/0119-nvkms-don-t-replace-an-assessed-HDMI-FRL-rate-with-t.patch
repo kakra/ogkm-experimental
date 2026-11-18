@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 18:34:24 +0100
+Subject: [PATCH] nvkms: don't replace an assessed HDMI FRL rate with the EDID
+ rate
+
+While a display is active on TMDS, nvHdmiFrlAssessLink() skips link training,
+and hdmiAssessLinkCapabilitiesC671() then stored the EDID maximum as
+linkMaxFRLRate. A lower rate found by training before, on a bad cable for
+example, got lost when a retraining request came in, and the next FRL modeset
+could fail at a rate known not to work.
+
+Without training, only lower the rate found before. NVKMS clears the caps when
+it probes the display again, which starts over.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/modeset/hdmipacket/nvhdmipkt_C671.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/common/modeset/hdmipacket/nvhdmipkt_C671.c b/src/common/modeset/hdmipacket/nvhdmipkt_C671.c
+index e8c9ec13..b73149da 100644
+--- a/src/common/modeset/hdmipacket/nvhdmipkt_C671.c
++++ b/src/common/modeset/hdmipacket/nvhdmipkt_C671.c
+@@ -431,6 +431,9 @@ hdmiAssessLinkCapabilitiesC671(NVHDMIPKT_CLASS          *pThis,
+     pSrcCaps->dscCaps.lineBufferBitDepth  = params.DSC.lineBufferBitDepth;
+     pSrcCaps->dscCaps.maxWidthPerSlice    = 5120; // Max DSC buffer width per head is 5120, this can be chunks of 1/2/4 slices, so keep 5120 as the very max.
+ 
++    // Clients clear pSinkCaps when the sink changes, so this is set if the link was assessed before.
++    const NvBool bAssessedBefore = (pSinkCaps->pHdmiForumInfo != NULL);
++
+     pSinkCaps->pHdmiForumInfo = &pSinkEdid->hdmiForumInfo;
+     populateAudioCaps(&pSinkEdid->ext861,   pSinkCaps);
+     populateAudioCaps(&pSinkEdid->ext861_2, pSinkCaps);
+@@ -449,6 +452,9 @@ hdmiAssessLinkCapabilitiesC671(NVHDMIPKT_CLASS          *pThis,
+             pSinkCaps->linkMaxFRLRateDSC = HDMI_FRL_DATA_RATE_NONE;
+             return ret;
+         }
++    } else if (bAssessedBefore) {
++        // Without link training the sink's EDID can't raise what training found before.
++        maxFRLRate = NV_MIN(maxFRLRate, (NvU32)pSinkCaps->linkMaxFRLRate);
+     }
+ 
+     pSinkCaps->linkMaxFRLRate    = translateFRLCapToFRLDataRate(maxFRLRate);

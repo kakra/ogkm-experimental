@@ -1,0 +1,181 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 7 Nov 2026 20:07:05 +0100
+Subject: [PATCH] nvidia: fix dmem cgroup region name format string and
+ uncharge use-after-free
+
+dmem_cgroup_register_region() takes a printf format; pass the region name
+as "%s" instead of as the format itself (as proposed upstream).
+
+memacctReleaseCharge() checked dmem.min protection on the charged pool
+after dmem_cgroup_uncharge() had dropped the css and pool references the
+charge held. If that was the last charge in a removed cgroup, the pool
+and css could be freed before the second check. Do both checks and the
+uncharge in os_dmem_cgroup_uncharge() under rcu_read_lock(), which is
+what defers freeing of both, and return whether the pool dropped to or
+below its effective dmem.min.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/os-interface.h         |  4 +--
+ kernel-open/nvidia/os-interface.c             | 28 ++++++++++++++++---
+ .../arch/nvalloc/unix/include/os-interface.h  |  4 +--
+ src/nvidia/arch/nvalloc/unix/src/os.c         |  4 +--
+ src/nvidia/generated/g_os_nvoc.h              |  2 +-
+ src/nvidia/src/kernel/mem_mgr/memacct.c       | 11 ++------
+ 6 files changed, 33 insertions(+), 20 deletions(-)
+
+diff --git a/kernel-open/common/inc/os-interface.h b/kernel-open/common/inc/os-interface.h
+index 89ad45ba..641361b1 100644
+--- a/kernel-open/common/inc/os-interface.h
++++ b/kernel-open/common/inc/os-interface.h
+@@ -315,7 +315,7 @@ NvU32 NV_API_CALL os_cgroup_implementation(void);
+ void* NV_API_CALL os_dmem_cgroup_register_region(const char *name, NvU64 size, NvU64 precharge, void **prechargePool);
+ void NV_API_CALL os_dmem_cgroup_unregister_region(void *region, void *prechargePool, NvU64 precharge);
+ NV_STATUS NV_API_CALL os_dmem_cgroup_try_charge(void *region, NvU64 size, void **ret_pool, void **ret_limit_pool);
+-void NV_API_CALL os_dmem_cgroup_uncharge(void *pool, NvU64 size);
++NvBool NV_API_CALL os_dmem_cgroup_uncharge(void *pool, NvU64 size);
+ void NV_API_CALL os_dmem_cgroup_pool_state_put(void *pool);
+ NvBool NV_API_CALL os_dmem_cgroup_state_evict_valuable(void *limit_pool, void *test_pool, NvBool ignore_low, NvBool *ret_hit_low);
+ void* NV_API_CALL os_cgroup_get_from_fd(NvU32 fd);
+@@ -327,7 +327,7 @@ void* NV_API_CALL os_cgroup_parent(void *cgroup);
+ #define os_dmem_cgroup_register_region(...)      NULL
+ #define os_dmem_cgroup_unregister_region(...)
+ #define os_dmem_cgroup_try_charge(...)           NV_OK
+-#define os_dmem_cgroup_uncharge(...)
++#define os_dmem_cgroup_uncharge(...)            NV_FALSE
+ #define os_dmem_cgroup_pool_state_put(...)
+ #define os_dmem_cgroup_state_evict_valuable(...) NV_FALSE
+ #define os_cgroup_get_from_fd(...)               NULL
+diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
+index e0c79141..8f9a0ee0 100644
+--- a/kernel-open/nvidia/os-interface.c
++++ b/kernel-open/nvidia/os-interface.c
+@@ -3628,9 +3628,9 @@ void* NV_API_CALL os_dmem_cgroup_register_region(const char *name, NvU64 size, N
+     {
+         .size = size,
+     };
+-    region = dmem_cgroup_register_region(&init, name);
++    region = dmem_cgroup_register_region(&init, "%s", name);
+ #else
+-    region = dmem_cgroup_register_region(size, name);
++    region = dmem_cgroup_register_region(size, "%s", name);
+ #endif
+     if (IS_ERR(region))
+     {
+@@ -3670,9 +3670,29 @@ NV_STATUS NV_API_CALL os_dmem_cgroup_try_charge(void *region, NvU64 size, void *
+     return NV_OK;
+ }
+ 
+-void NV_API_CALL os_dmem_cgroup_uncharge(void *pool, NvU64 size)
++//
++// Uncharge and report whether the pool went from above its effective
++// dmem.min to at or below it. dmem_cgroup_uncharge() drops the css and
++// pool references the charge held, so the "after" check can't be done by
++// the caller: the pool may already be freed. Both are freed only after an
++// RCU grace period, so keep it alive with rcu_read_lock() across the
++// uncharge and the second check.
++//
++NvBool NV_API_CALL os_dmem_cgroup_uncharge(void *pool, NvU64 size)
+ {
++    bool overMinBefore;
++    bool overMinAfter;
++
++    if (pool == NULL)
++        return NV_FALSE;
++
++    rcu_read_lock();
++    overMinBefore = dmem_cgroup_state_evict_valuable(NULL, pool, true, NULL);
+     dmem_cgroup_uncharge(pool, size);
++    overMinAfter = dmem_cgroup_state_evict_valuable(NULL, pool, true, NULL);
++    rcu_read_unlock();
++
++    return overMinBefore && !overMinAfter;
+ }
+ 
+ void NV_API_CALL os_dmem_cgroup_pool_state_put(void *pool)
+@@ -3692,7 +3712,7 @@ NvBool NV_API_CALL os_dmem_cgroup_state_evict_valuable(void *limit_pool, void *t
+ void* NV_API_CALL os_dmem_cgroup_register_region(const char *name, NvU64 size, NvU64 precharge, void **prechargePool) { return NULL; }
+ void NV_API_CALL os_dmem_cgroup_unregister_region(void *region, void *prechargePool, NvU64 precharge) {}
+ NV_STATUS NV_API_CALL os_dmem_cgroup_try_charge(void *region, NvU64 size, void **ret_pool, void **ret_limit_pool) { return NV_OK; }
+-void NV_API_CALL os_dmem_cgroup_uncharge(void *pool, NvU64 size) {}
++NvBool NV_API_CALL os_dmem_cgroup_uncharge(void *pool, NvU64 size) { return NV_FALSE; }
+ void NV_API_CALL os_dmem_cgroup_pool_state_put(void *pool) {}
+ NvBool NV_API_CALL os_dmem_cgroup_state_evict_valuable(void *limit_pool, void *test_pool, NvBool ignore_low, NvBool *ret_hit_low) { return NV_FALSE; }
+ #endif
+diff --git a/src/nvidia/arch/nvalloc/unix/include/os-interface.h b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
+index bd45512c..e1f84cfb 100644
+--- a/src/nvidia/arch/nvalloc/unix/include/os-interface.h
++++ b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
+@@ -311,7 +311,7 @@ NvU32 NV_API_CALL os_cgroup_implementation(void);
+ void* NV_API_CALL os_dmem_cgroup_register_region(const char *name, NvU64 size, NvU64 precharge, void **prechargePool);
+ void NV_API_CALL os_dmem_cgroup_unregister_region(void *region, void *prechargePool, NvU64 precharge);
+ NV_STATUS NV_API_CALL os_dmem_cgroup_try_charge(void *region, NvU64 size, void **ret_pool, void **ret_limit_pool);
+-void NV_API_CALL os_dmem_cgroup_uncharge(void *pool, NvU64 size);
++NvBool NV_API_CALL os_dmem_cgroup_uncharge(void *pool, NvU64 size);
+ void NV_API_CALL os_dmem_cgroup_pool_state_put(void *pool);
+ NvBool NV_API_CALL os_dmem_cgroup_state_evict_valuable(void *limit_pool, void *test_pool, NvBool ignore_low, NvBool *ret_hit_low);
+ void* NV_API_CALL os_cgroup_get_from_fd(NvU32 fd);
+@@ -323,7 +323,7 @@ void* NV_API_CALL os_cgroup_parent(void *cgroup);
+ #define os_dmem_cgroup_register_region(...)      NULL
+ #define os_dmem_cgroup_unregister_region(...)
+ #define os_dmem_cgroup_try_charge(...)           NV_OK
+-#define os_dmem_cgroup_uncharge(...)
++#define os_dmem_cgroup_uncharge(...)            NV_FALSE
+ #define os_dmem_cgroup_pool_state_put(...)
+ #define os_dmem_cgroup_state_evict_valuable(...) NV_FALSE
+ #define os_cgroup_get_from_fd(...)               NULL
+diff --git a/src/nvidia/arch/nvalloc/unix/src/os.c b/src/nvidia/arch/nvalloc/unix/src/os.c
+index c079c4f8..fdc39510 100644
+--- a/src/nvidia/arch/nvalloc/unix/src/os.c
++++ b/src/nvidia/arch/nvalloc/unix/src/os.c
+@@ -2304,9 +2304,9 @@ NV_STATUS osMemacctTryCharge(void *pRegion, NvLength size, void **ppPool, void *
+     return os_dmem_cgroup_try_charge(pRegion, size, ppPool, limitPool);
+ }
+ 
+-void osMemacctReleaseCharge(void *pool, NvLength size)
++NvBool osMemacctReleaseCharge(void *pool, NvLength size)
+ {
+-    os_dmem_cgroup_uncharge(pool, size);
++    return os_dmem_cgroup_uncharge(pool, size);
+ }
+ 
+ void osMemacctPoolStatePut(void *pool)
+diff --git a/src/nvidia/generated/g_os_nvoc.h b/src/nvidia/generated/g_os_nvoc.h
+index ae43552f..75e7a346 100644
+--- a/src/nvidia/generated/g_os_nvoc.h
++++ b/src/nvidia/generated/g_os_nvoc.h
+@@ -347,7 +347,7 @@ ClientGroupID osClientGroupID(NvU64 process, void *pidInfo); // from osGetCurren
+ void *osCgroupRegisterRegion(OBJGPU *pGpu, NvU64 size, NvU64 precharge, void **prechargePool);
+ void osCgroupUnregisterRegion(void *region, void *prechargePool, NvU64 precharge);
+ NV_STATUS osMemacctTryCharge(void *pRegion, NvLength size, void **ppPool, void **limitPool);
+-void osMemacctReleaseCharge(void *pool, NvLength size);
++NvBool osMemacctReleaseCharge(void *pool, NvLength size);
+ void osMemacctPoolStatePut(void *pool);
+ void *osCgroupGetFromFd(NvS32 fd);
+ void osCgroupPut(void *cgroup);
+diff --git a/src/nvidia/src/kernel/mem_mgr/memacct.c b/src/nvidia/src/kernel/mem_mgr/memacct.c
+index e607bb8c..2da5a9e7 100644
+--- a/src/nvidia/src/kernel/mem_mgr/memacct.c
++++ b/src/nvidia/src/kernel/mem_mgr/memacct.c
+@@ -294,18 +294,11 @@ void memacctReleaseCharge(MemoryCharge *pCharge)
+     notify = NV_FALSE;
+     if (g_memacct.impl == CGROUP_IMPL_OS)
+     {
+-        NvBool overSoftLimitBefore;
+-        NvBool overSoftLimitAfter;
+-
+         NV_PRINTF(LEVEL_INFO, "release %llu for pool 0x%016llx\n", pCharge->size,
+             (NvU64)pCharge->osPool);
+ 
+-        overSoftLimitBefore = osCgroupCanEvict(NULL, pCharge->osPool);
+-        osMemacctReleaseCharge(pCharge->osPool, pCharge->size);
+-        overSoftLimitAfter = osCgroupCanEvict(NULL, pCharge->osPool);
+-
+-        if (overSoftLimitBefore && !overSoftLimitAfter)
+-            notify = NV_TRUE;
++        // osPool may be freed once released; the OS layer does both soft limit checks
++        notify = osMemacctReleaseCharge(pCharge->osPool, pCharge->size);
+     }
+     else
+     {

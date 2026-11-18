@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Tue, 20 Oct 2026 17:28:59 +0200
+Subject: [PATCH] nvkms: fix the HDMI FRL DSC hblankMin lane count
+
+nvHdmiFrlQueryConfigOneColorFormatAndBpc() divided by hdmiLinkRate / 6,
+which assumes 4 FRL lanes and ignores 16b/18b coding, so 3-lane rates
+(3L3G, 3L6G) got a too-small minimum. Derive the tri-byte rate from the
+lane count and FRL coding. Only affects HDMI 2.1 FRL links with DSC.
+
+The 32-bit overflow of the numerator this patch also fixed on 615.78.08 is
+gone in 620.70.06, which computes it from the 64-bit pixelClockHz.
+
+Upstream issue 1445.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/nvkms-hdmi.c | 20 +++++++++++++++++---
+ 1 file changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/src/nvidia-modeset/src/nvkms-hdmi.c b/src/nvidia-modeset/src/nvkms-hdmi.c
+index 51f3a28a..e3fe070d 100644
+--- a/src/nvidia-modeset/src/nvkms-hdmi.c
++++ b/src/nvidia-modeset/src/nvkms-hdmi.c
+@@ -2849,10 +2849,24 @@ NvBool nvHdmiFrlQueryConfigOneColorFormatAndBpc(
+                     pConfig->dscInfo.dscHBlankTriBytes;
+                 pDscInfo->hdmi.dscTBlankToTTotalRatioX1k =
+                     pConfig->dscInfo.dscTBlankToTTotalRatioX1k;
+-                pDscInfo->hdmi.hblankMin =
+-                    NV_UNSIGNED_DIV_CEIL((pHwTimings->pixelClockHz *
++                {
++                    /*
++                     * hdmiLinkRate is per lane. FRL carries
++                     * lanes * laneRate * 16/18 (16b/18b coding) bits/s,
++                     * 24 bits per tri-byte.
++                     */
++                    const NvU64 frlLanes =
++                        ((pConfig->frlRate == HDMI_FRL_DATA_RATE_3LANES_3GBPS) ||
++                         (pConfig->frlRate == HDMI_FRL_DATA_RATE_3LANES_6GBPS)) ?
++                            3 : 4;
++                    const NvU64 triBytesPerSec =
++                        ((NvU64)hdmiLinkRate * frlLanes * 16) / (18 * 24);
++
++                    pDscInfo->hdmi.hblankMin = (NvU32)
++                        NV_UNSIGNED_DIV_CEIL((pHwTimings->pixelClockHz *
+                                               pConfig->dscInfo.dscHBlankTriBytes),
+-                                         (hdmiLinkRate / 6));
++                                             triBytesPerSec);
++                }
+             } else {
+                 pDscInfo->type = NV_DSC_INFO_EVO_TYPE_DISABLED;
+             }

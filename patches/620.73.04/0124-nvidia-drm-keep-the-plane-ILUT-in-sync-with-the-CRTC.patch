@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ElXreno <elxreno@gmail.com>
+Date: Sat, 31 Oct 2026 21:37:11 +0100
+Subject: [PATCH] nvidia-drm: keep the plane ILUT in sync with the CRTC
+ DEGAMMA_LUT
+
+From ElXreno, upstream PR 1506, commit 6c4f9dee. The PR's second commit is
+not needed: "fix color pipeline state handling" and 620.73.04 already stop
+the ILUT rebuild on every commit, and that is what exposed these bugs for
+clients with DRM_CLIENT_CAP_PLANE_COLOR_PIPELINE set.
+
+The legacy CRTC DEGAMMA_LUT is programmed as each plane's ILUT, but
+plane_req_config_update() only rebuilds the ILUT surface when the plane's
+own degamma properties or the CRTC's color management changed in this
+commit. A plane attached to a CRTC whose DEGAMMA_LUT was set in an earlier
+commit therefore never gets an ILUT, so the CTM runs on encoded values and
+GAMMA_LUT encodes them a second time.
+
+Rebuild the ILUT when the plane moves onto a CRTC, as is already done for
+the CSC. 620.73.04 sends the ILUT whenever it was rebuilt, which covered
+the PR's other two cases (a removed or replaced CRTC DEGAMMA_LUT not
+reaching NVKMS).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-crtc.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+index 7203148b..bb62b991 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -1567,7 +1567,8 @@ plane_req_config_update(struct drm_plane *plane,
+                                &matrix_overrides_changed);
+     req_config->flags.matrixOverridesChanged = matrix_overrides_changed;
+ 
+-    if (nv_drm_plane_state->degamma_changed || crtc_state->color_mgmt_changed) {
++    if (nv_drm_plane_state->degamma_changed || crtc_state->color_mgmt_changed ||
++        (plane->state->crtc != plane_state->crtc)) {
+         ilut_rebuilt = true;
+         if (nv_drm_plane_state->degamma_drm_lut_surface != NULL) {
+             kref_put(&nv_drm_plane_state->degamma_drm_lut_surface->base.refcount,
+@@ -1595,7 +1596,7 @@ plane_req_config_update(struct drm_plane *plane,
+     /*
+      * Update the ILUT configuration if:
+      * - the ILUT surface was rebuilt above (degamma properties or the CRTC
+-     *   color management changed), OR
++     *   color management changed, or the plane moved onto another CRTC), OR
+      * - plane is being re-enabled and old req_config had ILUT disabled
+      *   but DRM plane state has ILUT (blob ID didn't change, but NVKMS
+      *   needs to be notified)

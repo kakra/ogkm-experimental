@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Mon, 2 Nov 2026 21:41:53 +0000
+Subject: [PATCH] nvidia: reserve room in the uncached pool before adding pages
+
+nv_mem_pool_free_uncached_pages() compared the pool counter against
+uncached_pool_max_mb and only added the pages later. Two frees running
+at the same time could both pass the check and together exceed the
+limit. Today all such frees go through the single deferred free work
+item, so they don't run in parallel, but the pool function shouldn't
+depend on that.
+
+Reserve the pages in the counter with atomic_long_add_return() before
+building the list, give the reservation back on every failure path, and
+only update the node statistics on success.
+
+Fixes: 9bfe400a ("nvidia: keep uncached and write-combined sysmem pages uncached in a pool")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia/nv-vm.c | 20 ++++++++++++++++----
+ 1 file changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/kernel-open/nvidia/nv-vm.c b/kernel-open/nvidia/nv-vm.c
+index d24cb84b..f7457ebd 100644
+--- a/kernel-open/nvidia/nv-vm.c
++++ b/kernel-open/nvidia/nv-vm.c
+@@ -439,7 +439,7 @@ static void nv_mem_pool_shrinker_register(nv_page_pool_t *mem_pool, struct shrin
+ // with NR_KERNEL_MISC_RECLAIMABLE lets si_mem_available() include them in
+ // MemAvailable (/proc/meminfo), giving the kernel an accurate picture of how
+ // much memory can be recovered under pressure via the registered shrinker.
+-static void nv_mem_pool_mod_misc_reclaimable(nv_page_pool_t *mem_pool, long delta_compound_pages)
++static void nv_mem_pool_mod_node_reclaimable(nv_page_pool_t *mem_pool, long delta_compound_pages)
+ {
+ #if defined(NV_NR_KERNEL_MISC_RECLAIMABLE_PRESENT)
+     if (delta_compound_pages != 0)
+@@ -447,6 +447,11 @@ static void nv_mem_pool_mod_misc_reclaimable(nv_page_pool_t *mem_pool, long delt
+                             NR_KERNEL_MISC_RECLAIMABLE,
+                             delta_compound_pages << mem_pool->order);
+ #endif
++}
++
++static void nv_mem_pool_mod_misc_reclaimable(nv_page_pool_t *mem_pool, long delta_compound_pages)
++{
++    nv_mem_pool_mod_node_reclaimable(mem_pool, delta_compound_pages);
+     if (mem_pool->uncached)
+         atomic_long_add(delta_compound_pages << mem_pool->order, &nv_uncached_pool_pages);
+ }
+@@ -1034,9 +1039,13 @@ nv_mem_pool_free_uncached_pages
+     unsigned int i;
+     NV_STATUS status;
+ 
+-    if (!NV_MAY_SLEEP() ||
+-        atomic_long_read(&nv_uncached_pool_pages) + at->num_pages > max_os_pages)
++    if (!NV_MAY_SLEEP())
++        return NV_ERR_NO_MEMORY;
++
++    // Reserve the room first, so parallel frees can't overshoot the limit together
++    if (atomic_long_add_return(at->num_pages, &nv_uncached_pool_pages) > max_os_pages)
+     {
++        atomic_long_sub(at->num_pages, &nv_uncached_pool_pages);
+         return NV_ERR_NO_MEMORY;
+     }
+ 
+@@ -1068,7 +1077,8 @@ nv_mem_pool_free_uncached_pages
+     mem_pool->pages_owned += num_pages;
+     os_release_mutex(mem_pool->lock);
+ 
+-    nv_mem_pool_mod_misc_reclaimable(mem_pool, (long)num_pages);
++    // The pool counter already holds the reservation
++    nv_mem_pool_mod_node_reclaimable(mem_pool, (long)num_pages);
+ 
+     if (queue_worker)
+     {
+@@ -1084,6 +1094,8 @@ failed:
+         NV_KFREE(pool_entry, sizeof(*pool_entry));
+     }
+ 
++    atomic_long_sub(at->num_pages, &nv_uncached_pool_pages);
++
+     return NV_ERR_NO_MEMORY;
+ }
+ 

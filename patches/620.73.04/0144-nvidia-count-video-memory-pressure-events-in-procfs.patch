@@ -1,0 +1,459 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Sun, 15 Nov 2026 04:13:54 +0100
+Subject: [PATCH] nvidia: count video memory pressure events in procfs
+
+Diagnostic commit, not meant for upstream.
+
+When video memory runs full, games stutter and the kernel log fills
+with allocation and mapping errors, but nothing tells a sampler how
+often and when that happened without tracing every RM call with
+bpftrace. dmem.current shows how much is allocated, not how often an
+allocation failed or fell back.
+
+Count the paths that only run under memory pressure, with the bytes
+involved and the CLOCK_MONOTONIC time of the last event, and show them
+in /proc/driver/nvidia/vram_pressure, one line per event:
+
+  vidmem_alloc_fail    vidmemConstruct failed with NV_ERR_NO_MEMORY or
+                       the dmem hard limit (requested size)
+  sysmem_page_retry    a sysmem allocation was retried with smaller
+                       pages
+  dma_map_fail         NV_ESC_RM_MAP_MEMORY_DMA returned an error (the
+                       "can't update VA space" case, mapping length)
+  dma_unmap_fail       NV_ESC_RM_UNMAP_MEMORY_DMA returned an error
+                       (requested size, 0 for a whole mapping)
+  gem_no_compression   nvidia-drm retried a GEM allocation without
+                       compression
+  gem_sysmem_fallback  nvidia-drm fell back to sysmem for an offscreen
+                       GEM allocation
+  gem_alloc_fail       a GEM allocation failed
+  gem_backoff          the GEM allocation back-off refused an allocation
+
+The counters are global atomics in nvidia.ko, updated without locks from
+the error paths; nvidia-drm calls the exported os_vram_pressure_event(),
+so nvidia-drm.ko now also depends on nvidia.ko directly (it already did
+through nvidia-modeset.ko). The counters only grow, so a sampler
+differences two reads; the first line carries the read time. The enum
+lives in nv-vram-pressure.h, which like other shared headers has a copy
+for RM and one for the kernel modules. Nothing changes the behaviour of
+any path.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nv-vram-pressure.h     | 69 +++++++++++++++++++
+ kernel-open/common/inc/os-interface.h         |  1 +
+ .../nvidia-drm/nvidia-drm-gem-nvkms-memory.c  |  5 ++
+ kernel-open/nvidia/nv-procfs.c                | 46 +++++++++++++
+ kernel-open/nvidia/os-interface.c             | 35 ++++++++++
+ src/common/sdk/nvidia/inc/nv-vram-pressure.h  | 69 +++++++++++++++++++
+ .../arch/nvalloc/unix/include/os-interface.h  |  1 +
+ src/nvidia/arch/nvalloc/unix/src/escape.c     |  5 ++
+ src/nvidia/src/kernel/mem_mgr/system_mem.c    |  2 +
+ src/nvidia/src/kernel/mem_mgr/video_mem.c     |  8 +++
+ 10 files changed, 241 insertions(+)
+ create mode 100644 kernel-open/common/inc/nv-vram-pressure.h
+ create mode 100644 src/common/sdk/nvidia/inc/nv-vram-pressure.h
+
+diff --git a/kernel-open/common/inc/nv-vram-pressure.h b/kernel-open/common/inc/nv-vram-pressure.h
+new file mode 100644
+index 00000000..8ccd5710
+--- /dev/null
++++ b/kernel-open/common/inc/nv-vram-pressure.h
+@@ -0,0 +1,69 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Kai Krakow
++ * SPDX-License-Identifier: MIT
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ */
++
++/*
++ * Diagnostic counters for video memory pressure, shown in
++ * /proc/driver/nvidia/vram_pressure. Each event counts how often a path
++ * that only runs when memory is short was taken, the bytes involved and
++ * when it last happened (CLOCK_MONOTONIC), so a sampler can tell when a
++ * workload ran out of video memory without tracing every RM call.
++ *
++ * This header has two identical copies: src/common/sdk/nvidia/inc for RM
++ * and kernel-open/common/inc for the kernel modules.
++ */
++
++#ifndef _NV_VRAM_PRESSURE_H_
++#define _NV_VRAM_PRESSURE_H_
++
++#include <nvtypes.h>
++#include <nv-kernel-interface-api.h>
++
++typedef enum
++{
++    /* RM: a video memory allocation failed for lack of memory. */
++    NV_VRAM_PRESSURE_VIDMEM_ALLOC_FAIL = 0,
++    /* RM: a system memory allocation was retried with smaller pages. */
++    NV_VRAM_PRESSURE_SYSMEM_PAGE_RETRY,
++    /* RM: NV_ESC_RM_MAP_MEMORY_DMA returned an error. */
++    NV_VRAM_PRESSURE_DMA_MAP_FAIL,
++    /* RM: NV_ESC_RM_UNMAP_MEMORY_DMA returned an error. */
++    NV_VRAM_PRESSURE_DMA_UNMAP_FAIL,
++    /* nvidia-drm: a compressible GEM allocation was retried without compression. */
++    NV_VRAM_PRESSURE_GEM_NO_COMPRESSION,
++    /* nvidia-drm: an offscreen GEM allocation fell back to system memory. */
++    NV_VRAM_PRESSURE_GEM_SYSMEM_FALLBACK,
++    /* nvidia-drm: a GEM allocation failed. */
++    NV_VRAM_PRESSURE_GEM_ALLOC_FAIL,
++    /* nvidia-drm: a GEM allocation was refused by the allocation back-off. */
++    NV_VRAM_PRESSURE_GEM_BACKOFF,
++    NV_VRAM_PRESSURE_EVENT_COUNT
++} nv_vram_pressure_event_t;
++
++/* Count one event of the given kind involving the given number of bytes. */
++void NV_API_CALL os_vram_pressure_event(NvU32 event, NvU64 bytes);
++
++/* Read one counter: events, bytes and the time of the last event in ns. */
++void NV_API_CALL os_vram_pressure_get(NvU32 event, NvU64 *count, NvU64 *bytes,
++                                      NvU64 *last_ns);
++
++#endif /* _NV_VRAM_PRESSURE_H_ */
+diff --git a/kernel-open/common/inc/os-interface.h b/kernel-open/common/inc/os-interface.h
+index 641361b1..84483118 100644
+--- a/kernel-open/common/inc/os-interface.h
++++ b/kernel-open/common/inc/os-interface.h
+@@ -42,6 +42,7 @@
+ #include <os/nv_memory_type.h>
+ #include <os/nv_memory_area.h>
+ #include <nv-caps.h>
++#include <nv-vram-pressure.h>
+ 
+ #include "rs_access.h"
+ 
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
+index 760fbba4..79b767c8 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
+@@ -27,6 +27,7 @@
+ #include "nvidia-drm-gem-nvkms-memory.h"
+ #include "nvidia-drm-helper.h"
+ #include "nv_drm_common_ioctl.h"
++#include "nv-vram-pressure.h"
+ 
+ #include <drm/drm_drv.h>
+ #include <drm/drm_prime.h>
+@@ -703,6 +704,7 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+         nv_file->gem_alloc_fail_size != 0 &&
+         nv_drm_gem_alloc_covers_failed(nv_file, p->memory_size, scanout) &&
+         time_before(jiffies, nv_file->gem_alloc_fail_until)) {
++        os_vram_pressure_event(NV_VRAM_PRESSURE_GEM_BACKOFF, p->memory_size);
+         ret = -ENOMEM;
+         goto failed;
+     }
+@@ -746,6 +748,7 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+                     "Failed to allocate compressible NVKMS video memory of size %" NvU64_fmtu " for GEM object of %s[%d], retrying without compression",
+                     p->memory_size, current->comm, task_pid_nr(current));
+         }
++        os_vram_pressure_event(NV_VRAM_PRESSURE_GEM_NO_COMPRESSION, p->memory_size);
+         p->compressible = 0;
+         pMemory = nvKms->allocateMemory(nv_dev->pDevice, &allocParams);
+     }
+@@ -758,11 +761,13 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+                     "Failed to allocate NVKMS video memory for GEM object of %s[%d], trying to fall back to sysmem",
+                     current->comm, task_pid_nr(current));
+         }
++        os_vram_pressure_event(NV_VRAM_PRESSURE_GEM_SYSMEM_FALLBACK, p->memory_size);
+         allocParams.useVideoMemory = false;
+         pMemory = nvKms->allocateMemory(nv_dev->pDevice, &allocParams);
+     }
+ 
+     if (pMemory == NULL) {
++        os_vram_pressure_event(NV_VRAM_PRESSURE_GEM_ALLOC_FAIL, p->memory_size);
+         ret = -ENOMEM;
+         if (__ratelimit(&log_rs)) {
+             NV_DRM_DEV_LOG_ERR(nv_dev,
+diff --git a/kernel-open/nvidia/nv-procfs.c b/kernel-open/nvidia/nv-procfs.c
+index c73180bd..1a5471ee 100644
+--- a/kernel-open/nvidia/nv-procfs.c
++++ b/kernel-open/nvidia/nv-procfs.c
+@@ -243,6 +243,48 @@ nv_procfs_read_version(
+ 
+ NV_DEFINE_SINGLE_NVRM_PROCFS_FILE(version);
+ 
++/*
++ * Diagnostic: how often RM and nvidia-drm took paths that only run when
++ * video memory is short (nv-vram-pressure.h). One line per event: name,
++ * count, bytes, CLOCK_MONOTONIC time of the last event in ns (0: never).
++ * The counters only grow; sample and difference them.
++ */
++static const char * const nv_vram_pressure_names[NV_VRAM_PRESSURE_EVENT_COUNT] =
++{
++    [NV_VRAM_PRESSURE_VIDMEM_ALLOC_FAIL]   = "vidmem_alloc_fail",
++    [NV_VRAM_PRESSURE_SYSMEM_PAGE_RETRY]   = "sysmem_page_retry",
++    [NV_VRAM_PRESSURE_DMA_MAP_FAIL]        = "dma_map_fail",
++    [NV_VRAM_PRESSURE_DMA_UNMAP_FAIL]      = "dma_unmap_fail",
++    [NV_VRAM_PRESSURE_GEM_NO_COMPRESSION]  = "gem_no_compression",
++    [NV_VRAM_PRESSURE_GEM_SYSMEM_FALLBACK] = "gem_sysmem_fallback",
++    [NV_VRAM_PRESSURE_GEM_ALLOC_FAIL]      = "gem_alloc_fail",
++    [NV_VRAM_PRESSURE_GEM_BACKOFF]         = "gem_backoff",
++};
++
++static int
++nv_procfs_read_vram_pressure(
++    struct seq_file *s,
++    void *v
++)
++{
++    NvU32 i;
++
++    seq_printf(s, "# event count bytes last_ns now_ns=%llu\n", ktime_get_ns());
++
++    for (i = 0; i < NV_VRAM_PRESSURE_EVENT_COUNT; i++)
++    {
++        NvU64 count, bytes, last_ns;
++
++        os_vram_pressure_get(i, &count, &bytes, &last_ns);
++        seq_printf(s, "%s %llu %llu %llu\n", nv_vram_pressure_names[i],
++                   count, bytes, last_ns);
++    }
++
++    return 0;
++}
++
++NV_DEFINE_SINGLE_PROCFS_FILE_READ_ONLY_WITHOUT_LOCK(vram_pressure);
++
+ static void
+ nv_procfs_close_file(
+     nv_procfs_private_t *nvpp
+@@ -1423,6 +1465,10 @@ int nv_procfs_init(void)
+     if (!entry)
+         goto failed;
+ 
++    entry = NV_CREATE_PROC_FILE("vram_pressure", proc_nvidia, vram_pressure, NULL);
++    if (!entry)
++        goto failed;
++
+     proc_nvidia_gpus = NV_CREATE_PROC_DIR("gpus", proc_nvidia);
+     if (!proc_nvidia_gpus)
+         goto failed;
+diff --git a/kernel-open/nvidia/os-interface.c b/kernel-open/nvidia/os-interface.c
+index 8f9a0ee0..ac669034 100644
+--- a/kernel-open/nvidia/os-interface.c
++++ b/kernel-open/nvidia/os-interface.c
+@@ -1480,6 +1480,41 @@ void NV_API_CALL os_dump_stack(void)
+     dump_stack();
+ }
+ 
++/*
++ * Video memory pressure counters (nv-vram-pressure.h), read by
++ * /proc/driver/nvidia/vram_pressure. Updated without locks from RM and
++ * nvidia-drm error paths; a reader may see a count without its bytes for a
++ * moment, which a sampler can live with.
++ */
++static atomic64_t nv_vram_pressure_count[NV_VRAM_PRESSURE_EVENT_COUNT];
++static atomic64_t nv_vram_pressure_bytes[NV_VRAM_PRESSURE_EVENT_COUNT];
++static atomic64_t nv_vram_pressure_last_ns[NV_VRAM_PRESSURE_EVENT_COUNT];
++
++void NV_API_CALL os_vram_pressure_event(NvU32 event, NvU64 bytes)
++{
++    if (event >= NV_VRAM_PRESSURE_EVENT_COUNT)
++        return;
++
++    atomic64_inc(&nv_vram_pressure_count[event]);
++    atomic64_add(bytes, &nv_vram_pressure_bytes[event]);
++    atomic64_set(&nv_vram_pressure_last_ns[event], ktime_get_ns());
++}
++EXPORT_SYMBOL(os_vram_pressure_event);
++
++void NV_API_CALL os_vram_pressure_get(NvU32 event, NvU64 *count, NvU64 *bytes,
++                                      NvU64 *last_ns)
++{
++    if (event >= NV_VRAM_PRESSURE_EVENT_COUNT)
++    {
++        *count = *bytes = *last_ns = 0;
++        return;
++    }
++
++    *count   = atomic64_read(&nv_vram_pressure_count[event]);
++    *bytes   = atomic64_read(&nv_vram_pressure_bytes[event]);
++    *last_ns = atomic64_read(&nv_vram_pressure_last_ns[event]);
++}
++
+ typedef struct os_spinlock_s
+ {
+     nv_spinlock_t      lock;
+diff --git a/src/common/sdk/nvidia/inc/nv-vram-pressure.h b/src/common/sdk/nvidia/inc/nv-vram-pressure.h
+new file mode 100644
+index 00000000..8ccd5710
+--- /dev/null
++++ b/src/common/sdk/nvidia/inc/nv-vram-pressure.h
+@@ -0,0 +1,69 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Kai Krakow
++ * SPDX-License-Identifier: MIT
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ */
++
++/*
++ * Diagnostic counters for video memory pressure, shown in
++ * /proc/driver/nvidia/vram_pressure. Each event counts how often a path
++ * that only runs when memory is short was taken, the bytes involved and
++ * when it last happened (CLOCK_MONOTONIC), so a sampler can tell when a
++ * workload ran out of video memory without tracing every RM call.
++ *
++ * This header has two identical copies: src/common/sdk/nvidia/inc for RM
++ * and kernel-open/common/inc for the kernel modules.
++ */
++
++#ifndef _NV_VRAM_PRESSURE_H_
++#define _NV_VRAM_PRESSURE_H_
++
++#include <nvtypes.h>
++#include <nv-kernel-interface-api.h>
++
++typedef enum
++{
++    /* RM: a video memory allocation failed for lack of memory. */
++    NV_VRAM_PRESSURE_VIDMEM_ALLOC_FAIL = 0,
++    /* RM: a system memory allocation was retried with smaller pages. */
++    NV_VRAM_PRESSURE_SYSMEM_PAGE_RETRY,
++    /* RM: NV_ESC_RM_MAP_MEMORY_DMA returned an error. */
++    NV_VRAM_PRESSURE_DMA_MAP_FAIL,
++    /* RM: NV_ESC_RM_UNMAP_MEMORY_DMA returned an error. */
++    NV_VRAM_PRESSURE_DMA_UNMAP_FAIL,
++    /* nvidia-drm: a compressible GEM allocation was retried without compression. */
++    NV_VRAM_PRESSURE_GEM_NO_COMPRESSION,
++    /* nvidia-drm: an offscreen GEM allocation fell back to system memory. */
++    NV_VRAM_PRESSURE_GEM_SYSMEM_FALLBACK,
++    /* nvidia-drm: a GEM allocation failed. */
++    NV_VRAM_PRESSURE_GEM_ALLOC_FAIL,
++    /* nvidia-drm: a GEM allocation was refused by the allocation back-off. */
++    NV_VRAM_PRESSURE_GEM_BACKOFF,
++    NV_VRAM_PRESSURE_EVENT_COUNT
++} nv_vram_pressure_event_t;
++
++/* Count one event of the given kind involving the given number of bytes. */
++void NV_API_CALL os_vram_pressure_event(NvU32 event, NvU64 bytes);
++
++/* Read one counter: events, bytes and the time of the last event in ns. */
++void NV_API_CALL os_vram_pressure_get(NvU32 event, NvU64 *count, NvU64 *bytes,
++                                      NvU64 *last_ns);
++
++#endif /* _NV_VRAM_PRESSURE_H_ */
+diff --git a/src/nvidia/arch/nvalloc/unix/include/os-interface.h b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
+index e1f84cfb..dec72721 100644
+--- a/src/nvidia/arch/nvalloc/unix/include/os-interface.h
++++ b/src/nvidia/arch/nvalloc/unix/include/os-interface.h
+@@ -42,6 +42,7 @@
+ #include <os/nv_memory_type.h>
+ #include <os/nv_memory_area.h>
+ #include <nv-caps.h>
++#include <nv-vram-pressure.h>
+ 
+ #include "rs_access.h"
+ 
+diff --git a/src/nvidia/arch/nvalloc/unix/src/escape.c b/src/nvidia/arch/nvalloc/unix/src/escape.c
+index 65ab8337..fec312ac 100644
+--- a/src/nvidia/arch/nvalloc/unix/src/escape.c
++++ b/src/nvidia/arch/nvalloc/unix/src/escape.c
+@@ -38,6 +38,7 @@
+ #include <osapi.h>
+ #include <rmapi/exports.h>
+ #include <nv-unix-nvos-params-wrappers.h>
++#include <nv-vram-pressure.h>
+ 
+ #include <nvos.h>
+ #include <class/cl0000.h> // NV01_ROOT
+@@ -702,6 +703,8 @@ NV_STATUS RmIoctl(
+             NV_CTL_DEVICE_ONLY(nv);
+ 
+             Nv04MapMemoryDmaWithSecInfo(pApi, secInfo);
++            if (pApi->status != NV_OK)
++                os_vram_pressure_event(NV_VRAM_PRESSURE_DMA_MAP_FAIL, pApi->length);
+             break;
+         }
+ 
+@@ -718,6 +721,8 @@ NV_STATUS RmIoctl(
+             NV_CTL_DEVICE_ONLY(nv);
+ 
+             Nv04UnmapMemoryDmaWithSecInfo(pApi, secInfo);
++            if (pApi->status != NV_OK)
++                os_vram_pressure_event(NV_VRAM_PRESSURE_DMA_UNMAP_FAIL, pApi->size);
+             break;
+         }
+ 
+diff --git a/src/nvidia/src/kernel/mem_mgr/system_mem.c b/src/nvidia/src/kernel/mem_mgr/system_mem.c
+index d2f454ed..87a4898b 100644
+--- a/src/nvidia/src/kernel/mem_mgr/system_mem.c
++++ b/src/nvidia/src/kernel/mem_mgr/system_mem.c
+@@ -36,6 +36,7 @@
+ #include "gpu/device/device.h"
+ 
+ #include "gpu/mem_mgr/carveout_mgr.h"
++#include "nv-vram-pressure.h"
+ 
+ #include "gpu/mem_mgr/sysmem_scrub.h"
+ 
+@@ -551,6 +552,7 @@ sysmemConstruct_IMPL
+                 const NvU64 failedPageSize = memdescGetPageSize(pMemDesc, AT_GPU);
+ 
+                 pageSize = _sysmemGetNextSmallestPageSize(pGpu, &pAllocData->attr, &pAllocData->attr2);
++                os_vram_pressure_event(NV_VRAM_PRESSURE_SYSMEM_PAGE_RETRY, pAllocData->size);
+ 
+                 //
+                 // Tear down descriptor/OS state before making the carveout
+diff --git a/src/nvidia/src/kernel/mem_mgr/video_mem.c b/src/nvidia/src/kernel/mem_mgr/video_mem.c
+index 87e0f607..2389d31c 100644
+--- a/src/nvidia/src/kernel/mem_mgr/video_mem.c
++++ b/src/nvidia/src/kernel/mem_mgr/video_mem.c
+@@ -38,6 +38,7 @@
+ #include "gpu/bus/kern_bus.h"
+ 
+ #include "class/cl0040.h" // NV01_MEMORY_LOCAL_USER
++#include "nv-vram-pressure.h"
+ 
+ /*!
+  * _vidmemQueryAlignment
+@@ -984,6 +985,13 @@ done:
+     if (pMemory->pCharge != NULL && rmStatus != NV_OK)
+         memacctReleaseCharge(pMemory->pCharge);
+ 
++    // Diagnostic counter, /proc/driver/nvidia/vram_pressure.
++    if (rmStatus == NV_ERR_NO_MEMORY ||
++        rmStatus == NV_ERR_RESOURCE_ACCOUNTING_HARD_LIMIT_EXCEEDED)
++    {
++        os_vram_pressure_event(NV_VRAM_PRESSURE_VIDMEM_ALLOC_FAIL, pAllocData->size);
++    }
++
+     //
+     // If the allocation failed after curFbUsage was already incremented,
+     // roll it back so the counter stays consistent. gpuAcctSessionId is

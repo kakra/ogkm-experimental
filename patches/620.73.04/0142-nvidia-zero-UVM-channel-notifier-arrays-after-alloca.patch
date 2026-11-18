@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: v4lkyr <valkyr23@gmail.com>
+Date: Fri, 13 Nov 2026 20:15:17 +0100
+Subject: [PATCH] nvidia: zero UVM channel notifier arrays after allocation
+
+channelAllocate() and nvGpuOpsPagingChannelAllocate() hand the
+per-channel notifier array (error, work submit token, key rotation) to
+UVM without clearing it. The backing sysmem is only zeroed when
+NVreg_InitializeSystemMemoryAllocations is set (the default); with it
+set to 0 the pages can still hold data from a previous user.
+
+UVM treats any non-zero error notifier status as an RC error.
+channel_init() reads it while starting the channel's first push, so a
+stale value latches a UVM global fatal error, RM reports Xid 154 with
+the OS reboot recovery action, and CUDA is unusable until reboot. The
+work submit token is also read from the notifier page before every
+doorbell write, and the key rotation status is compared against
+UVM_KEY_ROTATION_STATUS_PENDING. All three expect 0 at start.
+
+Clear the whole array once it is mapped, before the channel is
+allocated and the notifier published, in both paths.
+
+Upstream PR 1539 (v4lkyr), tested by the author on 620.70.06 with 200
+cuInit/cuCtxCreate/cuMemAllocManaged/cuCtxDestroy cycles. Comment
+reworded to name the module parameter that makes the pages non-zero.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/src/kernel/rmapi/nv_gpu_ops.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c b/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c
+index 55c1bd31..c821dc66 100644
+--- a/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c
++++ b/src/nvidia/src/kernel/rmapi/nv_gpu_ops.c
+@@ -6123,6 +6123,16 @@ static NV_STATUS channelAllocate(const gpuTsgHandle tsg,
+         goto cleanup_free_virtual;
+     }
+ 
++    //
++    // Notification memory has to start out idle (status == 0), but the backing
++    // sysmem is only zeroed when NVreg_InitializeSystemMemoryAllocations is
++    // set; otherwise it may still hold data from a previous user of the pages.
++    // A stale value is indistinguishable from a real channel error, so clear
++    // the whole notifier array (error, work submit token and key rotation)
++    // before it is published to the client.
++    //
++    portMemSet((void *)channel->errorNotifier, 0, errorNotifierSize);
++
+     // Let's allocate the channel
+     pAllocInfo->gpFifoAllocParams.hObjectError  = hErrorNotifier;
+     status = getHandleForVirtualAddr(vaSpace,
+@@ -11643,6 +11653,13 @@ NV_STATUS nvGpuOpsPagingChannelAllocate(struct gpuDevice *device,
+ 
+     NV_ASSERT(channel->errorNotifier);
+ 
++    //
++    // Same as channelAllocate(): the paging channel's notifiers are handed to
++    // the client through channelInfo->shadowErrorNotifier and must not contain
++    // stale data from the previous user of the pages.
++    //
++    portMemSet((void *)channel->errorNotifier, 0, errorNotifierSize);
++
+     // Ideally, we need to acquire there locks (in that order):
+     // a. RM API lock
+     // b. device->handle GPU lock

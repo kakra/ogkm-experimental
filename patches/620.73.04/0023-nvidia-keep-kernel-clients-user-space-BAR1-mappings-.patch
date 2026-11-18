@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Mon, 26 Oct 2026 10:02:02 +0100
+Subject: [PATCH] nvidia: keep kernel clients' user-space BAR1 mappings
+ contiguous
+
+RmMapMemory allows a discontiguous BAR1 mapping for every non-kernel
+(NVOS33_FLAGS_MEM_SPACE_USER) CPU mapping on Unix. When BAR1 is too
+fragmented for one range, the BAR1 map callback halves the chunk size and
+maps the surface in pieces. Real user-space mappings get every range
+through the TLS mapping context consumed by mmap, but kernel clients
+don't: osMapPciMemoryAreaUser returns only the first range's address and
+the kernel RM API entry point frees the range list.
+
+nvidia-drm maps GEM objects this way (NVKMS KAPI MapMemory with
+NVKMS_KAPI_MAPPING_TYPE_USER) and treats the address as one contiguous
+block: ioremap_wc() over the full size for vmap, and pfn + page offset in
+the mmap fault handler. With a split mapping, CPU accesses hit whatever
+else is mapped after the first piece, or run past the end of BAR1
+("resource sanity check: requesting [...] which spans more than ... BAR",
+caller __nv_drm_gem_nvkms_map), followed by MMU faults / Xid 31 and
+corrupted surfaces. This is easy to reach with a 256 MiB BAR1 (no
+Resizable BAR) and a browser GPU process holding many mappings.
+
+Only allow discontiguous mappings for clients below kernel privilege.
+Kernel clients now get a single range or a clean NV_ERR_NO_MEMORY, which
+nvidia-drm already handles ("Failed to map NvKmsKapiMemory", -ENOMEM).
+
+Upstream issue 1134.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/src/kernel/rmapi/mapping_cpu.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/src/nvidia/src/kernel/rmapi/mapping_cpu.c b/src/nvidia/src/kernel/rmapi/mapping_cpu.c
+index fc7554c9..73fc1ffc 100644
+--- a/src/nvidia/src/kernel/rmapi/mapping_cpu.c
++++ b/src/nvidia/src/kernel/rmapi/mapping_cpu.c
+@@ -445,7 +445,19 @@ memMap_IMPL
+                 // Below, we only map one GPU's address for CPU access, so we can use UNICAST here
+                 NvU32 busMapFbFlags = BUS_MAP_FB_FLAGS_MAP_UNICAST;
+ #if defined(NV_UNIX)
+-                busMapFbFlags |= pMapParams->bKernel ? 0 : BUS_MAP_FB_FLAGS_ALLOW_DISCONTIG;
++                //
++                // A discontiguous BAR1 mapping is only usable through the
++                // mmap path, which gets every range from the TLS mapping
++                // context. Kernel clients asking for a user-space mapping
++                // (nvidia-drm GEM mmap/vmap) get only the first range back
++                // and use it as one contiguous block, so a split mapping
++                // makes them access other BAR1 mappings or run past BAR1.
++                //
++                if (!pMapParams->bKernel &&
++                    (rmclientGetCachedPrivilege(pClient) < RS_PRIV_LEVEL_KERNEL))
++                {
++                    busMapFbFlags |= BUS_MAP_FB_FLAGS_ALLOW_DISCONTIG;
++                }
+ #endif
+                 if(DRF_VAL(OS33, _FLAGS, _MAPPING, pMapParams->flags) == NVOS33_FLAGS_MAPPING_DIRECT)
+                 {

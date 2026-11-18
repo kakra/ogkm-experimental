@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: veldenb <062a2dfa2234@sinenomine.email>
+Date: Wed, 18 Nov 2026 17:13:29 +0100
+Subject: [PATCH] nvidia: treat an unmap of an unregistered DMA mapping range
+ as a no-op
+
+virtmemUnmapFrom() asserted and returned NV_ERR_INVALID_OBJECT_HANDLE when
+intermapGetDmaMapping() found nothing for the requested offset.
+
+That situation is reachable: the VA space splits mappings at mapping page
+boundaries while the resource server tracks inter-mappings as byte ranges,
+so an earlier partial unmap can already have released the pages a
+server-side fragment still describes.  It also happens when inter-mapping
+registration fails after the client mapping was torn down.
+
+Failing the unmap leaves the server-side inter-mapping node in place, and
+a later mapping at the same dmaOffset then fails with
+
+  NVRM: refAddInterMapping: Duplicate inter mapping detected ...
+  NVRM: Check failed: 0 == (pMapNode->gpuMask & gpuMask) @ gpu_vaspace.c
+
+Log the request and return NV_OK instead, so that cleanup paths (notably
+the automatic unmapping of back references in rs_client.c) can retire
+their bookkeeping.
+
+Related: #1364, #1453, #1483.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+(cherry picked from commit adae9fd31c4e153db8ad560e43f41538ffa68267)
+---
+ src/nvidia/src/kernel/mem_mgr/virtual_mem.c | 22 ++++++++++++++++++++-
+ 1 file changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/src/nvidia/src/kernel/mem_mgr/virtual_mem.c b/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
+index 76026674..29947f92 100644
+--- a/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
++++ b/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
+@@ -1583,7 +1583,27 @@ virtmemUnmapFrom_IMPL
+ 
+     // Get DMA mapping info.
+     pDmaMappingInfo = intermapGetDmaMapping(pVirtualMemory, dmaOffset);
+-    NV_ASSERT_OR_RETURN(pDmaMappingInfo != NULL, NV_ERR_INVALID_OBJECT_HANDLE);
++    if (pDmaMappingInfo == NULL)
++    {
++        //
++        // Nothing is registered for this range any more.
++        //
++        // This happens when an earlier partial unmap already released the
++        // pages containing the request (the VA space splits at mapping page
++        // boundaries while the resource server tracks byte ranges), or when
++        // inter-mapping registration failed after the client mapping had
++        // been torn down.  Treat the unmap as a no-op so that cleanup paths
++        // (notably the automatic unmapping of back references in
++        // rs_client.c) can retire their own bookkeeping instead of failing
++        // and leaving stale inter-mapping nodes behind, which later surface
++        // as "Duplicate inter mapping" / "0 == (pMapNode->gpuMask & gpuMask)"
++        // failures on unrelated mappings.
++        //
++        NV_PRINTF(LEVEL_ERROR,
++                  "Unmap of unregistered DMA mapping range [0x%llX, 0x%llX); ignoring.\n",
++                  dmaOffset, dmaOffset + pParams->size);
++        return NV_OK;
++    }
+     NvBool bPartialUnmap = dmaOffset != pDmaMappingInfo->DmaOffset || pParams->size != pDmaMappingInfo->pMemDesc->Size;
+     NV_ASSERT_OR_RETURN(!bPartialUnmap || !bIsIndirectPeer, NV_ERR_INVALID_ARGUMENT);
+ 

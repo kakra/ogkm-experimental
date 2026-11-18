@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bruno=20Magalh=C3=A3es?= <brunom@tuta.io>
+Date: Fri, 13 Nov 2026 20:19:09 +0100
+Subject: [PATCH] nvidia: keep the VirtualMemory in DevMemoryTable when a DMA
+ mapping insert fails
+
+intermapRegisterDmaMapping() adds the VirtualMemory to
+Device::DevMemoryTable when it registers the object's first DMA mapping,
+and intermapDelDmaMapping() removes it when the last mapping goes away.
+The failure path of the mapping list insert unlinked it unconditionally.
+That insert can only fail on an overlap, which needs a list that already
+holds mappings, so in practice the node was unlinked only by calls that
+did not insert it: every "Failed to insert new mapping node" message
+dropped an object with live mappings from DevMemoryTable.
+
+When that object's last mapping was deleted later, typically while the
+process exits and its client is freed, btreeUnlink() ran on a node no
+longer in the tree and followed its stale parent/left/right pointers
+(btreeUnlink only checks membership in checked builds). That either
+oopsed in btreeUnlink at address 0x20 (NODE::parent), or left a cycle in
+DevMemoryTable, and the next walk of the table spun forever under the RM
+API lock, freezing every other client with nothing in the log.
+
+Remember whether this call inserted the DevMemoryTable node and only
+unlink it on the failure path in that case. Also free the new mapping
+node when the DevMemoryTable insert itself fails, instead of leaking it
+through NV_ASSERT_OK_OR_RETURN.
+
+Upstream PR 1542 (brunofgmag), complementary to the partial unmap
+granularity fix: that one removes a cause of the insert failures, this
+one keeps any failure from corrupting DevMemoryTable. The author
+reproduced the hang in a user space harness around the real btree.c and
+saw 4 freezes in 12 MSFS 2024 sessions that logged the failure before,
+0 in 7 after (RTX 4080, 620.70.06). Same oops as upstream issue 1540.
+The leak fix is ours.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/src/kernel/rmapi/mapping_list.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/src/nvidia/src/kernel/rmapi/mapping_list.c b/src/nvidia/src/kernel/rmapi/mapping_list.c
+index 5ff66eb6..c810c16c 100644
+--- a/src/nvidia/src/kernel/rmapi/mapping_list.c
++++ b/src/nvidia/src/kernel/rmapi/mapping_list.c
+@@ -175,6 +175,7 @@ intermapRegisterDmaMapping
+     NV_STATUS             rmStatus = NV_OK;
+     PNODE                 pNode;
+     NvU64 alignment = 0;
++    NvBool                bDevMemoryTableNodeInserted = NV_FALSE;
+ 
+     //
+     // OS46_FLAGS_DMA_UNICAST_REUSE_ALLOC asked for one more mapping of a VA that
+@@ -254,7 +255,14 @@ intermapRegisterDmaMapping
+         pVirtualMemory->devMemoryTableNode.keyEnd = RES_GET_HANDLE(pVirtualMemory);
+         pVirtualMemory->devMemoryTableNode.Data = pVirtualMemory;
+ 
+-        NV_ASSERT_OK_OR_RETURN(btreeInsert(&pVirtualMemory->devMemoryTableNode, &pDevice->DevMemoryTable));
++        rmStatus = btreeInsert(&pVirtualMemory->devMemoryTableNode, &pDevice->DevMemoryTable);
++        if (rmStatus != NV_OK)
++        {
++            NV_ASSERT(rmStatus == NV_OK);
++            portMemFree(pNode);
++            return rmStatus;
++        }
++        bDevMemoryTableNodeInserted = NV_TRUE;
+     }
+ 
+     // register the 'dmaOffset' list itself
+@@ -265,7 +273,10 @@ intermapRegisterDmaMapping
+                   "Failed to insert new mapping node for range 0x%llX-0x%llX!\n",
+                   pNode->keyStart, pNode->keyEnd);
+         DBG_BREAKPOINT();
+-        btreeUnlink(&pVirtualMemory->devMemoryTableNode, &pDevice->DevMemoryTable);
++        if (bDevMemoryTableNodeInserted)
++        {
++            btreeUnlink(&pVirtualMemory->devMemoryTableNode, &pDevice->DevMemoryTable);
++        }
+         portMemFree(pNode);
+         return rmStatus;
+     }

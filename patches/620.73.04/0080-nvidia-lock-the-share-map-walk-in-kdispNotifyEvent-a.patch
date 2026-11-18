@@ -1,0 +1,154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Thu, 29 Oct 2026 09:15:27 +0100
+Subject: [PATCH] nvidia: lock the share map walk in kdispNotifyEvent() against
+ the unlocked display ISR
+
+With interrupt mask locking (Turing and later dGPUs), DISP is the one
+engine left unblocked while the GPU lock is held, and
+_osIsrIntrMask_GpusUnlocked() services the display low latency
+interrupts holding only the display low latency lock. That includes the
+RG semaphore interrupt: kheadHandleRgSemIntr() calls kdispNotifyEvent(),
+which walks g_resServ.shareMap for NvDispApi notifiers, reads their
+pNotifyActions and walks their event lists to post the notification.
+nvkms enables the RG semaphore notification for vblank, so this runs
+every frame.
+
+None of that is protected against the threads that change it at the same
+time: shares are inserted and removed under pShareMapLock, which the walk
+does not take; event list nodes are linked and unlinked (and then freed)
+under the API/GPU locks only; and dispapiDestruct() frees pNotifyActions
+before the base notifyDestruct() clears pNotifierShare->pNotifier, also
+without any lock. Any process creating or freeing RM objects with
+notifiers while an RG semaphore interrupt is being serviced can make the
+ISR walk a changing map or list, or use freed memory.
+
+Use pShareMapLock, an IRQ safe spinlock, for all of it:
+- hold it across the walk in kdispNotifyEvent(), including the event
+  posting; the callbacks on display notifiers (nvkms timers, OS events)
+  only queue work and allocate atomically
+- link and unlink event notification nodes under it; allocation, timer
+  event teardown and freeing stay outside, as does the nonstall event
+  drain in unregisterEventNotificationWithData()
+- clear pNotifier under it in notifyDestruct(), and already at the start
+  of dispapiDestruct(), before pNotifyActions is freed
+
+Share insert/remove already take it, so a share found during the walk
+stays alive until the walk ends.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/src/kernel/gpu/disp/disp_objs.c       | 15 +++++++++++++++
+ src/nvidia/src/kernel/gpu/disp/kern_disp.c       | 16 +++++++++++++++-
+ src/nvidia/src/kernel/rmapi/event_notification.c | 14 ++++++++++++++
+ 3 files changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/src/nvidia/src/kernel/gpu/disp/disp_objs.c b/src/nvidia/src/kernel/gpu/disp/disp_objs.c
+index c55a8f65..e83c2785 100644
+--- a/src/nvidia/src/kernel/gpu/disp/disp_objs.c
++++ b/src/nvidia/src/kernel/gpu/disp/disp_objs.c
+@@ -118,6 +118,21 @@ dispapiDestruct_IMPL
+ )
+ {
+     NvU32 i;
++    NotifShare *pNotifierShare =
++        inotifyGetNotificationShare(staticCast(pDisplayApi, INotifier));
++
++    //
++    // kdispNotifyEvent() can run from the display interrupt without the GPU
++    // lock and uses pNotifyActions of any notifier it finds in the share map.
++    // Detach this notifier under the share map lock before freeing them; the
++    // base Notifier destructor only does that after this destructor ran.
++    //
++    if (pNotifierShare != NULL)
++    {
++        portSyncSpinlockAcquire(g_resServ.pShareMapLock);
++        pNotifierShare->pNotifier = NULL;
++        portSyncSpinlockRelease(g_resServ.pShareMapLock);
++    }
+ 
+     // Free notify actions memory if it's been allocated
+     for (i = 0; i < NV2080_MAX_SUBDEVICES; i++)
+diff --git a/src/nvidia/src/kernel/gpu/disp/kern_disp.c b/src/nvidia/src/kernel/gpu/disp/kern_disp.c
+index 34464444..3ade2a3b 100644
+--- a/src/nvidia/src/kernel/gpu/disp/kern_disp.c
++++ b/src/nvidia/src/kernel/gpu/disp/kern_disp.c
+@@ -1108,7 +1108,19 @@ kdispNotifyEvent_IMPL
+     NvU32             *pNotifyActions;
+     NvU32              disableCmd, singleCmd;
+     NvU32              subDeviceInst;
+-    RS_SHARE_ITERATOR  it = serverutilShareIter(classId(NotifShare));
++    RS_SHARE_ITERATOR  it;
++
++    //
++    // This also runs from the display interrupt without the GPU lock (DISP
++    // stays unblocked while the GPU lock is held with intr mask locking), so
++    // shares, notifiers and their event lists can change underneath it. Hold
++    // the share map lock for the walk: share insert/remove, event list
++    // link/unlink and notifier detach take it as well. Event callbacks run
++    // under it and must not alloc/free shares or (un)register events.
++    //
++    portSyncSpinlockAcquire(g_resServ.pShareMapLock);
++
++    it = serverutilShareIter(classId(NotifShare));
+ 
+     // search notifiers with events hooked up for this gpu
+     while (serverutilShareIterNext(&it))
+@@ -1174,6 +1186,8 @@ kdispNotifyEvent_IMPL
+             pNotifyActions[notifyIndex] = disableCmd;
+         }
+     }
++
++    portSyncSpinlockRelease(g_resServ.pShareMapLock);
+ }
+ 
+ void kdispAcquireLowLatencyLock(PORT_ATOMIC NvS32 * pLowLatencyLock)
+diff --git a/src/nvidia/src/kernel/rmapi/event_notification.c b/src/nvidia/src/kernel/rmapi/event_notification.c
+index 7c24b576..4a18cffa 100644
+--- a/src/nvidia/src/kernel/rmapi/event_notification.c
++++ b/src/nvidia/src/kernel/rmapi/event_notification.c
+@@ -851,8 +851,14 @@ static NV_STATUS _insertEventNotification
+     // Now insert the event into the event chain of this object.
+     // Order doesn't really matter.
+     //
++    // kdispNotifyEvent() walks display notifier event lists from the display
++    // interrupt without the GPU lock, under the share map lock; link and
++    // unlink under it as well.
++    //
++    portSyncSpinlockAcquire(g_resServ.pShareMapLock);
+     EventNotify->Next = *ppEventNotification;
+     *ppEventNotification = EventNotify;
++    portSyncSpinlockRelease(g_resServ.pShareMapLock);
+ 
+     return (NV_OK);
+ }
+@@ -976,6 +982,9 @@ static NV_STATUS _removeEventNotification
+     // check for null list
+     nextEvent = NULL;
+ 
++    // See _insertEventNotification()
++    portSyncSpinlockAcquire(g_resServ.pShareMapLock);
++
+     if (*ppEventNotification != NULL)
+     {
+         // check for head of list
+@@ -1007,6 +1016,8 @@ static NV_STATUS _removeEventNotification
+         }
+     }
+ 
++    portSyncSpinlockRelease(g_resServ.pShareMapLock);
++
+     // delete the event if it was found
+     if (found)
+     {
+@@ -1169,7 +1180,10 @@ void notifyDestruct_IMPL(Notifier* pNotifier)
+     NotifShare *pNotifierShare = inotifyGetNotificationShare(staticCast(pNotifier, INotifier));
+     if (pNotifierShare != NULL)
+     {
++        // kdispNotifyEvent() reads pNotifier under the share map lock
++        portSyncSpinlockAcquire(g_resServ.pShareMapLock);
+         pNotifierShare->pNotifier = NULL;
++        portSyncSpinlockRelease(g_resServ.pShareMapLock);
+         serverFreeShare(&g_resServ, staticCast(pNotifierShare, RsShared));
+     }
+ }

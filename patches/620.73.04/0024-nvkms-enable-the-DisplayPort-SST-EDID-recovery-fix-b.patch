@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Tue, 20 Oct 2026 18:05:07 +0200
+Subject: [PATCH] nvkms: enable the DisplayPort SST EDID recovery fix by
+ default
+
+When a single-stream (SST) EDID read returns a block with a bad checksum,
+EdidAssembler marks the EDID as patched and sstReadEdid() reads it again,
+up to three more times. The flag is only cleared between those re-reads
+when the DP_ENABLE_SST_EDID_RECOVERY_FIX regkey is set, so one corrupted
+block poisons every retry: even a clean re-read stays marked as patched,
+and ConnectorImpl::processNewDevice() replaces it with the DP library's
+fallback EDID (a generic low-resolution mode list with a valid checksum).
+NVKMS accepts that EDID and nvidia-drm reports it to user space.
+
+This shows up on laptop eDP panels whose first EDID read after resume
+can be corrupted: the desktop comes back with the wrong EDID until the
+next successful probe. The same regkey also retries reads with an invalid
+EDID header and keeps the forced/fallback/patched flags with the data in
+Edid::swap().
+
+DP regkeys come from the NVKMS registry keys a client passes at device
+allocation; nvidia-drm passes none, so the fix can't be enabled there.
+Enable it when the key isn't set.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp b/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
+index fa7e823b..ac1ae177 100644
+--- a/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
++++ b/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
+@@ -80,9 +80,20 @@ NvU32 EvoInterface::getRegkeyValue(const char *key)
+ 
+     if (found) {
+         return val;
+-    } else {
+-        return 0;
+     }
++
++    //
++    // NVKMS registry keys only come from clients that pass them at device
++    // allocation (the X driver); nvidia-drm passes none. Without the SST EDID
++    // recovery fix, one corrupted EDID block (e.g. an eDP panel read right
++    // after resume) leaves the EDID marked as patched through every re-read,
++    // and the DP library reports its fallback EDID instead of the panel's.
++    //
++    if (nvkms_strcmp(key, "DP_ENABLE_SST_EDID_RECOVERY_FIX") == 0) {
++        return 1;
++    }
++
++    return 0;
+ }
+ 
+ bool EvoInterface::isInbandStereoSignalingSupported()

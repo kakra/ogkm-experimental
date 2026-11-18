@@ -1,0 +1,276 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tom Englund <tomenglund26@gmail.com>
+Date: Sat, 31 Oct 2026 21:44:23 +0100
+Subject: [PATCH] nvkms: keep the HDMI FRL caps of a sink that isn't ready for
+ link training
+
+When a display wakes up, the probe clears the FRL caps and assesses the link
+again. If the sink isn't ready yet or no SOR can be assigned, the caps stay
+empty, the FRL-only modes leave the mode list, and the compositor can't set its
+mode again until the display is probed again. Reported in upstream PR 1505 on an
+Odyssey G95NC at 7680x2160, where the sink takes a couple of seconds to get
+ready. Failed link training of a modeset also reassesses the link right away
+since "report failed HDMI FRL link training of a modeset", which can empty the
+caps the same way.
+
+Save the caps of each successful link training with the EDID they apply to.
+When an assessment fails and the EDID is the same, go back to them. The HDMI
+library reports success when training failed at every rate, so count that as a
+failure too.
+
+The caps stay in use for the first two failed modesets in a row, as each retry
+gives a slow sink more time. The third one drops them, so that the compositor
+falls back to TMDS on a link that really is dead. A display that is off is
+assessed again on the next query. For a display in use, the link training of its
+next modeset decides.
+
+Also let a retrain request recover the rate of a link that failed training while
+the display is on TMDS. "Don't replace an assessed HDMI FRL rate with the EDID
+rate" made that rate stay at none until the display was probed again.
+
+Unlike the PR, this has no module parameters and doesn't change the 200 ms
+between link training attempts, which is shorter than that sink needs: it would
+take a retry from the compositor there.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../modeset/hdmipacket/nvhdmipkt_C671.c       |  4 +-
+ src/nvidia-modeset/include/nvkms-hdmi.h       |  1 +
+ src/nvidia-modeset/include/nvkms-types.h      | 15 +++
+ src/nvidia-modeset/src/nvkms-dpy.c            | 20 +++-
+ src/nvidia-modeset/src/nvkms-hdmi.c           | 95 +++++++++++++++++--
+ 5 files changed, 125 insertions(+), 10 deletions(-)
+
+diff --git a/src/common/modeset/hdmipacket/nvhdmipkt_C671.c b/src/common/modeset/hdmipacket/nvhdmipkt_C671.c
+index b73149da..1a31fe13 100644
+--- a/src/common/modeset/hdmipacket/nvhdmipkt_C671.c
++++ b/src/common/modeset/hdmipacket/nvhdmipkt_C671.c
+@@ -452,8 +452,10 @@ hdmiAssessLinkCapabilitiesC671(NVHDMIPKT_CLASS          *pThis,
+             pSinkCaps->linkMaxFRLRateDSC = HDMI_FRL_DATA_RATE_NONE;
+             return ret;
+         }
+-    } else if (bAssessedBefore) {
++    } else if (bAssessedBefore && (pSinkCaps->linkMaxFRLRate != HDMI_FRL_DATA_RATE_NONE)) {
+         // Without link training the sink's EDID can't raise what training found before.
++        // A link that failed training entirely is the exception: it may have been the
++        // sink that wasn't ready, and a modeset that fails is reported to the clients.
+         maxFRLRate = NV_MIN(maxFRLRate, (NvU32)pSinkCaps->linkMaxFRLRate);
+     }
+ 
+diff --git a/src/nvidia-modeset/include/nvkms-hdmi.h b/src/nvidia-modeset/include/nvkms-hdmi.h
+index 29a39778..61a5f636 100644
+--- a/src/nvidia-modeset/include/nvkms-hdmi.h
++++ b/src/nvidia-modeset/include/nvkms-hdmi.h
+@@ -70,6 +70,7 @@ NvBool nvInitHdmiLibrary(NVDevEvoRec *pDevEvo);
+ void nvTeardownHdmiLibrary(NVDevEvoRec *pDevEvo);
+ 
+ NvBool nvHdmiFrlAssessLink(NVDpyEvoPtr pDpyEvo);
++NvBool nvHdmiFrlRestoreTrainedCaps(NVDpyEvoPtr pDpyEvo);
+ NvBool nvHdmiDpySupportsFrl(const NVDpyEvoRec *pDpyEvo);
+ NvBool nvHdmiScdcWantsForceFrl(const NVDpyEvoRec *pDpyEvo);
+ void nvHdmiRefreshScdcSrcTestConfig(NVDpyEvoPtr pDpyEvo);
+diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
+index f6517f60..4ffb4252 100644
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -2448,7 +2448,22 @@ typedef struct _NVDpyEvoRec {
+         HDMI_SINK_CAPS sinkCaps;
+         NvBool reassessFrlLinkCaps             : 1;
+         NvU8 scdcSrcTestConfig;
++        /* srcCaps and sinkCaps came from lastTrainedFrl, not an assessment. */
++        NvBool frlCapsRestored                 : 1;
+         NvU8 frlLinkFailures;
++
++        /*
++         * The caps of the last link training that succeeded, and the EDID they
++         * apply to: a sink may not be ready for link training yet when it
++         * wakes up.
++         */
++        struct {
++            NvBool valid;
++            HDMI_SRC_CAPS srcCaps;
++            HDMI_SINK_CAPS sinkCaps;
++            size_t edidLength;
++            NvU8 edid[NVKMS_EDID_BUFFER_SIZE];
++        } lastTrainedFrl;
+     } hdmi;
+ 
+     struct {
+diff --git a/src/nvidia-modeset/src/nvkms-dpy.c b/src/nvidia-modeset/src/nvkms-dpy.c
+index 6581d58b..704c4438 100644
+--- a/src/nvidia-modeset/src/nvkms-dpy.c
++++ b/src/nvidia-modeset/src/nvkms-dpy.c
+@@ -777,6 +777,16 @@ static void ReadAndApplyEdidEvo(
+              * on hotplugs.
+              */
+             nvDpyProbeMaxPixelClock(pDpyEvo);
++        } else if (nvDpyIsHdmiEvo(pDpyEvo) &&
++            nvHdmiDpySupportsFrl(pDpyEvo) &&
++            pDpyEvo->hdmi.frlCapsRestored &&
++            (pDpyEvo->apiHead == NV_INVALID_HEAD)) {
++            /*
++             * The FRL caps are left from an earlier link training because the
++             * link couldn't be assessed. Try again while the display is off;
++             * for a display in use, its next modeset's link training decides.
++             */
++            nvDpyProbeMaxPixelClock(pDpyEvo);
+         } else if (nvDpyIsHdmiEvo(pDpyEvo) &&
+             nvHdmiDpySupportsFrl(pDpyEvo) &&
+             pDpyEvo->hdmi.reassessFrlLinkCaps) {
+@@ -988,11 +998,15 @@ void nvDpyProbeMaxPixelClock(NVDpyEvoPtr pDpyEvo)
+                  * those driving heads, we don't need to exclude RM from
+                  * selecting any SOR, so an sorExcludeMask of 0 is appropriate.
+                  */
+-                if (nvAssignSOREvo(pConnectorEvo,
++                const NvBool frlPossible =
++                    nvAssignSOREvo(pConnectorEvo,
+                                    nvDpyIdToNvU32(pConnectorEvo->displayId),
+                                    FALSE /* b2Heads1Or */,
+-                                   0 /* sorExcludeMask */) &&
+-                    nvHdmiFrlAssessLink(pDpyEvo)) {
++                                   0 /* sorExcludeMask */) ?
++                    nvHdmiFrlAssessLink(pDpyEvo) :
++                    nvHdmiFrlRestoreTrainedCaps(pDpyEvo);
++
++                if (frlPossible) {
+                     /*
+                      * Note that although we "assessed" the link above, the
+                      * maximum pixel clock set here doesn't take that into
+diff --git a/src/nvidia-modeset/src/nvkms-hdmi.c b/src/nvidia-modeset/src/nvkms-hdmi.c
+index 011ffcb2..49ee81d1 100644
+--- a/src/nvidia-modeset/src/nvkms-hdmi.c
++++ b/src/nvidia-modeset/src/nvkms-hdmi.c
+@@ -2329,14 +2329,84 @@ NvBool nvInitHdmiLibrary(NVDevEvoRec *pDevEvo)
+     return TRUE;
+ }
+ 
++/* Failed link trainings of modesets in a row to report to the clients. */
++#define MAX_REPORTED_FRL_LINK_FAILURES 3
++
++static void SaveTrainedFrlCaps(NVDpyEvoPtr pDpyEvo)
++{
++    const NVEdidRec *pEdid = &pDpyEvo->edid;
++
++    pDpyEvo->hdmi.lastTrainedFrl.valid = FALSE;
++
++    if ((pEdid->buffer == NULL) ||
++        (pEdid->length > sizeof(pDpyEvo->hdmi.lastTrainedFrl.edid))) {
++        return;
++    }
++
++    pDpyEvo->hdmi.lastTrainedFrl.srcCaps = pDpyEvo->hdmi.srcCaps;
++    pDpyEvo->hdmi.lastTrainedFrl.sinkCaps = pDpyEvo->hdmi.sinkCaps;
++    pDpyEvo->hdmi.lastTrainedFrl.edidLength = pEdid->length;
++    nvkms_memcpy(pDpyEvo->hdmi.lastTrainedFrl.edid, pEdid->buffer,
++                 pEdid->length);
++    pDpyEvo->hdmi.lastTrainedFrl.valid = TRUE;
++}
++
++/*
++ * Go back to the caps of the last successful link training when the link can't
++ * be assessed. A sink that just woke up may not be ready for link training for
++ * a while, and without FRL caps its FRL-only modes would be gone from the mode
++ * list until the display is probed again.
++ *
++ * The caps stay in use while modesets are failing, because a retry gives a slow
++ * sink more time. Stop after the last failure that is reported, so that clients
++ * can fall back to TMDS on a link that really is dead.
++ *
++ * Returns true if the caps were restored, and false otherwise.
++ */
++NvBool nvHdmiFrlRestoreTrainedCaps(NVDpyEvoPtr pDpyEvo)
++{
++    const NVEdidRec *pEdid = &pDpyEvo->edid;
++    const NvBool wasRestored = pDpyEvo->hdmi.frlCapsRestored;
++
++    pDpyEvo->hdmi.frlCapsRestored = FALSE;
++
++    if (pDpyEvo->hdmi.frlLinkFailures >= MAX_REPORTED_FRL_LINK_FAILURES) {
++        pDpyEvo->hdmi.lastTrainedFrl.valid = FALSE;
++    }
++
++    /* The sink caps come from the EDID, so they only apply to the same EDID. */
++    if (!pDpyEvo->hdmi.lastTrainedFrl.valid ||
++        (pEdid->buffer == NULL) ||
++        (pEdid->length != pDpyEvo->hdmi.lastTrainedFrl.edidLength) ||
++        (nvkms_memcmp(pEdid->buffer, pDpyEvo->hdmi.lastTrainedFrl.edid,
++                      pEdid->length) != 0)) {
++        return FALSE;
++    }
++
++    pDpyEvo->hdmi.srcCaps = pDpyEvo->hdmi.lastTrainedFrl.srcCaps;
++    pDpyEvo->hdmi.sinkCaps = pDpyEvo->hdmi.lastTrainedFrl.sinkCaps;
++    pDpyEvo->hdmi.frlCapsRestored = TRUE;
++
++    if (!wasRestored) {
++        nvEvoLogDisp(pDpyEvo->pDispEvo, EVO_LOG_WARN,
++                     "HDMI FRL link assessment failed, "
++                     "keeping the caps of the last link training.");
++    }
++
++    return TRUE;
++}
++
+ /*
+  * Call the HDMI library to "assess" the link.  This basically does link
+  * training to see what the maximum lane configuration is.  We do this when the
+  * monitor is connected after reading the EDID, so we can validate modes
+  * against the link capabilities.
+  *
+- * Returns true if the link was assessed to be capable of FRL, and false
+- * otherwise.
++ * If that fails, the caps of the last successful link training may be restored,
++ * see nvHdmiFrlRestoreTrainedCaps().
++ *
++ * Returns true if the link was assessed to be capable of FRL or the caps were
++ * restored, and false otherwise.
+  */
+ NvBool nvHdmiFrlAssessLink(NVDpyEvoPtr pDpyEvo)
+ {
+@@ -2380,10 +2450,22 @@ NvBool nvHdmiFrlAssessLink(NVDpyEvoPtr pDpyEvo)
+                                          &pDpyEvo->hdmi.sinkCaps);
+     if (ret != NVHDMIPKT_SUCCESS) {
+         nvAssert(ret == NVHDMIPKT_SUCCESS);
+-        return FALSE;
++        return nvHdmiFrlRestoreTrainedCaps(pDpyEvo);
+     }
+ 
+-    return pDpyEvo->hdmi.sinkCaps.linkMaxFRLRate != HDMI_FRL_DATA_RATE_NONE;
++    if (pDpyEvo->hdmi.sinkCaps.linkMaxFRLRate == HDMI_FRL_DATA_RATE_NONE) {
++        /* The library reports success when training failed at every rate. */
++        return bPerformLinkTrainingToAssess ?
++            nvHdmiFrlRestoreTrainedCaps(pDpyEvo) : FALSE;
++    }
++
++    pDpyEvo->hdmi.frlCapsRestored = FALSE;
++
++    if (bPerformLinkTrainingToAssess) {
++        SaveTrainedFrlCaps(pDpyEvo);
++    }
++
++    return TRUE;
+ }
+ 
+ /*
+@@ -3018,7 +3100,6 @@ static void HandleFrlLinkTrainingResult(NVDispEvoPtr pDispEvo,
+                                         const NVConnectorEvoRec *pConnectorEvo,
+                                         NvBool trained)
+ {
+-    const NvU8 MAX_REPORTED_FAILURES = 3;
+     NVDpyEvoPtr pDpyEvo =
+         nvGetDpyEvoFromDispEvo(pDispEvo, pConnectorEvo->displayId);
+ 
+@@ -3028,10 +3109,12 @@ static void HandleFrlLinkTrainingResult(NVDispEvoPtr pDispEvo,
+ 
+     if (trained) {
+         pDpyEvo->hdmi.frlLinkFailures = 0;
++        /* Training at the mode's rate confirms restored caps well enough. */
++        pDpyEvo->hdmi.frlCapsRestored = FALSE;
+         return;
+     }
+ 
+-    if (pDpyEvo->hdmi.frlLinkFailures >= MAX_REPORTED_FAILURES) {
++    if (pDpyEvo->hdmi.frlLinkFailures >= MAX_REPORTED_FRL_LINK_FAILURES) {
+         return;
+     }
+ 
