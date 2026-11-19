@@ -13,6 +13,7 @@ open questions. Raw data is in `evidence/`.
 | [2026-10-28-vaspace-overlap](2026-10-28-vaspace-overlap.md) | "can't update VA space" at `gpu_vaspace.c:4502` | cause in the user space driver, no kernel fix |
 | [2026-11-07-rm-ro-api-lock](2026-11-07-rm-ro-api-lock.md) | Read-only RM API lock (`RmRoApiLock`), overlap with the series | registry key in use, no regressions so far |
 | [2026-11-18-620.73.04-upstream-changes](2026-11-18-620.73.04-upstream-changes.md) | Upstream changes in 620.73.04 and their effect on the series | upstream review, series rebased, not tested |
+| [2026-11-19-series-review](2026-11-19-series-review.md) | Code review of the 620.73.04 series, its fixes and later changes | built, installed and booted; fixes not tested against their failures |
 
 ## Open findings without an analysis yet
 
