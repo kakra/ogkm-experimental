@@ -5,7 +5,80 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 620.73.04
 
-Fork branch `ogkm/620.73.04`, 145 patches on the upstream tag `620.73.04`.
+Fork branch `ogkm/620.73.04`, 158 patches on the upstream tag `620.73.04`.
+
+### 2026-11-19: review fixes and RT vblank threads (158)
+
+Head `cee76fcb`. Patch numbers in this section are those of the new
+series; the section below uses the numbers at 380b6ba1, which are lower by
+up to seven from patch 4 on.
+
+A read-only review of the series at 380b6ba1 found defects in other
+authors' patches; they are described in
+[analysis/2026-11-19-series-review.md](analysis/2026-11-19-series-review.md).
+Fixes, each directly after the patch it fixes:
+
+- 4: flip events that the 50 ms fallback sends without their vblank are
+  logged (fixes 3).
+- 66: the content type is passed only for connectors that have the
+  property (fixes 65).
+- 112: LFC asks RM whether a flip is pending only until the flip's
+  completion notifier event arrives, instead of an RM control per repeat
+  under `nvkms_lock` (fixes 111).
+- 116: the submit time and raster frame of a flip are written only while
+  it is still queued (fixes 3 and 115).
+- 125: failed FRL link training is forgotten when a modeset doesn't use
+  FRL (fixes 124).
+- 131: at most three link assessments of a display that is off while its
+  FRL caps are restored (fixes 130).
+- 151: the GEM allocation back-off ends when a GEM object is freed,
+  compares the layout, and logs once per window how many allocations it
+  refused (fixes 119 and 120; after 150, whose counters it uses).
+- 155: DMA mappings left on a destroyed VirtualMemory are unmapped and
+  freed, including the kernel and BAR1 P2P mappings of kernel and P2P
+  mappings (fixes 32 and 152).
+- 156 (diagnostic, like 150): unmaps of unregistered DMA mapping ranges
+  are counted as `dma_unmap_unregistered`; server fragments that a
+  partial unmap leaves entirely in released pages are expected and not
+  counted.
+- 157: the code comment of 152 no longer quotes an assertion that does
+  not exist in this release (fixes 152). The description of 152 (145) in
+  the section below quotes the same assertion.
+
+The commit message of 119 now says that the back-off masks the symptom on
+purpose.
+
+From Tom Englund's branch `patches`, rebased onto 620.73.04:
+
+- 55 (fix color pipeline state handling) and 129 (keep the plane ILUT in
+  sync with the CRTC DEGAMMA_LUT): his versions replace the adaptations
+  of the rebase below.
+- 153 (veldenb): an unmap whose start lies in a mapping page already
+  released by an earlier partial unmap unmaps the remainder of the DMA
+  mapping it still covers. Replaces a fix of the review for the same
+  case.
+- 154 (veldenb): an unmap no longer unmaps another resource's DMA mapping
+  that was placed in such a released page.
+
+Own:
+
+- 158: the `nvidia-modeset/kthread_q` thread and the nvidia-drm vblank
+  worker, which deliver vblank callbacks, run at the lowest `SCHED_FIFO`
+  priority, like the compositor threads that wait for them. Before, one
+  flip event was sent after 50 ms without a vblank callback during a
+  parallel build.
+
+`Fixes:` trailers that named commits of an earlier state of the series or
+of Tom Englund's older branches now name the commits of this series.
+
+Built against Linux 7.3.5, installed and booted on 2026-11-19. Four
+minutes after boot the kernel log had no Xid, no NVRM error and no
+message of the new paths, all `/proc/driver/nvidia/vram_pressure`
+counters were 0, and both vblank threads ran as `SCHED_FIFO` priority 1.
+A Cyberpunk 2077 session on an intermediate state with 153 to 156
+([evidence](evidence/2026-11-19-cp77-unmap-counters/)) had 116 failed VA
+space maps with `dma_unmap_unregistered` at 0 and no leftover freed. The
+fixes are not tested against the failures they address.
 
 ### 2026-11-18: move to 620.73.04 (145)
 
