@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Thu, 19 Nov 2026 21:36:37 +0000
+Subject: [PATCH] nvidia-modeset, nvidia-drm: run the vblank delivery threads
+ at low RT priority
+
+Vblank callbacks reach nvidia-drm through the NVKMS kthread queue: RM's
+RG semaphore event schedules an NVKMS timer, the nvidia-modeset/kthread_q
+thread runs it under the NVKMS lock and calls into nvidia-drm. Both that
+thread and the nvidia-drm vblank worker, which enables the callback for the
+first flip after an idle period, are normal tasks with nice 0. On a loaded
+system they compete with everything else, and with a sched_ext scheduler
+such as scx_lavd they are scheduled like any other task.
+
+Compositors already run their commit path at RT priority: KWin, for
+example, uses CAP_SYS_NICE to put its main thread and its per-output
+threads at SCHED_RR 1. The thread that delivers the events those threads
+wait for was the only link in that chain without RT priority.
+
+When the callback comes more than 50 ms late, nvidia-drm sends the flip
+event from its timeout with a timestamp that is not the flip's vblank; one
+such event showed up during a parallel build with all cores busy. Without
+that timeout, a late callback just delays the flip event and shows up as a
+missed frame.
+
+Run both threads at the lowest SCHED_FIFO priority with
+sched_set_fifo_low(), the same level as such compositor threads. RT tasks
+are not handled by sched_ext. Both threads only take locks shared with
+process context (nvkms_lock, the DRM event lock), so waiting for them does
+not change compared to now; they only get on a CPU sooner once they can
+run. NVKMS polls hardware in some timer callbacks with nvkms_yield() and
+short udelay() waits, which no longer lets normal tasks onto that CPU
+meanwhile; the fair and sched_ext deadline servers still leave them their
+share of each period.
+
+Kernels before 5.9 have no sched_set_fifo_low() and keep the old
+behavior.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-drv.c           | 10 ++++++++++
+ kernel-open/nvidia-modeset/nvidia-modeset-linux.c | 14 ++++++++++++++
+ 2 files changed, 24 insertions(+)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-drv.c b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+index 13c79039..a3751afb 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -86,6 +86,8 @@
+ #include <linux/pci.h>
+ #include <linux/workqueue.h>
+ #include <linux/sort.h>
++#include <linux/sched.h>
++#include <linux/version.h>
+ 
+ /*
+  * Commit fcd70cd36b9b ("drm: Split out drm_probe_helper.h")
+@@ -1138,6 +1140,14 @@ static int nv_drm_dev_load(struct drm_device *dev)
+         if (!nv_drm_workthread_init(&nv_dev->vblank_worker, "nvidia-drm-vblank-notification")) {
+             NV_DRM_DEV_LOG_WARN(nv_dev, "Failed to init vblank worker, vblank notification not enabled.");
+         } else {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
++            /*
++             * Enabling vblank callbacks for the first flip after an idle
++             * period goes through this worker; keep it from waiting behind
++             * normal tasks, like the NVKMS queue that delivers them.
++             */
++            sched_set_fifo_low(nv_dev->vblank_worker.q.q_kthread);
++#endif
+ #if defined(NV_DRM_CRTC_FUNCS_HAS_GET_VBLANK_TIMESTAMP)
+             /* See nv_drm_crtc_get_vblank_counter() */
+             dev->max_vblank_count = NV_DRM_RASTER_FRAME_MASK;
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+index 7c6d3676..eb28ebc3 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+@@ -29,6 +29,7 @@
+ #include <linux/vmalloc.h>
+ #include <asm/div64.h> /* do_div() */
+ #include <linux/sched.h>
++#include <linux/version.h>
+ #include <linux/wait.h>
+ #include <linux/random.h>
+ #include <linux/file.h>
+@@ -2235,6 +2236,19 @@ static int __init nvkms_init(void)
+         goto fail_kthread;
+     }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
++    /*
++     * Vblank and flip completion callbacks reach nvidia-drm through this
++     * queue (RM event -> nvkms timer -> this thread). As a normal task it
++     * competes with everything else on a loaded system, and a callback
++     * that is late by more than a frame makes nvidia-drm send the flip
++     * event from its timeout with a stale timestamp. Run it at the lowest
++     * RT priority, like other kernel threads that sit in a latency path;
++     * this also keeps it out of sched_ext schedulers.
++     */
++    sched_set_fifo_low(nvkms_kthread_q.q_kthread);
++#endif
++
+     ret = nv_kthread_q_init(&nvkms_deferred_close_kthread_q,
+                             "nvidia-modeset/deferred_close_kthread_q");
+     if (ret != 0) {

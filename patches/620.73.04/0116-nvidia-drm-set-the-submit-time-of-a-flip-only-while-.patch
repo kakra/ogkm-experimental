@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Thu, 19 Nov 2026 02:31:51 +0000
+Subject: [PATCH] nvidia-drm: set the submit time of a flip only while it is
+ queued
+
+nv_drm_atomic_apply_modeset_config() enqueues each flip and writes its
+submit time, its kick time and, for VRR flips, its raster frame after
+that, right before applyModeSetConfig(), without holding flip_list_lock.
+Once enqueued, the flip can be dequeued and freed by a flip event. Since
+flip_list adds and completes at its head, that event can belong to an
+earlier flip on the same crtc: with a nonblocking flip outstanding, a
+blocking commit (VT switch, fbdev restore, a blocking modeset) enqueues
+its flip without waiting, the outstanding flip's event dequeues the new
+one and frees it, and the commit thread then writes into freed memory.
+The kick time written after applyModeSetConfig() already goes through
+nv_drm_crtc_set_flip_kick_time(), which checks under flip_list_lock that
+the flip is still queued; the writes before it did not.
+
+Do the same for the submit time: nv_drm_crtc_set_flip_submit_time()
+looks the flip up under flip_list_lock and only then reads the raster
+frame and writes the times. The times stay where they were, so the
+bounds the flip events are reported with do not change.
+
+Not reproduced; found by reading the code.
+
+Fixes: 09660582deba ("nvidia-drm: fix vblank timestamp clock and flip event vblank")
+Fixes: 8e2126565af8 ("nvidia-drm: use the raster position register for vblank counts and VRR flips")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-crtc.h    | 29 +++++++++++++++++++++
+ kernel-open/nvidia-drm/nvidia-drm-modeset.c |  8 ++----
+ 2 files changed, 31 insertions(+), 6 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.h b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
+index 2d6008f5..a6f4291a 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
+@@ -559,6 +559,35 @@ void nv_drm_crtc_raster_update_all(struct drm_device *dev);
+ void nv_drm_crtc_set_flip_raster_frame(struct nv_drm_crtc *nv_crtc,
+                                        struct nv_drm_flip *nv_flip);
+ 
++/**
++ * nv_drm_crtc_set_flip_submit_time - Set the submit time (and, for VRR
++ * flips, the raster frame) of a flip that is still in flip_list of crtc.
++ *
++ * Like nv_drm_crtc_set_flip_kick_time(): once enqueued, a flip can be
++ * dequeued and freed by a flip event at any time, also by the event of an
++ * earlier flip on the same crtc, since flip_list completes the newest
++ * entry first. Only touch it while it is still queued.
++ */
++static inline void nv_drm_crtc_set_flip_submit_time(struct nv_drm_crtc *nv_crtc,
++                                                    struct nv_drm_flip *nv_flip,
++                                                    NvU64 submit_time)
++{
++    struct nv_drm_flip *nv_queued_flip;
++
++    spin_lock(&nv_crtc->flip_list_lock);
++    list_for_each_entry(nv_queued_flip, &nv_crtc->flip_list, list_entry) {
++        if (nv_queued_flip == nv_flip) {
++            if (nv_flip->vrr) {
++                nv_drm_crtc_set_flip_raster_frame(nv_crtc, nv_flip);
++            }
++            WRITE_ONCE(nv_flip->kick_time, 0);
++            WRITE_ONCE(nv_flip->submit_time, submit_time);
++            break;
++        }
++    }
++    spin_unlock(&nv_crtc->flip_list_lock);
++}
++
+ void nv_drm_enumerate_crtcs_and_planes(
+     struct nv_drm_device *nv_dev,
+     const struct NvKmsKapiDeviceResourcesInfo *pResInfo);
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-modeset.c b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+index 9fec0716..37b229d7 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-modeset.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+@@ -605,12 +605,8 @@ nv_drm_atomic_apply_modeset_config(struct drm_device *dev,
+         const NvU64 submit_time = ktime_get_ns();
+ 
+         for (i = 0; i < num_submitted_flips; i++) {
+-            if (submitted_flips[i]->vrr) {
+-                nv_drm_crtc_set_flip_raster_frame(submitted_crtcs[i],
+-                                                  submitted_flips[i]);
+-            }
+-            WRITE_ONCE(submitted_flips[i]->kick_time, 0);
+-            WRITE_ONCE(submitted_flips[i]->submit_time, submit_time);
++            nv_drm_crtc_set_flip_submit_time(submitted_crtcs[i],
++                                             submitted_flips[i], submit_time);
+         }
+     }
+ 

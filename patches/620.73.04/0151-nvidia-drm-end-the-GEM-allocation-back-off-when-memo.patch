@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Thu, 19 Nov 2026 02:38:08 +0000
+Subject: [PATCH] nvidia-drm: end the GEM allocation back-off when memory was
+ freed
+
+After a failed GEM allocation, every allocation of the same file that is
+not smaller (and scanout if the failed one was) is refused without asking
+NVKMS until the back-off expires, 100 ms doubling to 2 s. Nothing ends the
+window early when memory is given back, and the layout is not part of the
+comparison: a pitch-linear allocation is refused after a failed
+block-linear one of the same size, although it has other alignment needs.
+KWin allocates all its scanout buffers on one file, so a refusal can hit
+the compositor's next buffer. The refusal returns the same -ENOMEM as a
+real failure and shows up only in the gem_backoff counter.
+
+- Count freed NVKMS GEM objects per device and refuse only while the count
+  is the one seen at the failure, so a freed buffer of any client lets the
+  next attempt through.
+- Compare the layout as well.
+- Count the refusals of a window and log them once, with the next real
+  attempt ("Refused N GEM allocations ... during a X ms back-off"),
+  rate limited together with the other allocation messages. Single
+  refusals stay unlogged on purpose, that flood is what the back-off is
+  for; gem_backoff in /proc/driver/nvidia/vram_pressure keeps counting
+  each of them.
+
+Frees of video memory outside GEM, such as a game's own allocations, are
+not counted; the window then ends on its timer as before.
+
+Fixes: d4c2fcffe7f0 ("nvidia-drm: back off repeated failed GEM allocations of a client")
+Fixes: c2ff185b34e5 ("nvidia-drm: add a switch to the GEM allocation back-off and let it decay")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../nvidia-drm/nvidia-drm-gem-nvkms-memory.c  | 46 ++++++++++++++++---
+ kernel-open/nvidia-drm/nvidia-drm-priv.h      | 10 ++++
+ 2 files changed, 49 insertions(+), 7 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
+index 79b767c8..d9dc5b3b 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-gem-nvkms-memory.c
+@@ -73,6 +73,7 @@ static void __nv_drm_gem_nvkms_memory_free(struct nv_drm_gem_object *nv_gem)
+     /* Free NvKmsKapiMemory handle associated with this gem object */
+ 
+     nvKms->freeMemory(nv_dev->pDevice, nv_nvkms_memory->base.pMemory);
++    atomic_inc(&nv_dev->gem_nvkms_free_count);
+ 
+     nv_drm_free(nv_nvkms_memory);
+ }
+@@ -631,8 +632,10 @@ done:
+ /* Start over after this long past the end of the last back-off */
+ #define NV_DRM_GEM_ALLOC_BACKOFF_RESET_MS 10000
+ 
+-static void nv_drm_gem_alloc_failed(struct nv_drm_file *nv_file,
+-                                    u64 size, bool scanout)
++static void nv_drm_gem_alloc_failed(struct nv_drm_device *nv_dev,
++                                    struct nv_drm_file *nv_file,
++                                    u64 size, bool scanout,
++                                    bool block_linear)
+ {
+     unsigned int delay_ms = nv_file->gem_alloc_fail_delay_ms;
+ 
+@@ -647,18 +650,24 @@ static void nv_drm_gem_alloc_failed(struct nv_drm_file *nv_file,
+ 
+     nv_file->gem_alloc_fail_size = size;
+     nv_file->gem_alloc_fail_scanout = scanout;
++    nv_file->gem_alloc_fail_block_linear = block_linear;
++    nv_file->gem_alloc_fail_free_count =
++        atomic_read(&nv_dev->gem_nvkms_free_count);
+     nv_file->gem_alloc_fail_delay_ms = delay_ms;
+     nv_file->gem_alloc_fail_until = jiffies + msecs_to_jiffies(delay_ms);
+ }
+ 
+ /*
+  * Whether an allocation of size bytes is at least as hard to satisfy as the
+- * last failed one of this file: not smaller, and scanout if that one was.
++ * last failed one of this file: not smaller, of the same layout, and scanout
++ * if that one was.
+  */
+ static bool nv_drm_gem_alloc_covers_failed(const struct nv_drm_file *nv_file,
+-                                           u64 size, bool scanout)
++                                           u64 size, bool scanout,
++                                           bool block_linear)
+ {
+     return size >= nv_file->gem_alloc_fail_size &&
++           block_linear == nv_file->gem_alloc_fail_block_linear &&
+            (scanout || !nv_file->gem_alloc_fail_scanout);
+ }
+ 
+@@ -702,13 +711,34 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+      */
+     if (nv_drm_gem_alloc_backoff_module_param &&
+         nv_file->gem_alloc_fail_size != 0 &&
+-        nv_drm_gem_alloc_covers_failed(nv_file, p->memory_size, scanout) &&
++        nv_drm_gem_alloc_covers_failed(nv_file, p->memory_size, scanout,
++                                       p->block_linear) &&
++        atomic_read(&nv_dev->gem_nvkms_free_count) ==
++            nv_file->gem_alloc_fail_free_count &&
+         time_before(jiffies, nv_file->gem_alloc_fail_until)) {
+         os_vram_pressure_event(NV_VRAM_PRESSURE_GEM_BACKOFF, p->memory_size);
++        nv_file->gem_alloc_backoff_refused++;
+         ret = -ENOMEM;
+         goto failed;
+     }
+ 
++    /*
++     * Refusals are not logged one by one, that is the flood the back-off
++     * avoids. Say once, with the next real attempt, how many there were.
++     */
++    if (nv_file->gem_alloc_backoff_refused != 0) {
++        if (__ratelimit(&log_rs)) {
++            NV_DRM_DEV_LOG_INFO(
++                    nv_dev,
++                    "Refused %u GEM allocations of %s[%d] of at least %" NvU64_fmtu " bytes during a %u ms back-off",
++                    nv_file->gem_alloc_backoff_refused,
++                    current->comm, task_pid_nr(current),
++                    nv_file->gem_alloc_fail_size,
++                    nv_file->gem_alloc_fail_delay_ms);
++        }
++        nv_file->gem_alloc_backoff_refused = 0;
++    }
++
+     if ((nv_nvkms_memory =
+             nv_drm_calloc(1, sizeof(*nv_nvkms_memory))) == NULL) {
+         ret = -ENOMEM;
+@@ -776,7 +806,8 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+                                scanout ? "scanout" : "offscreen",
+                                current->comm, task_pid_nr(current));
+         }
+-        nv_drm_gem_alloc_failed(nv_file, p->memory_size, scanout);
++        nv_drm_gem_alloc_failed(nv_dev, nv_file, p->memory_size, scanout,
++                                p->block_linear);
+         goto nvkms_alloc_memory_failed;
+     }
+ 
+@@ -786,7 +817,8 @@ int nv_drm_gem_alloc_nvkms_memory_ioctl(struct drm_device *dev,
+      * buffer after each failed allocation would otherwise reset it every
+      * time and let every retry through again.
+      */
+-    if (nv_drm_gem_alloc_covers_failed(nv_file, p->memory_size, scanout)) {
++    if (nv_drm_gem_alloc_covers_failed(nv_file, p->memory_size, scanout,
++                                       p->block_linear)) {
+         nv_file->gem_alloc_fail_size = 0;
+         nv_file->gem_alloc_fail_delay_ms = 0;
+     }
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-priv.h b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+index 9ec8157a..36233c22 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-priv.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-priv.h
+@@ -269,6 +269,13 @@ struct nv_drm_device {
+     struct delayed_work held_fbs_work;
+     atomic_t enable_event_handling;
+ 
++    /*
++     * Counts freed NVKMS GEM objects, so that the GEM allocation back-off
++     * of a file ends when memory was given back, see
++     * nv_drm_gem_alloc_nvkms_memory_ioctl().
++     */
++    atomic_t gem_nvkms_free_count;
++
+     /*
+      * Displays with a pending event: the event thread records them here,
+      * nv_drm_publish_display_events() drains the set.  One slot per
+@@ -444,7 +451,10 @@ struct nv_drm_file {
+     u64 gem_alloc_fail_size;
+     unsigned long gem_alloc_fail_until;
+     unsigned int gem_alloc_fail_delay_ms;
++    int gem_alloc_fail_free_count;
+     bool gem_alloc_fail_scanout;
++    bool gem_alloc_fail_block_linear;
++    unsigned int gem_alloc_backoff_refused;
+ };
+ 
+ /* A macro, struct drm_file is not defined in every file including this one */

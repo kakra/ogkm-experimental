@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Thu, 19 Nov 2026 02:39:53 +0000
+Subject: [PATCH] nvidia-drm: log flip events sent without their vblank
+
+A flip whose vblank isn't in the vblank history yet holds its event until
+a vblank callback arrives or a delayed work runs after 50 ms. The work
+then sends the event with the latest handled vblank, however old, or with
+the current time, and nothing records that it happened. If vblank
+callbacks stop coming for any reason, the display is paced by the 50 ms
+timeout from stale timestamps, about 20 fps, with no trace of the cause.
+
+Count the events the timeout sends without a matching vblank and log
+them, at most once per 10 s, with the head. The timestamps stay as they
+are.
+
+Fixes: 09660582deba ("nvidia-drm: fix vblank timestamp clock and flip event vblank")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-crtc.c | 30 ++++++++++++++++++++----
+ 1 file changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-crtc.c b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+index 645d02e9..ed16250f 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -3395,11 +3395,14 @@ static bool __nv_drm_crtc_find_flip_vblank(const struct nv_drm_crtc *nv_crtc,
+ /*
+  * Send the events of pending flips whose vblank has been handled, or of all
+  * pending flips if 'all' (using the latest vblank, or the current time if
+- * none). Called with dev->event_lock held.
++ * none). Returns how many events were sent without their vblank having been
++ * handled. Called with dev->event_lock held.
+  */
+-static void __nv_drm_crtc_process_pending_flip_events(struct nv_drm_crtc *nv_crtc,
+-                                                      bool all)
++static unsigned int __nv_drm_crtc_process_pending_flip_events(struct nv_drm_crtc *nv_crtc,
++                                                              bool all)
+ {
++    unsigned int unmatched = 0;
++
+     struct drm_device *dev = nv_crtc->base.dev;
+     struct nv_drm_flip *nv_flip, *nv_next_flip;
+ 
+@@ -3422,11 +3425,13 @@ static void __nv_drm_crtc_process_pending_flip_events(struct nv_drm_crtc *nv_crt
+                 count = nv_crtc->vblank_history[last].count;
+                 time = nv_crtc->vblank_history[last].time;
+                 found = true;
++                unmatched++;
+             }
+         } else if (all) {
+             count = drm_crtc_vblank_count(&nv_crtc->base);
+             time = ktime_get_ns();
+             found = true;
++            unmatched++;
+         }
+         spin_unlock_irqrestore(&dev->vblank_time_lock, irqflags);
+ 
+@@ -3439,6 +3444,8 @@ static void __nv_drm_crtc_process_pending_flip_events(struct nv_drm_crtc *nv_crt
+         __nv_drm_crtc_send_flip_events_at(nv_crtc, nv_flip, count, time);
+         nv_drm_free(nv_flip);
+     }
++
++    return unmatched;
+ }
+ 
+ /*
+@@ -3541,11 +3548,26 @@ static void nv_drm_crtc_pending_flip_events_work(struct work_struct *work)
+         container_of(to_delayed_work(work), struct nv_drm_crtc,
+                      pending_flip_events_work);
+     struct drm_device *dev = nv_crtc->base.dev;
++    /* A lost vblank callback per frame would otherwise log 20 lines a second */
++    static DEFINE_RATELIMIT_STATE(log_rs, 10 * HZ, 1);
+     unsigned long irqflags;
++    unsigned int unmatched;
+ 
+     spin_lock_irqsave(&dev->event_lock, irqflags);
+-    __nv_drm_crtc_process_pending_flip_events(nv_crtc, true /* all */);
++    unmatched = __nv_drm_crtc_process_pending_flip_events(nv_crtc, true /* all */);
+     spin_unlock_irqrestore(&dev->event_lock, irqflags);
++
++    /*
++     * No vblank callback came for these flips within the timeout, so their
++     * events went out with a timestamp that isn't their vblank's. A display
++     * that keeps hitting this is paced by the timeout, not by its vblanks.
++     */
++    if (unmatched != 0 && __ratelimit(&log_rs)) {
++        NV_DRM_DEV_LOG_INFO(to_nv_device(dev),
++                            "Head %u: sent %u flip event(s) after %u ms without a vblank callback",
++                            nv_crtc->head, unmatched,
++                            NV_DRM_PENDING_FLIP_EVENTS_TIMEOUT_MS);
++    }
+ }
+ 
+ /*

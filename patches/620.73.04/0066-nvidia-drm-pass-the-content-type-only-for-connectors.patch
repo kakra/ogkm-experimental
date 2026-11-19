@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Thu, 19 Nov 2026 02:38:43 +0000
+Subject: [PATCH] nvidia-drm: pass the content type only for connectors that
+ have it
+
+The content type is passed to NVKMS when the device has a content type
+property object, but DRM creates that object for the whole device as soon
+as one connector attaches the property, and nvidia-drm attaches it to HDMI
+connectors only. A connector without the property has a state value of 0,
+"No Data", so every modeset on it sets NVKMS value 1 instead of 0, which
+keeps the NVKMS default ("IT content, graphics"). NVKMS builds the AVI
+InfoFrame for every HDMI display, including one behind a passive DP++
+adapter or a DVI port, where user space cannot set the property. A TV that
+is no longer told it shows IT content may pick a picture mode with more
+video processing and latency.
+
+Remember per connector whether the property was attached and pass the
+content type only for those.
+
+Not confirmed on hardware; found by reading the code.
+
+Fixes: a5e1e257f028 ("nvidia-drm: add the content type connector property")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-drm/nvidia-drm-connector.c | 8 ++++++--
+ kernel-open/nvidia-drm/nvidia-drm-connector.h | 3 +++
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+index d8da3831..a9530884 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -1023,9 +1023,11 @@ __nv_drm_connector_atomic_check(struct drm_connector *connector,
+      * their page flip commits. Pass it with every modeset too, so it also
+      * reaches a display that is newly driven by this CRTC or was recreated
+      * by a hotplug. The DRM values are the NVKMS values minus one (NVKMS 0
+-     * keeps its own default).
++     * keeps its own default). The property object exists for the whole
++     * device once one connector has it; a connector without it, such as an
++     * HDMI sink behind a DP++ adapter, keeps the NVKMS default.
+      */
+-    if ((connector->dev->mode_config.content_type_property != NULL) &&
++    if (to_nv_connector(connector)->has_content_type &&
+         ((old_connector_state->content_type !=
+           new_connector_state->content_type) ||
+          drm_atomic_crtc_needs_modeset(crtc_state))) {
+@@ -1261,6 +1263,8 @@ nv_drm_connector_new(struct drm_device *dev,
+                 nv_dev,
+                 "Failed to attach the content type property to connector created from physical index %u",
+                 nv_connector->physicalIndex);
++        } else {
++            nv_connector->has_content_type = NV_TRUE;
+         }
+ 
+         if (nv_dev->nv_connector_hdmi_vsif_metadata_property) {
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.h b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+index 3ddc63bc..80e5006e 100644
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.h
+@@ -54,6 +54,9 @@ struct nv_drm_connector {
+     NvBool internal;
+     NvKmsConnectorType type;
+ 
++    /* The "content type" property is attached to this connector. */
++    NvBool has_content_type;
++
+     char dpAddress[NVKMS_DP_ADDRESS_STRING_LENGTH];
+ 
+     struct nv_drm_encoder *nv_detected_encoder;

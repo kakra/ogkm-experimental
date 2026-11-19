@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Thu, 19 Nov 2026 02:35:30 +0000
+Subject: [PATCH] nvkms: ask RM whether an LFC flip is pending only while it
+ can be
+
+The LFC repeat timer runs on the NVKMS thread with nvkms_lock held and, for
+every repeat, asks RM whether the main layer channel is idle.
+NVC370_CTRL_CMD_GET_CHANNEL_INFO is routed to GSP and takes the RM API
+write lock and the GPU lock. LFC is on by default and active whenever a
+game runs below the display's minimum refresh rate, so this adds an RM
+round trip under nvkms_lock to every repeat, which is the stall pattern
+other patches remove from the flip path: flips and vblank callbacks of all
+heads wait on nvkms_lock while its holder waits for the RM API lock, which
+system memory allocations hold for milliseconds under memory pressure. A
+late answer also makes the repeat late, and a late repeat is skipped.
+
+The completion notifier event of a main layer flip, which nvidia-drm asks
+for to report its flips, already tells NVKMS that the flip is done. Mark
+the main layer flip pending when LFC is told about it and clear the mark
+when its completion notifier event arrives. Ask RM only while the mark is
+set, and clear it when RM says the channel is idle. Without completion
+notifier events this asks every time, as before.
+
+An event of an earlier flip that arrives after a later flip was submitted
+clears the mark early; with one outstanding flip per crtc, as nvidia-drm
+submits them, that does not happen.
+
+Not measured; the nvkms_vrr_lfc_event probe shows whether repeats are
+still skipped as pending.
+
+Fixes: c09b61298e25 ("nvkms: add low framerate compensation for VRR")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/include/nvkms-types.h |  5 +++++
+ src/nvidia-modeset/include/nvkms-vrr.h   |  2 ++
+ src/nvidia-modeset/src/nvkms-evo.c       |  2 ++
+ src/nvidia-modeset/src/nvkms-vrr.c       | 28 ++++++++++++++++++++++++
+ 4 files changed, 37 insertions(+)
+
+diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
+index 276e7c42..0f8f09d7 100644
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -2120,6 +2120,11 @@ typedef struct _NVVrrLfcState {
+     NvU32 repeatsLeft;
+     NvU32 collisions;
+     NvBool active;
++    /*
++     * A main layer flip was submitted and its completion notifier event
++     * hasn't arrived yet; only then ask RM whether the channel is idle.
++     */
++    NvBool flipPending;
+ } NVVrrLfcState;
+ 
+ typedef struct _NVDispEvoRec {
+diff --git a/src/nvidia-modeset/include/nvkms-vrr.h b/src/nvidia-modeset/include/nvkms-vrr.h
+index 985e298f..672ac859 100644
+--- a/src/nvidia-modeset/include/nvkms-vrr.h
++++ b/src/nvidia-modeset/include/nvkms-vrr.h
+@@ -48,6 +48,8 @@ void nvDisableVrr(NVDispEvoRec *pDispEvo, NVEvoUpdateState *updateState);
+ void nvEnableVrr(NVDispEvoRec *pDispEvo, NVEvoUpdateState *updateState);
+ void nvVrrLfcNotifyFlip(NVDispEvoPtr pDispEvo, const NvU32 apiHead,
+                         const NvBool tearing);
++void nvVrrLfcNotifyFlipOccurred(NVDispEvoPtr pDispEvo, const NvU32 apiHead,
++                                const NvU32 layer);
+ void nvVrrLfcCancel(NVDevEvoPtr pDevEvo);
+ void nvCancelVrrFrameReleaseTimers(NVDevEvoPtr pDevEvo,
+                                    const NvU32 applyAllowVrrApiHeadMask);
+diff --git a/src/nvidia-modeset/src/nvkms-evo.c b/src/nvidia-modeset/src/nvkms-evo.c
+index bcd241f5..a31bd3f8 100644
+--- a/src/nvidia-modeset/src/nvkms-evo.c
++++ b/src/nvidia-modeset/src/nvkms-evo.c
+@@ -4959,6 +4959,8 @@ CompletionNotifierEventDeferredWork(void *dataPtr, NvU32 dataU32)
+ {
+     NVDispFlipOccurredEventDataEvoRec *pEventData = dataPtr;
+ 
++    nvVrrLfcNotifyFlipOccurred(pEventData->pDispEvo, pEventData->apiHead,
++                               pEventData->layer);
+     nvSendFlipOccurredEventEvo(pEventData->pDispEvo, pEventData->apiHead,
+                                pEventData->layer);
+ }
+diff --git a/src/nvidia-modeset/src/nvkms-vrr.c b/src/nvidia-modeset/src/nvkms-vrr.c
+index aa45a0e0..31906b0e 100644
+--- a/src/nvidia-modeset/src/nvkms-vrr.c
++++ b/src/nvidia-modeset/src/nvkms-vrr.c
+@@ -1056,12 +1056,23 @@ static NvBool LfcGetRefreshRange(const NVDispEvoRec *pDispEvo,
+ 
+ /*!
+  * Return whether a flip on the main layer of the apiHead is still pending.
++ *
++ * Asking RM takes the RM API lock and goes to GSP, and this runs with
++ * nvkms_lock held for every repeat. So only ask while the completion
++ * notifier event of the last main layer flip hasn't arrived yet, which for
++ * a frame that is due already happened on the common path. Without such
++ * events (no client asked for them) this asks every time, as before.
+  */
+ static NvBool LfcFlipPending(NVDispEvoPtr pDispEvo, const NvU32 apiHead)
+ {
+     NVDevEvoPtr pDevEvo = pDispEvo->pDevEvo;
++    NVVrrLfcState *pLfc = &pDispEvo->vrr.lfc[apiHead];
+     NvU32 head;
+ 
++    if (!pLfc->flipPending) {
++        return FALSE;
++    }
++
+     FOR_EACH_EVO_HW_HEAD_IN_MASK(pDispEvo->apiHeadState[apiHead].hwHeadsMask, head) {
+         NvBool isIdle = FALSE;
+ 
+@@ -1073,9 +1084,25 @@ static NvBool LfcFlipPending(NVDispEvoPtr pDispEvo, const NvU32 apiHead)
+         }
+     }
+ 
++    pLfc->flipPending = FALSE;
++
+     return FALSE;
+ }
+ 
++/*!
++ * The completion notifier event of a flip arrived: its flip is done.
++ */
++void nvVrrLfcNotifyFlipOccurred(NVDispEvoPtr pDispEvo, const NvU32 apiHead,
++                                const NvU32 layer)
++{
++    if ((layer != NVKMS_MAIN_LAYER) ||
++        (apiHead >= NVKMS_MAX_HEADS_PER_DISP)) {
++        return;
++    }
++
++    pDispEvo->vrr.lfc[apiHead].flipPending = FALSE;
++}
++
+ static void LfcRepeatTimer(void *dataPtr, NvU32 apiHead);
+ 
+ /*!
+@@ -1166,6 +1193,7 @@ void nvVrrLfcNotifyFlip(NVDispEvoPtr pDispEvo, const NvU32 apiHead,
+         ((pLfc->lastFlipUs != 0) && (intervalUs <= NVKMS_VRR_LFC_MAX_FRAME_US)) ?
+             intervalUs : 0;
+     pLfc->lastFlipUs = nowUs;
++    pLfc->flipPending = TRUE;
+ 
+     if (haveRange && (lastRepeatUs != 0)) {
+         if ((nowUs - lastRepeatUs) >= minUs) {

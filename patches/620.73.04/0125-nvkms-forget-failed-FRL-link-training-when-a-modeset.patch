@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Thu, 19 Nov 2026 02:37:02 +0000
+Subject: [PATCH] nvkms: forget failed FRL link training when a modeset doesn't
+ use FRL
+
+The attribute that tells nvidia-drm that the last modeset of an HDMI
+display failed FRL link training reads frlLinkFailures, which only a
+successful FRL link training and a probe of the maximum pixel clock reset.
+A modeset without FRL returns from nvHdmiFrlSetConfig() before either. So
+after one failed training and a working TMDS mode, every later run of
+nvidia-drm's hotplug work, which checks every HDMI connector with a crtc,
+sets link-status BAD on that working connector again: when another
+display wakes up, after every resume, until the sink itself is
+hotplugged. A compositor that honours link-status then sets the mode of
+that output again each time.
+
+Reset frlLinkFailures when a modeset sets up a head without FRL. Retries
+with FRL keep counting, so the limit on reported failures still applies.
+
+No FRL failure was logged on the system this was reviewed on; found by
+reading the code.
+
+Fixes: fff1efbe6e10 ("nvkms, nvidia-drm: report failed HDMI FRL link training of a modeset")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/nvkms-hdmi.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/src/nvidia-modeset/src/nvkms-hdmi.c b/src/nvidia-modeset/src/nvkms-hdmi.c
+index 011ffcb2..5b045278 100644
+--- a/src/nvidia-modeset/src/nvkms-hdmi.c
++++ b/src/nvidia-modeset/src/nvkms-hdmi.c
+@@ -3052,6 +3052,19 @@ void nvHdmiFrlSetConfig(NVDispEvoRec *pDispEvo, NvU32 head)
+     NvBool trained;
+ 
+     if (pFrlConfig->frlRate == HDMI_FRL_DATA_RATE_NONE) {
++        /*
++         * A modeset without FRL has no link training that could fail:
++         * whatever an earlier FRL modeset reported for this display is over.
++         */
++        if (pHeadState->pConnectorEvo != NULL) {
++            NVDpyEvoPtr pDpyEvo =
++                nvGetDpyEvoFromDispEvo(pDispEvo,
++                                       pHeadState->pConnectorEvo->displayId);
++
++            if (pDpyEvo != NULL) {
++                pDpyEvo->hdmi.frlLinkFailures = 0;
++            }
++        }
+         return;
+     }
+ 

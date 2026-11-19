@@ -1,0 +1,132 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Thu, 19 Nov 2026 02:29:26 +0000
+Subject: [PATCH] nvidia: count unmaps of unregistered DMA mapping ranges
+
+Diagnostic commit, not meant for upstream.
+
+An unmap that finds no DMA mapping in its range now returns success, so
+dma_unmap_fail and the ioctl status no longer see it; only the log line
+does. Such an unmap means the resource server and the DMA mapping list
+disagree, which is an occurrence of the VA space problem and not a
+handled case.
+
+Count it as dma_unmap_unregistered in /proc/driver/nvidia/vram_pressure,
+with the requested size, so a sampler sees it next to the other events.
+
+One case is expected: the client side rounds a partial unmap outwards to
+the mapping page size, so a server fragment next to the request can lie
+entirely in released pages, and its later unmap finds nothing. Count such
+fragments per VirtualMemory when the partial unmap creates them, and let
+that many later no-ops through at LEVEL_INFO without counting them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/common/inc/nv-vram-pressure.h    |  2 ++
+ kernel-open/nvidia/nv-procfs.c               |  1 +
+ src/common/sdk/nvidia/inc/nv-vram-pressure.h |  2 ++
+ src/nvidia/generated/g_virtual_mem_nvoc.h    |  1 +
+ src/nvidia/src/kernel/mem_mgr/virtual_mem.c  | 23 ++++++++++++++++++++
+ 5 files changed, 29 insertions(+)
+
+diff --git a/kernel-open/common/inc/nv-vram-pressure.h b/kernel-open/common/inc/nv-vram-pressure.h
+index 8ccd5710..f2e67dd4 100644
+--- a/kernel-open/common/inc/nv-vram-pressure.h
++++ b/kernel-open/common/inc/nv-vram-pressure.h
+@@ -56,6 +56,8 @@ typedef enum
+     NV_VRAM_PRESSURE_GEM_ALLOC_FAIL,
+     /* nvidia-drm: a GEM allocation was refused by the allocation back-off. */
+     NV_VRAM_PRESSURE_GEM_BACKOFF,
++    /* RM: an unmap found no DMA mapping in its range and was ignored. */
++    NV_VRAM_PRESSURE_DMA_UNMAP_UNREGISTERED,
+     NV_VRAM_PRESSURE_EVENT_COUNT
+ } nv_vram_pressure_event_t;
+ 
+diff --git a/kernel-open/nvidia/nv-procfs.c b/kernel-open/nvidia/nv-procfs.c
+index 1a5471ee..6fd38ee2 100644
+--- a/kernel-open/nvidia/nv-procfs.c
++++ b/kernel-open/nvidia/nv-procfs.c
+@@ -259,6 +259,7 @@ static const char * const nv_vram_pressure_names[NV_VRAM_PRESSURE_EVENT_COUNT] =
+     [NV_VRAM_PRESSURE_GEM_SYSMEM_FALLBACK] = "gem_sysmem_fallback",
+     [NV_VRAM_PRESSURE_GEM_ALLOC_FAIL]      = "gem_alloc_fail",
+     [NV_VRAM_PRESSURE_GEM_BACKOFF]         = "gem_backoff",
++    [NV_VRAM_PRESSURE_DMA_UNMAP_UNREGISTERED] = "dma_unmap_unregistered",
+ };
+ 
+ static int
+diff --git a/src/common/sdk/nvidia/inc/nv-vram-pressure.h b/src/common/sdk/nvidia/inc/nv-vram-pressure.h
+index 8ccd5710..f2e67dd4 100644
+--- a/src/common/sdk/nvidia/inc/nv-vram-pressure.h
++++ b/src/common/sdk/nvidia/inc/nv-vram-pressure.h
+@@ -56,6 +56,8 @@ typedef enum
+     NV_VRAM_PRESSURE_GEM_ALLOC_FAIL,
+     /* nvidia-drm: a GEM allocation was refused by the allocation back-off. */
+     NV_VRAM_PRESSURE_GEM_BACKOFF,
++    /* RM: an unmap found no DMA mapping in its range and was ignored. */
++    NV_VRAM_PRESSURE_DMA_UNMAP_UNREGISTERED,
+     NV_VRAM_PRESSURE_EVENT_COUNT
+ } nv_vram_pressure_event_t;
+ 
+diff --git a/src/nvidia/generated/g_virtual_mem_nvoc.h b/src/nvidia/generated/g_virtual_mem_nvoc.h
+index abe05bf6..8697891f 100644
+--- a/src/nvidia/generated/g_virtual_mem_nvoc.h
++++ b/src/nvidia/generated/g_virtual_mem_nvoc.h
+@@ -99,6 +99,7 @@ struct VirtualMemory {
+     NODE devMemoryTableNode;
+     NODE *pDmaMappingList;
+     NvBool bOptimizePageTableMempoolUsage;
++    NvU32 orphanedServerFragments;
+ };
+ 
+ 
+diff --git a/src/nvidia/src/kernel/mem_mgr/virtual_mem.c b/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
+index 3abfed5e..ab5ff400 100644
+--- a/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
++++ b/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
+@@ -38,6 +38,7 @@
+ #include "gpu/bus/p2p_api.h"
+ #include "mem_mgr/gpu_vaspace.h"
+ #include "kernel/rmapi/mapping_list.h"
++#include "nv-vram-pressure.h"
+ 
+ #include "class/cl0070.h" // NV01_MEMORY_VIRTUAL
+ #include "class/cl50a0.h" // NV50_MEMORY_VIRTUAL
+@@ -1810,9 +1811,20 @@ virtmemUnmapFrom_IMPL
+             // inter mapping" / "0 == (pMapNode->gpuMask & gpuMask)" failures
+             // on unrelated mappings.
+             //
++            if (pVirtualMemory->orphanedServerFragments > 0)
++            {
++                // most likely a fragment orphaned by the rounding above
++                pVirtualMemory->orphanedServerFragments--;
++                NV_PRINTF(LEVEL_INFO,
++                          "Unmap of server fragment [0x%llX, 0x%llX) without DMA mapping; ignoring.\n",
++                          dmaOffset, unmapEnd);
++                return NV_OK;
++            }
++
+             NV_PRINTF(LEVEL_ERROR,
+                       "Unmap of unregistered DMA mapping range [0x%llX, 0x%llX); ignoring.\n",
+                       dmaOffset, unmapEnd);
++            os_vram_pressure_event(NV_VRAM_PRESSURE_DMA_UNMAP_UNREGISTERED, pParams->size);
+             return NV_OK;
+         }
+     }
+@@ -1869,6 +1881,17 @@ virtmemUnmapFrom_IMPL
+         if (alignedHi <= alignedLo)
+             return NV_ERR_INVALID_ARGUMENT;
+ 
++        //
++        // A server-side fragment left of or right of the request that lies
++        // entirely in the pages released here has no DMA mapping any more.
++        // Its later unmap is an expected no-op; remember it so that it is
++        // not reported as a mismatch.
++        //
++        if ((dmaOffset > mappedLo) && (alignedLo == mappedLo))
++            pVirtualMemory->orphanedServerFragments++;
++        if ((dmaOffset + unmapSize < mappedHi) && (alignedHi == mappedHi))
++            pVirtualMemory->orphanedServerFragments++;
++
+         dmaOffset = alignedLo;
+         unmapSize = alignedHi - alignedLo;
+ 

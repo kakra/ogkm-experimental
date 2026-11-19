@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Thu, 19 Nov 2026 02:29:49 +0000
+Subject: [PATCH] nvidia: correct the comment on unmaps of unregistered DMA
+ ranges
+
+The comment quotes a gpu_vaspace.c assertion, "0 == (pMapNode->gpuMask &
+gpuMask)", that does not exist in this driver release; a map at a VA that
+is still mapped fails the "range must not already be mapped" check in
+_gvaspaceMappingInsert() instead. It also names the automatic unmap of
+back references as the case the no-op is for, but that path passes a size
+of 0, for which the resource server drops its inter-mapping whether the
+unmap fails or not. A stale inter-mapping is only kept for an unmap with
+an explicit size, which the resource server re-adds on failure.
+
+Describe the remaining no-op case as it is now that a request covering a
+later DMA mapping unmaps that mapping, and say that each occurrence is a
+mismatch to look into.
+
+Fixes: 69a8786f148c ("nvidia: treat an unmap of an unregistered DMA mapping range as a no-op")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/src/kernel/mem_mgr/virtual_mem.c | 18 ++++++++++--------
+ 1 file changed, 10 insertions(+), 8 deletions(-)
+
+diff --git a/src/nvidia/src/kernel/mem_mgr/virtual_mem.c b/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
+index ab5ff400..7e34bbd5 100644
+--- a/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
++++ b/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
+@@ -1802,14 +1802,16 @@ virtmemUnmapFrom_IMPL
+             // Nothing is registered for this range any more.
+             //
+             // This happens when an earlier partial unmap already released
+-            // all pages of the request, or when inter-mapping registration
+-            // failed after the client mapping had been torn down.  Treat the
+-            // unmap as a no-op so that cleanup paths (notably the automatic
+-            // unmapping of back references in rs_client.c) can retire their
+-            // own bookkeeping instead of failing and leaving stale
+-            // inter-mapping nodes behind, which later surface as "Duplicate
+-            // inter mapping" / "0 == (pMapNode->gpuMask & gpuMask)" failures
+-            // on unrelated mappings.
++            // all mapping pages of the request, or when inter-mapping
++            // registration failed after the client mapping had been torn
++            // down.  Treat the unmap as a no-op so that the resource server
++            // can retire its own inter-mapping instead of keeping a stale
++            // node, which a later map at the same dmaOffset would collide
++            // with ("Duplicate inter mapping detected").
++            //
++            // Apart from server fragments that a partial unmap above left
++            // entirely in released pages, each occurrence means the two
++            // lists disagreed; it is logged and counted, not handled.
+             //
+             if (pVirtualMemory->orphanedServerFragments > 0)
+             {

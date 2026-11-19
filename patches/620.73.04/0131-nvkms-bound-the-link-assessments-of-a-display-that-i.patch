@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Thu, 19 Nov 2026 02:36:22 +0000
+Subject: [PATCH] nvkms: bound the link assessments of a display that is off
+
+A display whose FRL caps were restored from its last link training and
+that has no head is assessed again on every EDID read, which every
+connector probe does, so also every hotplug event of any other display
+and every resume. Each assessment is a link training under nvkms_lock,
+during which flips and vblank callbacks of all heads wait. The probe
+resets frlLinkFailures before it assesses, so the limit on reported
+failures that drops the restored caps is never reached on this path: a
+sink that stays in standby with a readable EDID, like a TV that is
+switched off but connected, is trained against on every probe for as
+long as it stays that way.
+
+Count these assessments in a counter of their own and stop after three.
+It starts over when the caps are restored anew and when the sink itself
+is hotplugged, so a sink that wakes up later still gets its tries. After
+that, the restored caps stay until a hotplug of the sink or a modeset
+trains the link, which is what a display in use gets already.
+
+How long an assessment against a sink in standby takes was not measured.
+
+Fixes: 0900425f654d ("nvkms: keep the HDMI FRL caps of a sink that isn't ready for link training")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/include/nvkms-hdmi.h  |  3 +++
+ src/nvidia-modeset/include/nvkms-types.h |  5 +++++
+ src/nvidia-modeset/src/nvkms-dpy.c       | 11 ++++++++++-
+ src/nvidia-modeset/src/nvkms-hdmi.c      |  1 +
+ 4 files changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/src/nvidia-modeset/include/nvkms-hdmi.h b/src/nvidia-modeset/include/nvkms-hdmi.h
+index 61a5f636..b05da260 100644
+--- a/src/nvidia-modeset/include/nvkms-hdmi.h
++++ b/src/nvidia-modeset/include/nvkms-hdmi.h
+@@ -71,6 +71,9 @@ void nvTeardownHdmiLibrary(NVDevEvoRec *pDevEvo);
+ 
+ NvBool nvHdmiFrlAssessLink(NVDpyEvoPtr pDpyEvo);
+ NvBool nvHdmiFrlRestoreTrainedCaps(NVDpyEvoPtr pDpyEvo);
++
++/* Link assessments of a display that is off while its FRL caps are restored. */
++#define MAX_RESTORED_FRL_ASSESSMENTS 3
+ NvBool nvHdmiDpySupportsFrl(const NVDpyEvoRec *pDpyEvo);
+ NvBool nvHdmiScdcWantsForceFrl(const NVDpyEvoRec *pDpyEvo);
+ void nvHdmiRefreshScdcSrcTestConfig(NVDpyEvoPtr pDpyEvo);
+diff --git a/src/nvidia-modeset/include/nvkms-types.h b/src/nvidia-modeset/include/nvkms-types.h
+index 51a4ad7e..cde44f95 100644
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -2456,6 +2456,11 @@ typedef struct _NVDpyEvoRec {
+         /* srcCaps and sinkCaps came from lastTrainedFrl, not an assessment. */
+         NvBool frlCapsRestored                 : 1;
+         NvU8 frlLinkFailures;
++        /*
++         * Link assessments of a display that is off while its caps are
++         * restored, since the caps were restored or the sink was hotplugged.
++         */
++        NvU8 frlRestoredAssessments;
+ 
+         /*
+          * The caps of the last link training that succeeded, and the EDID they
+diff --git a/src/nvidia-modeset/src/nvkms-dpy.c b/src/nvidia-modeset/src/nvkms-dpy.c
+index 704c4438..edb1aef0 100644
+--- a/src/nvidia-modeset/src/nvkms-dpy.c
++++ b/src/nvidia-modeset/src/nvkms-dpy.c
+@@ -776,16 +776,25 @@ static void ReadAndApplyEdidEvo(
+              * Note that this also takes care of HDMI FRL link re-assessment
+              * on hotplugs.
+              */
++            pDpyEvo->hdmi.frlRestoredAssessments = 0;
+             nvDpyProbeMaxPixelClock(pDpyEvo);
+         } else if (nvDpyIsHdmiEvo(pDpyEvo) &&
+             nvHdmiDpySupportsFrl(pDpyEvo) &&
+             pDpyEvo->hdmi.frlCapsRestored &&
+-            (pDpyEvo->apiHead == NV_INVALID_HEAD)) {
++            (pDpyEvo->apiHead == NV_INVALID_HEAD) &&
++            (pDpyEvo->hdmi.frlRestoredAssessments <
++             MAX_RESTORED_FRL_ASSESSMENTS)) {
+             /*
+              * The FRL caps are left from an earlier link training because the
+              * link couldn't be assessed. Try again while the display is off;
+              * for a display in use, its next modeset's link training decides.
++             *
++             * Each try is a link training under nvkms_lock and the probe
++             * resets frlLinkFailures, so bound the tries in a counter of
++             * their own. Once they are used up, the restored caps stay until
++             * the sink is hotplugged or a modeset trains the link.
+              */
++            pDpyEvo->hdmi.frlRestoredAssessments++;
+             nvDpyProbeMaxPixelClock(pDpyEvo);
+         } else if (nvDpyIsHdmiEvo(pDpyEvo) &&
+             nvHdmiDpySupportsFrl(pDpyEvo) &&
+diff --git a/src/nvidia-modeset/src/nvkms-hdmi.c b/src/nvidia-modeset/src/nvkms-hdmi.c
+index c4b9437c..bddb26d2 100644
+--- a/src/nvidia-modeset/src/nvkms-hdmi.c
++++ b/src/nvidia-modeset/src/nvkms-hdmi.c
+@@ -2388,6 +2388,7 @@ NvBool nvHdmiFrlRestoreTrainedCaps(NVDpyEvoPtr pDpyEvo)
+     pDpyEvo->hdmi.frlCapsRestored = TRUE;
+ 
+     if (!wasRestored) {
++        pDpyEvo->hdmi.frlRestoredAssessments = 0;
+         nvEvoLogDisp(pDpyEvo->pDispEvo, EVO_LOG_WARN,
+                      "HDMI FRL link assessment failed, "
+                      "keeping the caps of the last link training.");

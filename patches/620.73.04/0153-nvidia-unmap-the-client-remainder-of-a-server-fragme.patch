@@ -1,0 +1,154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: veldenb <062a2dfa2234@sinenomine.email>
+Date: Wed, 18 Nov 2026 22:48:50 +0100
+Subject: [PATCH] nvidia: unmap the client remainder of a server fragment that
+ starts in a hole
+
+Partial unmaps in virtmemUnmapFrom() round the client side split outwards
+to the mapping page size, while the resource server splits its
+inter-mappings at the exact byte range.  After a sub-page partial unmap of
+[a, b) the server keeps [b, hi) but the client keeps [alignUp(b), hi).
+
+A later unmap of (part of) the server fragment then starts in a page that
+is already gone: intermapGetDmaMapping() finds nothing, the unmap was
+treated as a no-op and the server dropped or shrank its node.  The client
+descriptor, its sub-memdesc and its GPU mapping were leaked, as
+virtmemDestruct does not walk pDmaMappingList.  For video memory the
+leftover mapping can outlive the allocation it maps.
+
+When the start of the request is not registered, look for the descriptor
+that starts at alignUp(dmaOffset, mapPageSize) and unmap its overlap with
+the request.  The request may cover only the start of that descriptor,
+e.g. a page aligned unmap of [10, 12) after a hole [9.5, 10.5) unmaps
+[10.5, 12) on the server and must release [11, 12) of the client
+remainder [11, 16); the partial unmap path then splits off and rounds the
+rest as usual.  A request that matches no such descriptor is still
+ignored.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia/src/kernel/mem_mgr/virtual_mem.c | 97 +++++++++++++++++----
+ 1 file changed, 79 insertions(+), 18 deletions(-)
+
+diff --git a/src/nvidia/src/kernel/mem_mgr/virtual_mem.c b/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
+index 29947f92..51f3742b 100644
+--- a/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
++++ b/src/nvidia/src/kernel/mem_mgr/virtual_mem.c
+@@ -1582,29 +1582,92 @@ virtmemUnmapFrom_IMPL
+         return status;
+ 
+     // Get DMA mapping info.
++    NvU64 unmapSize = pParams->size;
++
+     pDmaMappingInfo = intermapGetDmaMapping(pVirtualMemory, dmaOffset);
+     if (pDmaMappingInfo == NULL)
+     {
++        NvU64 unmapEnd;
++        PNODE pNode = NULL;
++
++        if (!portSafeAddU64(dmaOffset, unmapSize, &unmapEnd))
++            unmapEnd = NV_U64_MAX;
++
+         //
+-        // Nothing is registered for this range any more.
++        // The start of the request is no longer registered.
+         //
+-        // This happens when an earlier partial unmap already released the
+-        // pages containing the request (the VA space splits at mapping page
+-        // boundaries while the resource server tracks byte ranges), or when
+-        // inter-mapping registration failed after the client mapping had
+-        // been torn down.  Treat the unmap as a no-op so that cleanup paths
+-        // (notably the automatic unmapping of back references in
+-        // rs_client.c) can retire their own bookkeeping instead of failing
+-        // and leaving stale inter-mapping nodes behind, which later surface
+-        // as "Duplicate inter mapping" / "0 == (pMapNode->gpuMask & gpuMask)"
+-        // failures on unrelated mappings.
++        // Partial unmaps below round the client side split outwards to the
++        // mapping page size, while the resource server splits its
++        // inter-mappings at the exact byte range.  After a sub-page partial
++        // unmap of [a, b) the server keeps [b, hi) but the client keeps
++        // [alignUp(b), hi), so a later unmap of the server fragment starts in
++        // a page that is already gone.  Unmap that client remainder instead
++        // of leaking it (virtmemDestruct does not walk pDmaMappingList).
+         //
+-        NV_PRINTF(LEVEL_ERROR,
+-                  "Unmap of unregistered DMA mapping range [0x%llX, 0x%llX); ignoring.\n",
+-                  dmaOffset, dmaOffset + pParams->size);
+-        return NV_OK;
++        // Only accept a descriptor that starts exactly where that rounding
++        // put it.  Anything else, such as a different mapping placed in the
++        // released page, does not belong to the server fragment being
++        // unmapped.
++        //
++        // The request may cover only the start of that descriptor, e.g. a
++        // page aligned unmap of [10, 12) after a hole [9.5, 10.5): the server
++        // unmaps [10.5, 12) of its fragment while the client remainder is
++        // [11, 16).  Unmap the overlap and let the partial unmap path below
++        // split off the rest and round it like any other partial unmap;
++        // skipping it would leave [11, 12) mapped once the server has
++        // forgotten it.
++        //
++        for (btreeEnumStart(dmaOffset, &pNode, pVirtualMemory->pDmaMappingList);
++             pNode != NULL;
++             btreeEnumNext(&pNode, pVirtualMemory->pDmaMappingList))
++        {
++            CLI_DMA_MAPPING_INFO *pCandidate = pNode->Data;
++
++            if ((pCandidate == NULL) || (pCandidate->pMemDesc == NULL))
++                continue;
++
++            if (pCandidate->DmaOffset >= unmapEnd)
++                break;
++
++            if ((pCandidate->mapPageSize != 0) &&
++                (pCandidate->DmaOffset > dmaOffset) &&
++                (pCandidate->DmaOffset == RM_ALIGN_UP(dmaOffset, pCandidate->mapPageSize)))
++            {
++                pDmaMappingInfo = pCandidate;
++                break;
++            }
++        }
++
++        if (pDmaMappingInfo != NULL)
++        {
++            // DmaOffset < unmapEnd is guaranteed by the loop above
++            const NvU64 mappedHi = pDmaMappingInfo->DmaOffset + pDmaMappingInfo->pMemDesc->Size;
++
++            dmaOffset = pDmaMappingInfo->DmaOffset;
++            unmapSize = NV_MIN(unmapEnd, mappedHi) - dmaOffset;
++        }
++        else
++        {
++            //
++            // Nothing is registered for this range any more.
++            //
++            // This happens when an earlier partial unmap already released
++            // all pages of the request, or when inter-mapping registration
++            // failed after the client mapping had been torn down.  Treat the
++            // unmap as a no-op so that cleanup paths (notably the automatic
++            // unmapping of back references in rs_client.c) can retire their
++            // own bookkeeping instead of failing and leaving stale
++            // inter-mapping nodes behind, which later surface as "Duplicate
++            // inter mapping" / "0 == (pMapNode->gpuMask & gpuMask)" failures
++            // on unrelated mappings.
++            //
++            NV_PRINTF(LEVEL_ERROR,
++                      "Unmap of unregistered DMA mapping range [0x%llX, 0x%llX); ignoring.\n",
++                      dmaOffset, unmapEnd);
++            return NV_OK;
++        }
+     }
+-    NvBool bPartialUnmap = dmaOffset != pDmaMappingInfo->DmaOffset || pParams->size != pDmaMappingInfo->pMemDesc->Size;
++    NvBool bPartialUnmap = dmaOffset != pDmaMappingInfo->DmaOffset || unmapSize != pDmaMappingInfo->pMemDesc->Size;
+     NV_ASSERT_OR_RETURN(!bPartialUnmap || !bIsIndirectPeer, NV_ERR_INVALID_ARGUMENT);
+ 
+     //
+@@ -1636,8 +1699,6 @@ virtmemUnmapFrom_IMPL
+     // outwards to the mapping page size, so only the client side DMA mapping
+     // list becomes page aligned.
+     //
+-    NvU64 unmapSize = pParams->size;
+-
+     if (bPartialUnmap && pDmaMappingInfo->mapPageSize != 0)
+     {
+         const NvU64 mapPageSize = pDmaMappingInfo->mapPageSize;
