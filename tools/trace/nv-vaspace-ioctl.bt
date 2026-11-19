@@ -7,7 +7,7 @@
 //
 // Question: who triggers "dmaAllocMapping_GM107: can't update VA space"
 // (_gvaspaceMappingInsert finds an existing mapping node at the target VA:
-// gpu_vaspace.c:4502 in 615.78.08, :4088 in 620.70.06)?
+// gpu_vaspace.c:4502 in 615.78.08, :4088 in 620.70.06 and 620.73.04)?
 //
 // The RM functions themselves cannot be probed (nv-kernel.o has no fentry,
 // "Could not probe notrace function"), and nvidia_unlocked_ioctl is not in
@@ -28,8 +28,9 @@
 // only retags these scalars (no code is generated); user memory is still
 // read through uptr(). delete() returns a bool, assigned to $d to keep it
 // quiet.
-// The escapes and layouts are the same in 615.78.08 and 620.70.06. The log
-// header names the running driver; nv-vaspace-analyze.py refuses others.
+// The escapes and layouts are the same in 615.78.08, 620.70.06 and
+// 620.73.04. The log header names the running driver; nv-vaspace-analyze.py
+// refuses others.
 
 BEGIN
 {

@@ -2,9 +2,10 @@
 """Decode nv-va-trace.bt output and replay a GPU-VA mapping model (original).
 
 Layouts come from the 615.78.08 headers (nvos.h, nv-ioctl.h) and are
-unchanged in 620.70.06; offsets are little-endian x86-64 with the
-NV_ALIGN_BYTES(8) padding made explicit. A log whose "V <version>" line names
-another release is refused: check the headers, then add it to KNOWN_RELEASES.
+unchanged in 620.70.06 and 620.73.04; offsets are little-endian x86-64
+with the NV_ALIGN_BYTES(8) padding made explicit. A log whose "V <version>"
+line names another release is refused: check the headers, then add it to
+KNOWN_RELEASES.
 The model is an observer's reconstruction, not RM state: anything the trace
 cannot see (objects older than the trace, kernel-internal frees) is reported
 as UNKNOWN rather than guessed.
@@ -77,7 +78,7 @@ def nvos47(b):  # RM_UNMAP_MEMORY_DMA
 
 
 # Driver releases whose escapes and parameter blocks match the decoders below.
-KNOWN_RELEASES = ('615.78.08', '620.70.06')
+KNOWN_RELEASES = ('615.78.08', '620.70.06', '620.73.04')
 
 ESCAPES = {
     0x27: ('ALLOC_MEMORY', {48: nvos02, 56: nvos02}),

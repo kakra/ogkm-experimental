@@ -13,7 +13,7 @@ import re
 import sys
 
 # Driver releases whose NVOS46/NVOS47 layouts match the tracer offsets.
-KNOWN_RELEASES = ('615.78.08', '620.70.06')
+KNOWN_RELEASES = ('615.78.08', '620.70.06', '620.73.04')
 KV = re.compile(r'(\w+)=(\S+)')
 PAGE = 0xfff
 

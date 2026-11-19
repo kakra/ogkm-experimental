@@ -11,7 +11,8 @@ OUT=${1:-./nv-sysmem-fail-$(date +%Y%m%d-%H%M%S).txt}
 EVENTS="nvsys_fail"
 
 # struct nv_alloc_s offsets (pahole -C nv_alloc_s /sys/kernel/btf/nvidia),
-# the same in 615.78.08 and 620.70.06 (with and without the ogkm series):
+# the same in 615.78.08, 620.70.06 and 620.73.04 (with and without the ogkm
+# series):
 #   flags @24 (contig = bit 0), cache_type @28, num_pages @32, order @36
 # nv_alloc_system_pages(nv_state_t *nv, nv_alloc_t *at): at = $arg2
 # Add a release to the case below only after checking the offsets with pahole.
@@ -35,7 +36,7 @@ if [ "$(id -u)" != 0 ]; then
 fi
 version=$(cat /sys/module/nvidia/version 2>/dev/null)
 case "$version" in
-615.78.08 | 620.70.06) ;;
+615.78.08 | 620.70.06 | 620.73.04) ;;
 *)
 	echo "Unknown nvidia driver version '$version': check the struct nv_alloc_s offsets with pahole" >&2
 	exit 1
