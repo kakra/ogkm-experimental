@@ -34,7 +34,10 @@ for the overview.
   after the patch it fixes, with a `Fixes: <12-char hash> ("subject")`
   trailer naming the original commit in its source repository. No `fixup!`
   commits and no folding into other authors' commits. Fixes for own commits
-  are folded in.
+  are folded in. Exception: when a part of another author's patch lands
+  upstream, the rebase onto the new release drops that part from the patch
+  and notes it in the commit message; the separate `Fixes:` commit is for
+  actual bugs in the patch.
 - Report results as measured. Mark hypotheses and unverified effects as such;
   a patch that was only built is "built, not tested".
 

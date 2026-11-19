@@ -8,7 +8,9 @@ This repository lives on the edge on purpose:
   the series. It is rewritten and force-pushed whenever a patch changes:
   corrections to own patches are folded in, fixes to other authors' patches
   are separate commits directly after the patch they fix (with a `Fixes:`
-  trailer). There are no reverts.
+  trailer). A part of another author's patch that landed upstream is
+  dropped from the patch in the rebase onto the new release, with a note in
+  its commit message. There are no reverts.
 - `main` of this repository only moves forward. Every export is a normal
   commit, and the history of `patches/<release>/` is the durable record of
   how the series changed.
