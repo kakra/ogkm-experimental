@@ -12,7 +12,7 @@ evidence README says otherwise. State as of 2026-11-19.
 | Distribution | Gentoo Linux |
 | Kernel | 7.3.5-gentoo with the patch series from [kakra/linux-patches](https://github.com/kakra/linux-patches) (since 2026-11-19, 7.3.4 since 2026-11-12, 7.3.3 since 2026-11-07, 6.18.60 kept as fallback; 6.18.x before), `CONFIG_PREEMPT_LAZY=y`, `CONFIG_HZ=300`, THP `madvise`, `vm.compaction_proactiveness=60` (default 20) |
 | Kernel command line | `mitigations=off nvidia-drm.modeset=1 nvidia-drm.fbdev=1 intel_iommu=on iommu=pt` |
-| Driver | `x11-drivers/nvidia-drivers-620.73.04` (since 2026-11-19, 620.70.06 since 2026-11-05, 615.78.08 before), open kernel modules, built with the series from this repository (`ogkm/620.73.04` at `380b6ba1`) |
+| Driver | `x11-drivers/nvidia-drivers-620.73.04` (since 2026-11-19, 620.70.06 since 2026-11-05, 615.78.08 before), open kernel modules, built with the series from this repository (`ogkm/620.73.04` at `cee76fcb`) |
 | Desktop | KDE Plasma 6.8.2 on Wayland (KWin) |
 | Use | Gaming via Steam/Proton (Vulkan through DXVK/VKD3D-Proton), web browsers, desktop |
 
