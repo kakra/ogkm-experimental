@@ -1,0 +1,11 @@
+# /proc/driver/nvidia/vram_pressure, read 2026-11-19 22:14:01, cumulative since module load 21:07:45
+# event count bytes last_ns now_ns=4031588543991
+vidmem_alloc_fail 4088 120962224128 3842499934605
+sysmem_page_retry 8 108331008 3715030209913
+dma_map_fail 116 1877409792 3836691724903
+dma_unmap_fail 6036 0 3842787797672
+gem_no_compression 0 0 0
+gem_sysmem_fallback 0 0 0
+gem_alloc_fail 0 0 0
+gem_backoff 0 0 0
+dma_unmap_unregistered 0 0 0
