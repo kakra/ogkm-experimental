@@ -1,0 +1,4 @@
+2026-11-19T01:57:50+01:00 host systemd[2194]: Started app-steam-app1091500-30499.scope.
+2026-11-19T02:02:30+01:00 host systemd[2194]: app-steam-app1091500-30499.scope: Consumed 35min 18.596s CPU time over 4min 39.915s wall clock time, 10.9G memory peak, 35.5M memory swap peak.
+2026-11-19T02:06:44+01:00 host systemd[2194]: Started app-steam-app1091500-35695.scope.
+2026-11-19T02:19:23+01:00 host systemd[2194]: app-steam-app1091500-35695.scope: Consumed 1h 19min 15.707s CPU time over 12min 39.520s wall clock time, 9.9G memory peak, 49.2M memory swap peak.

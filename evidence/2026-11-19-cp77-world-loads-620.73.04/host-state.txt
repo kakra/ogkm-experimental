@@ -1,0 +1,18 @@
+7.3.5-gentoo
+NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  620.73.04  Release Build  (portage@localhost)  Do 19. Nov 01:29:49 CET 2026
+
+# nvidia-smi after both sessions (02:28; 3349 MiB at 02:24), game not running
+name, memory.used [MiB], memory.total [MiB], utilization.gpu [%]
+NVIDIA GeForce RTX 3080 Ti, 3409 MiB, 12288 MiB, 0 %
+
+# graphics clients (nvidia-smi process table, command lines shortened)
+kwin_wayland 487MiB
+plasmashell 347MiB
+plasma-keyboard 224MiB
+Xwayland 8MiB
+akonadi_ews_resource 17MiB
+steam 8MiB
+steamwebhelper 74MiB
+steamwebhelper 9MiB
+chrome (GPU process) 906MiB
+discord (GPU process) 60MiB

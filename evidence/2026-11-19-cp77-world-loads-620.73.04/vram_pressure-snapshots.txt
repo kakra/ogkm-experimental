@@ -1,0 +1,35 @@
+# /proc/driver/nvidia/vram_pressure, cumulative since boot (2026-11-19 ~01:36:16).
+# Wall clock times from now_ns; session 1 01:57:50-02:02:30, session 2 02:06:44-02:19:23.
+
+## 2026-11-19 02:06:03 (after session 1)
+# event count bytes last_ns now_ns=1787691875864
+vidmem_alloc_fail 456 11969326592 1573789059659
+sysmem_page_retry 4 341704704 1568560065014
+dma_map_fail 13 519634944 1568609015969
+dma_unmap_fail 683 0 1573972380310
+gem_no_compression 0 0 0
+gem_sysmem_fallback 0 0 0
+gem_alloc_fail 0 0 0
+gem_backoff 0 0 0
+
+## 2026-11-19 02:10:44 (session 2 running)
+# event count bytes last_ns now_ns=2068797609351
+vidmem_alloc_fail 4156 43227734016 2068753144010
+sysmem_page_retry 8 383647744 1934274418572
+dma_map_fail 26 897187840 1965372437758
+dma_unmap_fail 1963 0 2068747239225
+gem_no_compression 0 0 0
+gem_sysmem_fallback 0 0 0
+gem_alloc_fail 0 0 0
+gem_backoff 0 0 0
+
+## 2026-11-19 02:23:54 (after session 2)
+# event count bytes last_ns now_ns=2858036181738
+vidmem_alloc_fail 6144 100144809524 2586973089216
+sysmem_page_retry 8 383647744 1934274418572
+dma_map_fail 163 3576758272 2578076407057
+dma_unmap_fail 5010 0 2587182201771
+gem_no_compression 1 20578304 2586483116314
+gem_sysmem_fallback 1 20578304 2586483130184
+gem_alloc_fail 0 0 0
+gem_backoff 0 0 0
