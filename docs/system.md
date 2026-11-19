@@ -1,7 +1,7 @@
 # Test system
 
 All evidence in this repository was captured on this system unless an
-evidence README says otherwise. State as of 2026-11-12.
+evidence README says otherwise. State as of 2026-11-19.
 
 | Component | Details |
 |---|---|
@@ -10,9 +10,9 @@ evidence README says otherwise. State as of 2026-11-12.
 | RAM | 31 GiB, 31 GiB swap; in daily use memory is heavily fragmented (often no free blocks of order 8 or higher in the Normal zone) |
 | Displays | 2x 3840x2160 via DisplayPort; 2560x2880 via HDMI (LG SDQHD, TMDS); Samsung TV (2020) via HDMI, FRL up to 10G x4, DSC, 4K120 VRR, usually disabled; the newer monitors run with VRR enabled |
 | Distribution | Gentoo Linux |
-| Kernel | 7.3.4-gentoo with the patch series from [kakra/linux-patches](https://github.com/kakra/linux-patches) (since 2026-11-12, 7.3.3 since 2026-11-07, 6.18.60 kept as fallback; 6.18.x before), `CONFIG_PREEMPT_LAZY=y`, `CONFIG_HZ=300`, THP `madvise`, `vm.compaction_proactiveness=60` (default 20) |
+| Kernel | 7.3.5-gentoo with the patch series from [kakra/linux-patches](https://github.com/kakra/linux-patches) (since 2026-11-19, 7.3.4 since 2026-11-12, 7.3.3 since 2026-11-07, 6.18.60 kept as fallback; 6.18.x before), `CONFIG_PREEMPT_LAZY=y`, `CONFIG_HZ=300`, THP `madvise`, `vm.compaction_proactiveness=60` (default 20) |
 | Kernel command line | `mitigations=off nvidia-drm.modeset=1 nvidia-drm.fbdev=1 intel_iommu=on iommu=pt` |
-| Driver | `x11-drivers/nvidia-drivers-620.70.06` (since 2026-11-05, 615.78.08 before), open kernel modules, built with the series from this repository |
+| Driver | `x11-drivers/nvidia-drivers-620.73.04` (since 2026-11-19, 620.70.06 since 2026-11-05, 615.78.08 before), open kernel modules, built with the series from this repository (`ogkm/620.73.04` at `380b6ba1`) |
 | Desktop | KDE Plasma 6.8.2 on Wayland (KWin) |
 | Use | Gaming via Steam/Proton (Vulkan through DXVK/VKD3D-Proton), web browsers, desktop |
 
