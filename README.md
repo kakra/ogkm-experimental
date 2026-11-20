@@ -15,6 +15,11 @@ history and are not updated. The fork branches are force-pushed whenever the
 series changes; the exported patches in this repository are the durable
 history (see [docs/workflow.md](docs/workflow.md)).
 
+The main patch source,
+[gulafaran/open-gpu-kernel-modules](https://github.com/gulafaran/open-gpu-kernel-modules),
+is a community branch maintained by Tom Englund. The patches collected here
+are not meant to be merged upstream as they are.
+
 ## Disclaimer
 
 These patches change a kernel driver. Only use them if you know what you are
