@@ -5,7 +5,29 @@ numbers refer to `patches/<release>/README.md`.
 
 ## 620.73.04
 
-Fork branch `ogkm/620.73.04`, 158 patches on the upstream tag `620.73.04`.
+Fork branch `ogkm/620.73.04`, 160 patches on the upstream tag `620.73.04`.
+
+### 2026-11-20: SST EDID regkey default dropped, MST I2C abort (160)
+
+Head `f1ec5d55`. The numbers are one higher than in the section below
+from patch 25 on, and two higher from patch 105 on.
+
+- 26: the default that 25 (enable the DisplayPort SST EDID recovery fix,
+  Tom Englund) sets for `DP_ENABLE_SST_EDID_RECOVERY_FIX` is removed
+  again (fixes 25). 620.70.06 removed the regkey from the DP library and
+  always takes the fixed path, so the default is never read;
+  `nvdp-evo-interface.cpp` is the same as in 620.73.04 again. Found in
+  [the review of the series](analysis/2026-11-19-series-review.md).
+- 107: the 5 s poll loop of an MST I2C transfer through the opt-in DDC
+  adapters of 106 now stops for a pending signal or the freezer and
+  cancels the request (fixes 106). From a check of an external review,
+  see [analysis/2026-11-20-external-review-check.md](analysis/2026-11-20-external-review-check.md).
+- The commit messages of eleven own patches use the same `Co-Authored-By:`
+  trailer as the others; no code change.
+
+Built against Linux 7.3.5, not tested: 26 removes code that is not
+reached, and the test system has no MST hardware for 107. The installed
+driver stays at cee76fcb.
 
 ### 2026-11-19: review fixes and RT vblank threads (158)
 
