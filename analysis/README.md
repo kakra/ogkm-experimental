@@ -14,6 +14,7 @@ open questions. Raw data is in `evidence/`.
 | [2026-11-07-rm-ro-api-lock](2026-11-07-rm-ro-api-lock.md) | Read-only RM API lock (`RmRoApiLock`), overlap with the series | registry key in use, no regressions so far |
 | [2026-11-18-620.73.04-upstream-changes](2026-11-18-620.73.04-upstream-changes.md) | Upstream changes in 620.73.04 and their effect on the series | upstream review, series rebased, not tested |
 | [2026-11-19-series-review](2026-11-19-series-review.md) | Code review of the 620.73.04 series, its fixes and later changes | built, installed and booted; fixes not tested against their failures |
+| [2026-11-20-external-review-check](2026-11-20-external-review-check.md) | Check of an external diff-only review of the 620.73.04 series against the source | verified at cee76fcb; one known limitation, one hardening (patch 107 at f1ec5d55) |
 
 ## Open findings without an analysis yet
 

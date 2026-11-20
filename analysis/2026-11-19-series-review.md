@@ -5,6 +5,8 @@ A read-only code review of the series at 380b6ba1 (145 patches on
 until the series at cee76fcb (158 patches). Patch numbers below are those of
 the series at cee76fcb; the number at 380b6ba1 is given in parentheses where
 it differs.
+A later check of an external review against the source is in
+[2026-11-20-external-review-check.md](2026-11-20-external-review-check.md).
 
 ## Method
 
@@ -155,7 +157,9 @@ value 0, which was passed as "No Data" instead of keeping the NVKMS default.
   a failed TLB invalidate. The snap in the first hunk is the actual fix. To
   be corrected with the author.
 - 25 (24): the regkey `DP_ENABLE_SST_EDID_RECOVERY_FIX` is no longer read by
-  anything in 620.73.04; the patch has no effect.
+  anything in 620.73.04; the patch has no effect. Changed on 2026-11-20:
+  patch 26 of the series at f1ec5d55 removes the default again, see
+  [HISTORY.md](../HISTORY.md).
 
 ## Changes from the rebase of gulafaran/patches onto 620.73.04
 
