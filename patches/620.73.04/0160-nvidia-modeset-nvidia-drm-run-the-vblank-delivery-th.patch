@@ -71,18 +71,18 @@ index 13c79039..a3751afb 100644
              /* See nv_drm_crtc_get_vblank_counter() */
              dev->max_vblank_count = NV_DRM_RASTER_FRAME_MASK;
 diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-index 7c6d3676..eb28ebc3 100644
+index dcd085b3..3f33654d 100644
 --- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
 +++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-@@ -29,6 +29,7 @@
- #include <linux/vmalloc.h>
+@@ -30,6 +30,7 @@
  #include <asm/div64.h> /* do_div() */
  #include <linux/sched.h>
+ #include <linux/sched/signal.h>
 +#include <linux/version.h>
  #include <linux/wait.h>
  #include <linux/random.h>
  #include <linux/file.h>
-@@ -2235,6 +2236,19 @@ static int __init nvkms_init(void)
+@@ -2241,6 +2242,19 @@ static int __init nvkms_init(void)
          goto fail_kthread;
      }
  

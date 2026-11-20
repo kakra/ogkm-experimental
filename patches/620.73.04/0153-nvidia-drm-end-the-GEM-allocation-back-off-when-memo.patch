@@ -28,8 +28,8 @@ real failure and shows up only in the gem_backoff counter.
 Frees of video memory outside GEM, such as a game's own allocations, are
 not counted; the window then ends on its timer as before.
 
-Fixes: d4c2fcffe7f0 ("nvidia-drm: back off repeated failed GEM allocations of a client")
-Fixes: c2ff185b34e5 ("nvidia-drm: add a switch to the GEM allocation back-off and let it decay")
+Fixes: 318e90d95b87 ("nvidia-drm: back off repeated failed GEM allocations of a client")
+Fixes: b7313f6fa60d ("nvidia-drm: add a switch to the GEM allocation back-off and let it decay")
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../nvidia-drm/nvidia-drm-gem-nvkms-memory.c  | 46 ++++++++++++++++---

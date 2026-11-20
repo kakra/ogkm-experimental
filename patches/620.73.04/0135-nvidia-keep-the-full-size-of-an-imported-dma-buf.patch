@@ -106,7 +106,7 @@ index def32947..ff191234 100644
      /*!
       * Import a semaphore surface allocated elsewhere to NVKMS and return a
 diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
-index d0d5710e..a749fed8 100644
+index f0004054..257d227a 100644
 --- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
 +++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
 @@ -2067,7 +2067,7 @@ static struct NvKmsKapiMemory*

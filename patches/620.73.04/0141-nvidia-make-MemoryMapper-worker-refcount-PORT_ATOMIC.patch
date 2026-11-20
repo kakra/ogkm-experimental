@@ -24,7 +24,7 @@ _Atomic and the builtins backends get volatile.
 Build-tested with clang 23 against Linux 7.3; the changed construct also
 compiles with GCC 16.2.0 under -std=gnu11.
 
-Fixes: 9dc775b78054 ("nvidia: fix MemoryMapper worker refcount race and waiter callback UAF")
+Fixes: 8017b1a30e7e ("nvidia: fix MemoryMapper worker refcount race and waiter callback UAF")
 ---
  src/nvidia/generated/g_mem_mapper_nvoc.h | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)

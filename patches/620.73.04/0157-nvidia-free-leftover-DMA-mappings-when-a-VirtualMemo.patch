@@ -28,8 +28,8 @@ memory object.
 This is a safety net and does not fix any cause; every log line from it
 points to a mismatch elsewhere.
 
-Fixes: 6efca66ef7a2 ("Fix VA space bookkeeping corruption on partial unmaps")
-Fixes: 69a8786f148c ("nvidia: treat an unmap of an unregistered DMA mapping range as a no-op")
+Fixes: 752838ef5032 ("Fix VA space bookkeeping corruption on partial unmaps")
+Fixes: 0eb096761eee ("nvidia: treat an unmap of an unregistered DMA mapping range as a no-op")
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/nvidia/src/kernel/mem_mgr/virtual_mem.c | 113 +++++++++++++++++++-

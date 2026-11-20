@@ -20,7 +20,7 @@ last attempt uses the smallest page size, which is an order-0
 allocation and keeps __GFP_RETRY_MAYFAIL either way; the shadow fault
 buffer clears the flag before its retry to make that explicit.
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 (cherry picked from commit 57486605d761809ed40501b9163c1c6bf47dfd1e)
 ---
  src/nvidia/src/kernel/gpu/mmu/kern_gmmu.c  | 4 +++-

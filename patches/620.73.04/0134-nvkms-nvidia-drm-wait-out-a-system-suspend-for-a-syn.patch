@@ -188,10 +188,10 @@ index 0fa812db..9bf53601 100644
  NvBool nv_aarch64_pfn_is_map_memory(unsigned long pfn);
  #endif
 diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-index 10c361c4..7c6d3676 100644
+index a53e807b..dcd085b3 100644
 --- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
 +++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-@@ -1689,6 +1689,16 @@ void nvkms_unlock_pm_from_kapi(void)
+@@ -1695,6 +1695,16 @@ void nvkms_unlock_pm_from_kapi(void)
   * APIs for locking.
   *************************************************************************/
  
@@ -209,10 +209,10 @@ index 10c361c4..7c6d3676 100644
  {
      up(&nvkms_lock);
 diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-index 614f54ab..ffa7fe89 100644
+index d2d7ca85..9bd7b07e 100644
 --- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
 +++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-@@ -405,6 +405,13 @@ void nvkms_unlock_pm_from_kapi(void);
+@@ -410,6 +410,13 @@ void nvkms_unlock_pm_from_kapi(void);
   * NVKMS state. Only valid in an ioctl from a kernel-space (KAPI) client, which
   * also holds the NVKMS PM lock, so suspend can't run in between.
   */
@@ -283,10 +283,10 @@ index 7c695ebd..06b119e1 100644
      case NVOS_STATUS_SUCCESS:
          if (pCallback) {
 diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-index 614f54ab..ffa7fe89 100644
+index d2d7ca85..9bd7b07e 100644
 --- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
 +++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-@@ -405,6 +405,13 @@ void nvkms_unlock_pm_from_kapi(void);
+@@ -410,6 +410,13 @@ void nvkms_unlock_pm_from_kapi(void);
   * NVKMS state. Only valid in an ioctl from a kernel-space (KAPI) client, which
   * also holds the NVKMS PM lock, so suspend can't run in between.
   */

@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Fri, 20 Nov 2026 09:32:51 +0100
+Subject: [PATCH] nvkms: drop the default for the removed SST EDID recovery
+ regkey
+
+"nvkms: enable the DisplayPort SST EDID recovery fix by default" makes
+EvoInterface::getRegkeyValue() return 1 for
+DP_ENABLE_SST_EDID_RECOVERY_FIX. The DP library no longer reads that
+key: 620.70.06 removed NV_DP_REGKEY_ENABLE_SST_EDID_RECOVERY_FIX and
+bEnableSstEdidRecoveryFix from dp_regkeydatabase.h and from the regkey
+table in dp_evoadapter.cpp, and the three places that checked it now
+always take the fixed path:
+
+- dp_sst_edid.cpp clears the patched checksum flag before every re-read
+- dp_sst_edid.cpp retries a read with an invalid EDID header
+- Edid::swap() in dp_edid.cpp swaps the forced, fallback and patched
+  flags together with the data
+
+The behaviour the patch enabled is the upstream default since 620.70.06,
+and the key is never queried, so the default is dead code. Remove it,
+which restores getRegkeyValue() to its upstream form.
+
+Fixes: 192e8e64bbfb ("nvkms: enable the DisplayPort SST EDID recovery fix by default")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp | 15 ++-------------
+ 1 file changed, 2 insertions(+), 13 deletions(-)
+
+diff --git a/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp b/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
+index ac1ae177..fa7e823b 100644
+--- a/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
++++ b/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
+@@ -80,20 +80,9 @@ NvU32 EvoInterface::getRegkeyValue(const char *key)
+ 
+     if (found) {
+         return val;
++    } else {
++        return 0;
+     }
+-
+-    //
+-    // NVKMS registry keys only come from clients that pass them at device
+-    // allocation (the X driver); nvidia-drm passes none. Without the SST EDID
+-    // recovery fix, one corrupted EDID block (e.g. an eDP panel read right
+-    // after resume) leaves the EDID marked as patched through every re-read,
+-    // and the DP library reports its fallback EDID instead of the panel's.
+-    //
+-    if (nvkms_strcmp(key, "DP_ENABLE_SST_EDID_RECOVERY_FIX") == 0) {
+-        return 1;
+-    }
+-
+-    return 0;
+ }
+ 
+ bool EvoInterface::isInbandStereoSignalingSupported()

@@ -26,7 +26,7 @@ allocators and are not covered by this change.
 "nvidia: don't retry high-order kmalloc in os_alloc_mem()" added,
 with a new NV_KZALLOC_NORETRY().]
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 (cherry picked from commit 819622c556cda388c8c447a7c96d0536f817b896)
 ---
  kernel-open/common/inc/nv-linux.h | 18 ++++++++++++++++++

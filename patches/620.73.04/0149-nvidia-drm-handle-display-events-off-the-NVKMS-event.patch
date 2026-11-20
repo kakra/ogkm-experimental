@@ -788,7 +788,7 @@ index ff191234..ef9e7f25 100644
       * Allocate some unformatted video or system memory of the specified size.
       *
 diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
-index a749fed8..80a8b637 100644
+index 257d227a..c74fd8a5 100644
 --- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
 +++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
 @@ -3802,6 +3802,35 @@ static void SetContentType(
@@ -836,7 +836,7 @@ index a749fed8..80a8b637 100644
              break;
          case NVKMS_EVENT_TYPE_DYNAMIC_DPY_CONNECTED:
              kapiEvent.u.dynamicDisplayConnected.display =
-@@ -4802,6 +4829,7 @@ NvBool nvKmsKapiGetFunctionsTableInternal
+@@ -4807,6 +4834,7 @@ NvBool nvKmsKapiGetFunctionsTableInternal
  
      funcsTable->getStaticDisplayInfo   = GetStaticDisplayInfo;
      funcsTable->getDynamicDisplayInfo  = GetDynamicDisplayInfo;

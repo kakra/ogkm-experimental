@@ -39,7 +39,7 @@ falling back. Each fallback is logged at LEVEL_ERROR, the only level
 release builds print, because the client gets smaller pages than it
 asked for.
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 (cherry picked from commit 673e452ebf4dd73d63e2f4d94a5841d434eaf1cf)
 ---
  src/nvidia/src/kernel/mem_mgr/system_mem.c | 36 ++++++++++++++++++++--

@@ -45,10 +45,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  8 files changed, 402 insertions(+)
 
 diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-index 17b337cf..10c361c4 100644
+index a229cc08..a53e807b 100644
 --- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
 +++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
-@@ -113,6 +113,13 @@ MODULE_PARM_DESC(modeset_changed_heads_only,
+@@ -114,6 +114,13 @@ MODULE_PARM_DESC(modeset_changed_heads_only,
                   "When a DRM commit needs a modeset, only modeset the CRTCs that "
                   "need one and flip the others, instead of modesetting all of them");
  
@@ -62,7 +62,7 @@ index 17b337cf..10c361c4 100644
  /* These parameters are used for fault injection tests.  Normally the defaults
   * should be used. */
  MODULE_PARM_DESC(fail_malloc, "Fail the Nth call to nvkms_alloc");
-@@ -303,6 +310,15 @@ NvBool nvkms_modeset_changed_heads_only(void)
+@@ -304,6 +311,15 @@ NvBool nvkms_modeset_changed_heads_only(void)
      return READ_ONCE(modeset_changed_heads_only);
  }
  
@@ -79,7 +79,7 @@ index 17b337cf..10c361c4 100644
  {
      return debug != 0;
 diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
-index 48ef0249..614f54ab 100644
+index 76c83e8e..d2d7ca85 100644
 --- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
 +++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
 @@ -130,6 +130,19 @@ enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void);
@@ -151,7 +151,7 @@ index d6e1f0ec..985e298f 100644
                                     const NvU32 applyAllowVrrApiHeadMask);
  void nvSetVrrActive(NVDispEvoRec *pDispEvo,
 diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
-index 48ef0249..614f54ab 100644
+index 76c83e8e..d2d7ca85 100644
 --- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
 +++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
 @@ -130,6 +130,19 @@ enum NvKmsDebugForceColorSpace nvkms_debug_force_color_space(void);

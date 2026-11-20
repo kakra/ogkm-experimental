@@ -14,7 +14,7 @@ Also count the delays of the whole message and give up with a timeout
 after 64 of them. The per-transaction limits stay as they are. The
 chunked path only runs when the I2C transfer control has failed.
 
-Fixes: e0bc9ff9616b ("nvidia: fall back to chunked I2C-over-AUX for i2c-dev DP transfers")
+Fixes: 47faad471567 ("nvidia: fall back to chunked I2C-over-AUX for i2c-dev DP transfers")
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/nvidia/arch/nvalloc/unix/src/osapi.c | 13 +++++++++++--

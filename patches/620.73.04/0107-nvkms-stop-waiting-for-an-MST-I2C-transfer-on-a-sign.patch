@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kai Krakow <kai@kaishome.de>
+Date: Fri, 20 Nov 2026 09:19:19 +0100
+Subject: [PATCH] nvkms: stop waiting for an MST I2C transfer on a signal or
+ freeze
+
+MstI2cTransfer() polls a posted remote I2C request every millisecond for
+up to 5 s, outside the NVKMS and PM locks. Its caller is the i2c-dev
+ioctl of a user space tool such as ddcutil, and the loop neither looks
+at pending signals nor at the freezer: a tool killed during a transfer
+to a monitor that doesn't answer stays in the loop for the rest of the
+5 s, and so does a suspend or hibernation that has to freeze it.
+
+Add nvkms_wait_interrupted() to the OS interface, true when a signal is
+pending or the task is being frozen, and leave the loop through the
+existing cancel path when it is; the request is cancelled as after a
+timeout, and the transfer fails with -EIO.
+
+Built, not tested; no MST hardware.
+
+Fixes: 3268063c9e3d ("nvidia-drm: expose opt-in per-connector MST DDC adapters")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel-open/nvidia-modeset/nvidia-modeset-linux.c           | 6 ++++++
+ kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h    | 5 +++++
+ src/nvidia-modeset/kapi/src/nvkms-kapi.c                    | 5 +++++
+ .../os-interface/include/nvidia-modeset-os-interface.h      | 5 +++++
+ 4 files changed, 21 insertions(+)
+
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+index 17b337cf..a229cc08 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-linux.c
+@@ -29,6 +29,7 @@
+ #include <linux/vmalloc.h>
+ #include <asm/div64.h> /* do_div() */
+ #include <linux/sched.h>
++#include <linux/sched/signal.h>
+ #include <linux/wait.h>
+ #include <linux/random.h>
+ #include <linux/file.h>
+@@ -762,6 +763,11 @@ void nvkms_usleep(NvU64 usec)
+     }
+ }
+ 
++NvBool nvkms_wait_interrupted(void)
++{
++    return signal_pending(current) || freezing(current);
++}
++
+ NvU64 nvkms_get_usec(void)
+ {
+     return nv_ktime_get_raw_ns() / NSEC_PER_USEC;
+diff --git a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+index 48ef0249..76c83e8e 100644
+--- a/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
++++ b/kernel-open/nvidia-modeset/nvidia-modeset-os-interface.h
+@@ -155,6 +155,11 @@ size_t nvkms_strlen     (const char *s);
+ int    nvkms_strcmp     (const char *s1,
+                          const char *s2);
+ void   nvkms_usleep     (NvU64 usec);
++/*
++ * Whether the calling task should stop waiting: a signal is pending or the
++ * task is being frozen for suspend or hibernation.
++ */
++NvBool nvkms_wait_interrupted(void);
+ NvU64  nvkms_get_usec   (void);
+ int    nvkms_copyin     (void *kptr,
+                          NvU64 uaddr,
+diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+index b131c0b8..c8e3dfd0 100644
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
+@@ -4692,6 +4692,11 @@ static NvBool MstI2cTransfer(struct NvKmsKapiDevice *device,
+         // Like connector detection, wait outside both NVKMS and PM locks.
+         // Only handles/tokens cross this boundary, never DP object pointers.
+         nvkms_usleep(1000);
++        // A caller in i2c-dev must not hold up a signal or the freezer for
++        // the rest of the 5 s; give up and cancel the request instead.
++        if (nvkms_wait_interrupted()) {
++            break;
++        }
+         if (!nvkms_ioctl_from_kapi(device->pKmsOpen,
+                 NVKMS_IOCTL_MST_I2C_TRANSFER, &params, sizeof(params))) {
+             break;
+diff --git a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+index 48ef0249..76c83e8e 100644
+--- a/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
++++ b/src/nvidia-modeset/os-interface/include/nvidia-modeset-os-interface.h
+@@ -155,6 +155,11 @@ size_t nvkms_strlen     (const char *s);
+ int    nvkms_strcmp     (const char *s1,
+                          const char *s2);
+ void   nvkms_usleep     (NvU64 usec);
++/*
++ * Whether the calling task should stop waiting: a signal is pending or the
++ * task is being frozen for suspend or hibernation.
++ */
++NvBool nvkms_wait_interrupted(void);
+ NvU64  nvkms_get_usec   (void);
+ int    nvkms_copyin     (void *kptr,
+                          NvU64 uaddr,

@@ -16,7 +16,6 @@ Rate limit the three messages of nv_drm_gem_alloc_nvkms_memory_ioctl()
 together (5 per 10 seconds; the kernel reports how many were
 suppressed) and add the command name and PID of the caller.
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../nvidia-drm/nvidia-drm-gem-nvkms-memory.c  | 39 +++++++++++++------

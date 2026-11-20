@@ -34,7 +34,7 @@ so writing it unconditionally could touch freed memory. A dequeued flip
 doesn't need it, its event time bounds the flip.]
 
 Fixes: 09660582deba ("nvidia-drm: fix vblank timestamp clock and flip event vblank")
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  kernel-open/nvidia-drm/nvidia-drm-crtc.c    | 89 ++++++++++++++++-----
  kernel-open/nvidia-drm/nvidia-drm-crtc.h    | 55 ++++++++++++-

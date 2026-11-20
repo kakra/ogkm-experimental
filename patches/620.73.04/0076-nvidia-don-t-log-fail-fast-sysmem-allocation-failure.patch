@@ -17,7 +17,7 @@ allocation. The same goes for the "Allocation failed with big page
 size" message of the client shadow fault buffer. Other errors and the
 final small-page attempts are still reported as before.
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 (cherry picked from commit 4e84cbf322f5423a9e32da4f0267967edc486e4f)
 ---
  src/nvidia/src/kernel/gpu/mem_mgr/mem_desc.c | 10 ++++++++--

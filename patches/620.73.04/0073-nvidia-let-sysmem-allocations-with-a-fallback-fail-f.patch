@@ -29,7 +29,7 @@ __GFP_NORETRY instead of __GFP_RETRY_MAYFAIL for orders above 0.
 Order-0 allocations keep __GFP_RETRY_MAYFAIL. Nothing sets the flag
 yet.
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 (cherry picked from commit dab187ff9575dbe1cc1a9747065dbe8230ac65ca)
 ---
  kernel-open/common/inc/nv-linux.h         | 1 +

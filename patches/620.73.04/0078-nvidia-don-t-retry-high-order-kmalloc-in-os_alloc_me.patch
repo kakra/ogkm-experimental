@@ -18,7 +18,7 @@ and display event handling.
 Use __GFP_NORETRY | __GFP_NOWARN above PAGE_SIZE, like kvmalloc() does.
 Allocations up to PAGE_SIZE keep __GFP_RETRY_MAYFAIL.
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  kernel-open/common/inc/nv-linux.h |  8 ++++++++
  kernel-open/nvidia/os-interface.c | 11 ++++++++++-

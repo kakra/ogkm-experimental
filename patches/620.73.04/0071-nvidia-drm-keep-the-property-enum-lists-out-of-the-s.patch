@@ -16,8 +16,8 @@ output bpc lists that 620.70.06 added.
 
 [Tom Englund: also make the underscan enum list static.]
 
-Fixes: ca779c542007 ("nvidia-drm: add the Broadcast RGB connector property")
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Fixes: afdccd0a88ca ("nvidia-drm: add the Broadcast RGB connector property")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  kernel-open/nvidia-drm/nvidia-drm-drv.c | 16 ++++++++--------
  1 file changed, 8 insertions(+), 8 deletions(-)

@@ -14,7 +14,7 @@ Reserve the pages in the counter with atomic_long_add_return() before
 building the list, give the reservation back on every failure path, and
 only update the node statistics on success.
 
-Fixes: fee9576d16e6 ("nvidia: keep uncached and write-combined sysmem pages uncached in a pool")
+Fixes: 4c58e0896dc2 ("nvidia: keep uncached and write-combined sysmem pages uncached in a pool")
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  kernel-open/nvidia/nv-vm.c | 20 ++++++++++++++++----

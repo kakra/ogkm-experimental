@@ -17,7 +17,7 @@ Describe the remaining no-op case as it is now that a request covering a
 later DMA mapping unmaps that mapping, and say that each occurrence is a
 mismatch to look into.
 
-Fixes: 69a8786f148c ("nvidia: treat an unmap of an unregistered DMA mapping range as a no-op")
+Fixes: 0eb096761eee ("nvidia: treat an unmap of an unregistered DMA mapping range as a no-op")
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/nvidia/src/kernel/mem_mgr/virtual_mem.c | 18 ++++++++++--------

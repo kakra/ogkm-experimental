@@ -829,7 +829,7 @@ index 0090f233..9ab46ac0 100644
      NvBool (*mstI2cTransfer)(struct NvKmsKapiDevice *device,
                               NvKmsKapiDisplay display,
 diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
-index b131c0b8..34af1669 100644
+index c8e3dfd0..a8e244b2 100644
 --- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
 +++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
 @@ -4631,6 +4631,36 @@ failed:
@@ -869,7 +869,7 @@ index b131c0b8..34af1669 100644
  static void UnregisterVblankIntrCallback(
      struct NvKmsKapiDevice *device,
      const NvU32 head,
-@@ -4805,6 +4835,8 @@ NvBool nvKmsKapiGetFunctionsTableInternal
+@@ -4810,6 +4840,8 @@ NvBool nvKmsKapiGetFunctionsTableInternal
  
      funcsTable->getDisplayColorBpc = GetDisplayColorBpc;
  

@@ -29,7 +29,7 @@ submits them, that does not happen.
 Not measured; the nvkms_vrr_lfc_event probe shows whether repeats are
 still skipped as pending.
 
-Fixes: c09b61298e25 ("nvkms: add low framerate compensation for VRR")
+Fixes: 93a9ef62f40b ("nvkms: add low framerate compensation for VRR")
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/nvidia-modeset/include/nvkms-types.h |  5 +++++

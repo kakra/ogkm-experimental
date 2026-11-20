@@ -20,7 +20,7 @@ content type only for those.
 
 Not confirmed on hardware; found by reading the code.
 
-Fixes: a5e1e257f028 ("nvidia-drm: add the content type connector property")
+Fixes: 5cbd792842e5 ("nvidia-drm: add the content type connector property")
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  kernel-open/nvidia-drm/nvidia-drm-connector.c | 8 ++++++--

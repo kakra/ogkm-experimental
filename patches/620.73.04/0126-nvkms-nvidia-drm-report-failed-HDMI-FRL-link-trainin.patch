@@ -201,7 +201,7 @@ index 9ab46ac0..7a83c384 100644
       * Query where a head's raster generator reports its position, see
       * NVKMS_IOCTL_QUERY_HEAD_RASTER. Must be called from a context that can
 diff --git a/src/nvidia-modeset/kapi/src/nvkms-kapi.c b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
-index 34af1669..d0d5710e 100644
+index a8e244b2..f0004054 100644
 --- a/src/nvidia-modeset/kapi/src/nvkms-kapi.c
 +++ b/src/nvidia-modeset/kapi/src/nvkms-kapi.c
 @@ -3857,6 +3857,28 @@ static NvBool GetDisplayColorBpc(
@@ -233,7 +233,7 @@ index 34af1669..d0d5710e 100644
  static NvBool KmsSetMode(
      struct NvKmsKapiDevice *device,
      const struct NvKmsKapiRequestedModeSetConfig *requestedConfig,
-@@ -4834,6 +4856,7 @@ NvBool nvKmsKapiGetFunctionsTableInternal
+@@ -4839,6 +4861,7 @@ NvBool nvKmsKapiGetFunctionsTableInternal
      funcsTable->perfBoost = RmPerfBoost;
  
      funcsTable->getDisplayColorBpc = GetDisplayColorBpc;

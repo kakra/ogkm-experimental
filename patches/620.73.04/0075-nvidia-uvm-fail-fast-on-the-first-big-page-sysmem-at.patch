@@ -28,7 +28,7 @@ ATTR2 bit 24 is unused by the RM headers of this driver version. A
 client that sets it only changes how hard its own allocation is tried. (On 615.78.08 this was
 bit 28, which 620.70.06 uses for NVOS32_ATTR2_SKIP_IOMMU_MAPPING.)
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  kernel-open/common/inc/nv_uvm_types.h      | 2 ++
  kernel-open/nvidia-uvm/uvm_rm_mem.c        | 4 ++++

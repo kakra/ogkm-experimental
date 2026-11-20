@@ -22,7 +22,7 @@ trains the link, which is what a display in use gets already.
 
 How long an assessment against a sink in standby takes was not measured.
 
-Fixes: 0900425f654d ("nvkms: keep the HDMI FRL caps of a sink that isn't ready for link training")
+Fixes: 0c57da887a00 ("nvkms: keep the HDMI FRL caps of a sink that isn't ready for link training")
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/nvidia-modeset/include/nvkms-hdmi.h  |  3 +++

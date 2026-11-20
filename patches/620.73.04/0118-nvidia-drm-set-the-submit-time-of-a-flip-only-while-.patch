@@ -25,7 +25,7 @@ bounds the flip events are reported with do not change.
 Not reproduced; found by reading the code.
 
 Fixes: 09660582deba ("nvidia-drm: fix vblank timestamp clock and flip event vblank")
-Fixes: 8e2126565af8 ("nvidia-drm: use the raster position register for vblank counts and VRR flips")
+Fixes: 6e1050732354 ("nvidia-drm: use the raster position register for vblank counts and VRR flips")
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  kernel-open/nvidia-drm/nvidia-drm-crtc.h    | 29 +++++++++++++++++++++

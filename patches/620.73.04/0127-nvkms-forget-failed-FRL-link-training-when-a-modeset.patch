@@ -21,7 +21,7 @@ with FRL keep counting, so the limit on reported failures still applies.
 No FRL failure was logged on the system this was reviewed on; found by
 reading the code.
 
-Fixes: fff1efbe6e10 ("nvkms, nvidia-drm: report failed HDMI FRL link training of a modeset")
+Fixes: 9f87715da79c ("nvkms, nvidia-drm: report failed HDMI FRL link training of a modeset")
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/nvidia-modeset/src/nvkms-hdmi.c | 13 +++++++++++++
